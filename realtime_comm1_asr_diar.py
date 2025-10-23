@@ -145,14 +145,16 @@ def run(args):
         wav16 = to_int16(buf_f32)
         stamps = get_speech_timestamps(
             wav16, vad_model, sampling_rate=SAMPLE_RATE, return_seconds=True,
-            min_speech_duration_ms=args.vad_min_chunk_ms,
-            min_silence_duration_ms=args.vad_max_silence_ms
+            min_speech_duration_ms=args.vad_min_chunk_ms,  # Consider reducing this
+            min_silence_duration_ms=args.vad_max_silence_ms  # Consider reducing this
         )
         if not stamps:
             # trim runaway buffer
             if len(buf_f32) > SAMPLE_RATE * 30:
                 buf_f32 = buf_f32[-SAMPLE_RATE * 30:]
             return [], buf_f32
+
+        print(f"DEBUG - VAD Stamps: {stamps}")
 
         # Merge stamps that are close (< 400 ms gap) into windows
         merged = []
@@ -166,22 +168,29 @@ def run(args):
                 cur = [s["start"], s["end"]]
         merged.append(tuple(cur))
 
-        # Decide to emit up to the last CLOSED window (not the one still speaking)
-        emit = merged[:-1] if len(merged) > 1 else (
-            [merged[0]] if (time.time() - start_time) > 2.0 and (merged[0][1] - merged[0][0]) >= 1.0 else []
-        )
+        print(f"DEBUG - Merged Windows: {merged}")
+
+        # Emit all windows that are complete
+        emit = []
+        for window in merged:
+            if (time.time() - start_time) > 1.0 and (window[1] - window[0]) >= 0.6:  # Relaxed criteria
+                emit.append(window)
+
+        print(f"DEBUG - Windows to Emit: {emit}")
 
         # Convert to samples and add padding
         out = []
         for (s, e) in emit:
             s_idx = max(0, int((s - PAD_SEC) * SAMPLE_RATE))
             e_idx = min(len(buf_f32), int((e + PAD_SEC) * SAMPLE_RATE))
-            if e_idx - s_idx >= int(0.6 * SAMPLE_RATE):
+            if e_idx - s_idx >= int(0.4 * SAMPLE_RATE):  # Relaxed from 0.6 to 0.4
                 out.append((s_idx, e_idx))
 
-        # Leftover is from the start of last non-emitted window (if any)
-        if merged:
-            keep_from = max(0, int((merged[-1][0] - PAD_SEC) * SAMPLE_RATE))
+        print(f"DEBUG - Final Emitting Chunks: {out}")
+
+        # Keep leftover buffer for the next round of processing
+        if emit:
+            keep_from = max(0, int((emit[-1][1] + PAD_SEC) * SAMPLE_RATE))
             leftover = buf_f32[keep_from:]
         else:
             leftover = buf_f32
@@ -275,18 +284,29 @@ def run(args):
             block = audio_q.get()
             if block is None:
                 break
+
+            # Debug print to see buffer size before adding new block
+            print(f"Buffer length before concat: {len(state.buf)}")
+
             state.buf = np.concatenate([state.buf, block.reshape(-1)])
+
+            # Debug print to see buffer size after adding new block
+            print(f"Buffer length after concat: {len(state.buf)}")
 
             # Cut stable chunks
             spans, leftover = cut_chunks_from_buffer(state.buf)
-            # Emit each span now
+            print(f"Emitting {len(spans)} chunks")
             for (s_idx, e_idx) in spans:
                 chunk = state.buf[s_idx:e_idx]
                 process_chunk(chunk)
+
             state.buf = leftover
             # keep buffer bounded
             if len(state.buf) > SAMPLE_RATE * max_buffer_sec:
                 state.buf = state.buf[-SAMPLE_RATE * max_buffer_sec:]
+
+            # Debug print to see remaining buffer size
+            print(f"Remaining buffer length: {len(state.buf)}")
 
     t_rec = threading.Thread(target=record_thread, daemon=True)
     t_proc = threading.Thread(target=worker_thread, daemon=True)
@@ -306,7 +326,7 @@ def main():
     p.add_argument("--cpu", action="store_true", help="Force CPU for diarization.")
     p.add_argument("--cpu-asr", action="store_true", help="Force CPU for faster-whisper too.")
     p.add_argument("--cpu-threads", type=int, default=8, help="CPU threads for faster-whisper (when --cpu-asr).")
-    p.add_argument("--device-index", type=int, default=None, help="Input device index for sounddevice.")
+    p.add_argument("--device-index", type=int, default=34, help="Input device index for sounddevice.")
     p.add_argument("--whisper-size", type=str, default="medium",
                    choices=["tiny", "base", "small", "medium", "large-v3"])
     p.add_argument("--compute-type", type=str, default="float16",
