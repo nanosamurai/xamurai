@@ -1,0 +1,24 @@
+name: drsynth
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.13.5
+  # GPU stack (Windows / NVIDIA)
+  # Numeric libs w/ wheels so we avoid builds
+  - numpy
+  - scipy
+  # Audio I/O
+  - libsndfile
+  - pip
+  - pip:
+      - pyannote.audio
+      - faster-whisper==1.*
+      - sounddevice
+      - soundfile
+      - omegaconf
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+# pip install torchcodec
+# conda install anaconda::ffmpeg
+# pip install --only-binary=:all: "scikit-learn>=1.6,<1.7"
