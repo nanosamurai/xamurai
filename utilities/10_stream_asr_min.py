@@ -1,4 +1,7 @@
-import time, queue, threading, tempfile
+import time
+import queue
+import threading
+import tempfile
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
@@ -36,62 +39,71 @@ def transcribe_chunk(x: np.ndarray, offset_sec: float):
        Print only segments with start > last_printed (global)."""
     global last_printed
     if x.size < int(0.5*SR): return
+
+    # Write to a temporary file for transcription
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
     sf.write(tmp_path, x, SR, subtype="PCM_16")
-    segs, info = model.transcribe(
-        tmp_path,
-        language=LANG,
-        task="transcribe",
-        beam_size=5,
-        temperature=[0.0, 0.2, 0.4],
-        condition_on_previous_text=False,   # keep strictly incremental
-        vad_filter=True,
-    )
-    for s in segs:
-        st = offset_sec + s.start
-        et = offset_sec + s.end
-        if st > last_printed + 1e-3:
-            print(s.text.strip(), flush=True)
-            last_printed = et
-    try: import os; os.unlink(tmp_path)
-    except: pass
+
+    try:
+        # Transcribe the audio chunk with VAD filter enabled to handle silence better
+        segs, info = model.transcribe(
+            tmp_path,
+            language=LANG,
+            task="transcribe",
+            beam_size=5,
+            temperature=[0.0, 0.2, 0.4],
+            condition_on_previous_text=False,   # keep strictly incremental
+            vad_filter=True,                    # Use VAD filter to avoid hallucinations during silence
+        )
+
+        for s in segs:
+            st = offset_sec + s.start
+            et = offset_sec + s.end
+            if st > last_printed + 1e-3:  # Avoid overlapping outputs
+                print(s.text.strip(), flush=True)
+                last_printed = et
+
+    except Exception as e:
+        print(f"Error during transcription: {str(e)}")
+
+    finally:
+        try:
+            import os
+            os.unlink(tmp_path)  # Clean up the temporary file
+        except Exception as e:
+            print(f"Failed to remove temporary file: {str(e)}")
 
 def main():
     global buf
+
     t_rec = threading.Thread(target=audio_thread, kwargs={"device_index": 34}, daemon=True)
     t_rec.start()
+
     t0 = time.time()
     try:
         while True:
-            # drain audio queue
-            while True:
-                try:
-                    block = q.get_nowait()
-                except queue.Empty:
-                    break
+            # Drain audio queue
+            while not q.empty():
+                block = q.get_nowait()
                 buf = np.concatenate([buf, block.reshape(-1)])
-                # bound buffer to 60 s
-                if len(buf) > 60*SR: buf = buf[-60*SR:]
+                print(f"Buffer length after adding block: {len(buf)}")
 
-            now = time.time()
-            # tick every TICK_SEC
-            if now - t0 >= TICK_SEC:
-                t0 = now
-                # take last WINDOW_SEC (+ small overlap to stabilize)
-                need = int(WINDOW_SEC*SR)
-                if len(buf) >= int(1.0*SR):  # wait for at least 1s of audio
-                    x = buf[-need:] if len(buf) >= need else buf
-                    # compute the logical offset of x in stream time
-                    total_sec = len(buf)/SR
-                    x_offset = max(0.0, total_sec - len(x)/SR)
-                    # prepend small overlap for acoustics (we won’t reprint due to last_printed gate)
-                    ov = int(OVERLAP_SEC*SR)
-                    if len(buf) > len(x) and ov > 0:
-                        x = np.concatenate([buf[-len(x)-ov:-len(x)], x])
-                        x_offset -= OVERLAP_SEC
-                        if x_offset < 0: x_offset = 0.0
-                    transcribe_chunk(x, x_offset)
+                # Process the buffer in smaller chunks to avoid memory issues and ensure continuous transcription
+                chunk_size = int(WINDOW_SEC * SR)
+                while len(buf) >= chunk_size:
+                    chunk = buf[:chunk_size]
+                    buf = buf[chunk_size:]
+                    total_sec = len(chunk) / SR
+
+                    # Add overlap from previous window if needed
+                    ov = int(OVERLAP_SEC * SR)
+                    if len(buf) > 0 and ov > 0:
+                        chunk_with_overlap = np.concatenate([buf[-ov:], chunk])
+                    else:
+                        chunk_with_overlap = chunk
+
+                    transcribe_chunk(chunk_with_overlap, total_sec - WINDOW_SEC)
 
             time.sleep(0.01)
     except KeyboardInterrupt:
