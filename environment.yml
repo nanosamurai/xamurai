@@ -22,3 +22,4 @@ dependencies:
 # pip install torchcodec
 # conda install anaconda::ffmpeg
 # pip install --only-binary=:all: "scikit-learn>=1.6,<1.7"
+# pip install PyAudioWPatch
