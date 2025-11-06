@@ -3,7 +3,7 @@
 # - rolling window (WINDOW/HOP) from mic OR loopback
 # - optional Silero VAD gate per window
 # - pyannote Community-1 diarization on in-memory waveform
-# - finalize speech turns (end before "now - FINALIZE_TAIL")
+# - finalize speech turns per window (end before window_end - FINALIZE_TAIL)
 # - ASR (faster-whisper) per finalized turn (vad_filter=False), word-level
 # - dedupe so finalized turns are transcribed exactly once
 
@@ -32,10 +32,11 @@ OVERLAP_SEC = 0.5            # overlap between consecutive windows
 HOP_SEC = WINDOW_SEC - OVERLAP_SEC
 LANG = None                  # set language explicitly ("cs", "en", ...)
 
-FINALIZE_TAIL_SEC = 0.30     # only emit turns that ended at least this long ago
+FINALIZE_TAIL_SEC = 0.30     # only emit turns that end at least this long before window end
 
 # VAD gate (skip windows with too little speech before running pyannote)
-USE_SILERO_VAD = True
+# Start with False to avoid over-dropping content; turn on later if needed.
+USE_SILERO_VAD = False
 MIN_SPEECH_IN_WINDOW_SEC = 0.35
 VAD_MIN_SPEECH_MS = 350
 VAD_MIN_SILENCE_MS = 250
@@ -54,6 +55,9 @@ base_offset_sec = 0.0
 # key = (round(start*50)/50, round(end*50)/50, speaker)  ~20ms resolution
 emitted_keys = set()
 
+# Optional Silero VAD loaded lazily
+vad_model = None
+get_speech_timestamps = None
 
 # ---------------- Mic Input (optional) ----------------
 def audio_cb(indata, frames, t, status):
@@ -148,9 +152,9 @@ def audio_loopback_thread_pyaudio(name_contains: str | None = None):
                 rmsL = float(np.sqrt(np.mean(L * L)) + 1e-12)
                 rmsR = float(np.sqrt(np.mean(R * R)) + 1e-12)
                 corr = float(np.sum(L * R) / (len(L) * rmsL * rmsR))
-                if corr < 0.2:  # low correlation: pick stronger channel
+                if corr < 0.2:
                     mono = (L if rmsL >= rmsR else R).astype(np.float32)
-                else:           # high correlation: mix
+                else:
                     mono = (0.7 * L + 0.7 * R).astype(np.float32)
             else:
                 mono = x.astype(np.float32)
@@ -202,22 +206,21 @@ assert HF_TOKEN, "Set HF_TOKEN environment variable."
 pipe = Pipeline.from_pretrained("pyannote/speaker-diarization-community-1", token=HF_TOKEN)
 pipe.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
-# Optional Silero VAD
+# Optional Silero VAD (lazy)
 if USE_SILERO_VAD:
-    vad_model, vad_utils = torch.hub.load(
+    _vad_model, _vad_utils = torch.hub.load(
         repo_or_dir="snakers4/silero-vad",
         model="silero_vad",
         force_reload=False,
         onnx=False,
         trust_repo=True,
     )
-    (
-        get_speech_timestamps,
-        save_audio,
-        read_audio,
-        VADIterator,
-        collect_chunks,
-    ) = vad_utils
+    (get_speech_timestamps,
+     save_audio,
+     read_audio,
+     VADIterator,
+     collect_chunks) = _vad_utils
+    vad_model = _vad_model
 
 
 # ---------------- Helpers ----------------
@@ -246,7 +249,7 @@ def diarize_window_in_memory(wave: np.ndarray):
     return segs
 
 
-def asr_text_on_chunk(wave: np.ndarray, abs_offset_sec: float) -> str:
+def asr_text_on_chunk(wave: np.ndarray) -> str:
     """Run ASR on a single speech turn (wave in float32 mono)."""
     if wave.size < int(0.25 * SR):
         return ""
@@ -286,7 +289,8 @@ def maybe_gate_window_with_vad(window: np.ndarray) -> bool:
     # quick RMS prefilter
     if np.sqrt(np.mean(window * window)) < 8e-5:
         return False
-    if not USE_SILERO_VAD:
+
+    if not USE_SILERO_VAD or vad_model is None:
         return True
 
     wav16 = (np.clip(window, -1.0, 1.0) * 32767).astype(np.int16)
@@ -309,13 +313,14 @@ def main():
     global buf, base_offset_sec
 
     # Choose ONE input:
-    # 1) Mic:
+
+    # 1) Mic
     # t_rec = threading.Thread(target=audio_thread, kwargs={"device_index": None}, daemon=True)
 
-    # 2) WASAPI loopback (system audio):
+    # 2) WASAPI loopback (system audio)
     t_rec = threading.Thread(
         target=audio_loopback_thread_pyaudio,
-        kwargs={"name_contains": None},  # or partial device name string
+        kwargs={"name_contains": None},  # or partial device name
         daemon=True,
     )
 
@@ -335,46 +340,37 @@ def main():
             while len(buf) >= WINDOW_SAMPLES:
                 window = buf[:WINDOW_SAMPLES]
                 window_offset = base_offset_sec                   # abs start of this window
-                now_abs = base_offset_sec + len(buf) / SR         # current abs time based on buffer
+                window_end = window_offset + WINDOW_SEC
 
                 if maybe_gate_window_with_vad(window):
                     # ---- Diarize this window ----
                     diar = diarize_window_in_memory(window)
 
-                    # Convert diar segments to absolute times
-                    abs_spans = []
+                    # For each diar segment in this window:
                     for d in diar:
                         s_abs = window_offset + d["start"]
                         e_abs = window_offset + d["end"]
-                        abs_spans.append(
-                            {"start": s_abs, "end": e_abs, "speaker": d["speaker"]}
-                        )
 
-                    # Finalize & ASR only on turns that are safely in the past
-                    for span in abs_spans:
-                        if span["end"] <= (now_abs - FINALIZE_TAIL_SEC):
+                        # Only finalize if it ends sufficiently before this window's end.
+                        # This avoids waiting on far-future audio and keeps things simple.
+                        if e_abs <= window_end - FINALIZE_TAIL_SEC:
                             k = (
-                                round_time(span["start"]),
-                                round_time(span["end"]),
-                                span["speaker"],
+                                round_time(s_abs),
+                                round_time(e_abs),
+                                d["speaker"],
                             )
                             if k in emitted_keys:
                                 continue
 
-                            s_idx = max(
-                                0, int((span["start"] - window_offset) * SR)
-                            )
-                            e_idx = min(
-                                len(window),
-                                int((span["end"] - window_offset) * SR),
-                            )
+                            s_idx = max(0, int(d["start"] * SR))
+                            e_idx = min(len(window), int(d["end"] * SR))
                             if e_idx - s_idx <= int(0.25 * SR):
                                 continue
 
                             wave_chunk = window[s_idx:e_idx]
-                            text = asr_text_on_chunk(wave_chunk, span["start"])
+                            text = asr_text_on_chunk(wave_chunk)
                             if text:
-                                print(f"{span['speaker']}: {text}", flush=True)
+                                print(f"{d['speaker']}: {text}", flush=True)
                                 emitted_keys.add(k)
 
                 # Slide window by HOP; overlap stays in buf
