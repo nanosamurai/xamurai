@@ -5,7 +5,6 @@ import tempfile
 import os
 import numpy as np
 import sounddevice as sd
-import soundcard as sc
 import pyaudiowpatch as pyaudio
 import soundfile as sf
 import torch, torchaudio
@@ -37,69 +36,6 @@ def audio_thread(device_index=None):
         print("🎙️ listening … Ctrl+C to stop")
         while True:
             time.sleep(0.1)
-
-def audio_loopback_thread(speaker_name: str | None = None):
-    # COM init for this thread (Media Foundation)
-    import ctypes
-    COINIT_MULTITHREADED = 0x0
-    DEBUG_DUMP_SEC = 5
-    pre_dump_done = False
-    post_dump_done = False
-    pre_buf = []
-    post_buf = []
-    ctypes.windll.ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
-    try:
-        # pick speaker
-        spk = (next((s for s in sc.all_speakers() if s.name == speaker_name), None)
-               if speaker_name else sc.default_speaker())
-        if spk is None:
-            raise RuntimeError(f"Speaker '{speaker_name}' not found")
-
-        # open recorder requesting a common rate, then read ACTUAL rate from the object
-        req_sr = 48000
-        in_ch = 2
-        block_seconds = 0.128  # ~128 ms is fine; exact divisibility not required
-        in_block = int(req_sr * block_seconds)
-
-        loop_mic = sc.get_microphone(spk.name, include_loopback=True)
-        with loop_mic.recorder(samplerate=req_sr, channels=in_ch, blocksize=in_block) as rec:
-            # IMPORTANT: use the actual rate the device is running at
-            actual_sr = getattr(rec, "samplerate", req_sr)
-            if actual_sr != req_sr:
-                # adjust block to keep ~128 ms chunks
-                in_block = int(actual_sr * block_seconds)
-            print(f"🔁 Loopback from: {spk.name} @ {actual_sr} Hz → resample → {TARGET_SR} Hz")
-
-            # streaming resampler built for the ACTUAL input rate
-            resampler = torchaudio.transforms.Resample(
-                orig_freq=actual_sr, new_freq=TARGET_SR, dtype=torch.float32
-            )
-
-            out_rem = np.zeros(0, dtype=np.float32)
-
-            while True:
-                data = rec.record(numframes=in_block)           # (frames, 2) float32
-                mono = data.mean(axis=1).astype(np.float32)     # downmix
-
-                # resample to 16k
-                x = torch.from_numpy(mono).unsqueeze(0)
-                y = resampler(x).squeeze(0).numpy()             # 1-D float32 @ 16k
-
-                # accumulate to fixed OUT_BLOCK chunks
-                if out_rem.size: y = np.concatenate([out_rem, y])
-                n_full = (y.size // OUT_BLOCK) * OUT_BLOCK
-                if n_full:
-                    for ch in y[:n_full].reshape(-1, OUT_BLOCK):
-                        # one-line live meter (dBFS)
-                        print(f"\r{20*np.log10(np.sqrt(np.mean(ch**2))+1e-12):6.1f} dBFS", end="")
-                        # safety clean
-                        ch = np.clip(np.nan_to_num(ch, nan=0.0, posinf=0.0, neginf=0.0), -1.0, 1.0)
-                        q.put(ch.copy())                          # 2048-sample @ 16k mono float32
-                    out_rem = y[n_full:]
-                else:
-                    out_rem = y
-    finally:
-        ctypes.windll.ole32.CoUninitialize()
 
 def _pick_wasapi_loopback(p: pyaudio.PyAudio, name_contains: str | None = None):
     """Return device info for the default speakers' loopback (or first matching by substring)."""
@@ -175,8 +111,8 @@ def audio_loopback_thread_pyaudio(name_contains: str | None = None):
             if n_full:
                 for ch16 in y[:n_full].reshape(-1, BLOCK):
                     ch16 = np.clip(np.nan_to_num(ch16, nan=0.0, posinf=0.0, neginf=0.0), -1.0, 1.0)
-                    # one-line live meter
-                    print(f"\r{20*np.log10(np.sqrt(np.mean(ch16**2))+1e-12):6.1f} dBFS", end="")
+                    # one-line live meter to check dB levels of the sound:
+                    # print(f"\r{20*np.log10(np.sqrt(np.mean(ch16**2))+1e-12):6.1f} dBFS", end="")
                     q.put(ch16.copy())
                 out_rem = y[n_full:]
             else:
