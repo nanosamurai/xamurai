@@ -2,7 +2,7 @@
 """
 Streaming diarization-first pipeline with WASAPI loopback or mic.
 
-Design (robust & simple):
+Design:
 - Capture audio (loopback or mic) → resample to 16 kHz mono
 - Rolling windows (WINDOW_SEC, HOP_SEC) over stream
 - For each window:
@@ -10,11 +10,12 @@ Design (robust & simple):
     - run pyannote/speaker-diarization-community-1 on in-memory waveform
     - convert segments to absolute times
     - for each segment (>= FINALIZE_MIN_DUR_SEC):
-        - cut from this window
-        - map diar speaker → enrolled name (if match)
+        - cut (with small padding) from this window
+        - map diarization label → enrolled name (if cosine match)
         - run faster-whisper (vad_filter=False)
         - print ONCE using coarse-time dedupe across overlapping windows
-No "stability" heuristics based on now/tail; dedupe handles repeats.
+- Each printed line:
+    [MM:SS.mmm] SpeakerOrAlias: text
 """
 
 import os
@@ -45,7 +46,8 @@ HOP_SEC = WINDOW_SEC - OVERLAP_SEC
 
 LANG = None                   # ASR language ("cs", "en", or None for auto)
 
-FINALIZE_MIN_DUR_SEC = 0.25   # ignore super short segments
+FINALIZE_MIN_DUR_SEC = 0.25   # ignore very short segments
+SEGMENT_PAD_SEC = 0.15        # pad diar segments before ASR (start/end), clamped
 
 # Window-level VAD (optional, for efficiency)
 USE_SILERO_VAD = False
@@ -57,6 +59,9 @@ VAD_MIN_SILENCE_MS = 250
 USE_SPEAKER_ENROLLMENT = True
 ENROLL_DIR = "enrolled_speakers"   # Jason.wav, Alex_1.wav, etc.
 ENROLL_SIM_THRESHOLD = 0.5         # cosine similarity threshold
+
+# Dedupe resolution (seconds)
+KEY_RES = 0.2                      # finer than 0.5 → fewer accidental merges
 
 # Debug toggles
 DEBUG_SEGMENTS = False             # show diar segments per window
@@ -70,12 +75,11 @@ q: "queue.Queue[np.ndarray]" = queue.Queue()
 WINDOW_SAMPLES = int(WINDOW_SEC * SR)
 HOP_SAMPLES = int(HOP_SEC * SR)
 
-# Absolute time (sec) of LEFT edge of `buf`
+# Absolute time (sec) of LEFT edge of buf
 base_offset_sec = 0.0
 
 # Coarse keys to avoid double-printing same content from overlapping windows
 # key = (round(start, KEY_RES), round(end, KEY_RES), label)
-KEY_RES = 0.5  # seconds; tune if needed
 emitted_keys: set[tuple[float, float, str]] = set()
 
 # VAD globals
@@ -85,6 +89,20 @@ get_speech_timestamps = None
 # Enrollment globals
 embedding_infer: EmbeddingInference | None = None
 enrolled_speakers: dict[str, np.ndarray] = {}  # name -> L2 embedding
+
+
+# ===================== UTILS =====================
+
+def round_time(t: float, resolution: float) -> float:
+    return round(t / resolution) * resolution
+
+def format_ts(t: float) -> str:
+    """Format seconds from start as [MM:SS.mmm]."""
+    if t < 0:
+        t = 0.0
+    m = int(t // 60)
+    s = t - 60 * m
+    return f"[{m:02d}:{s:06.3f}]"
 
 
 # ===================== AUDIO INPUT =====================
@@ -245,7 +263,7 @@ if USE_SILERO_VAD:
      collect_chunks) = _vad_utils
     vad_model = _vad_model
 
-# Optional embeddings for speaker enrollment
+# Optional embeddings for enrollment
 if USE_SPEAKER_ENROLLMENT:
     try:
         emb_model = Model.from_pretrained("pyannote/embedding", use_auth_token=HF_TOKEN)
@@ -257,9 +275,6 @@ if USE_SPEAKER_ENROLLMENT:
 
 
 # ===================== HELPERS =====================
-
-def round_time(t: float, resolution: float) -> float:
-    return round(t / resolution) * resolution
 
 def diarize_window_in_memory(wave: np.ndarray):
     """Run Community-1 on in-memory waveform (float32, (T,))."""
@@ -437,7 +452,7 @@ def main():
 
     try:
         while True:
-            # Pull new audio into buffer
+            # 1) Drain audio queue into buffer
             while True:
                 try:
                     block = q.get_nowait()
@@ -445,10 +460,10 @@ def main():
                     break
                 buf = np.concatenate([buf, block.reshape(-1)])
 
-            # Process all complete windows
+            # 2) Process full windows
             while len(buf) >= WINDOW_SAMPLES:
                 window = buf[:WINDOW_SAMPLES]
-                window_offset = base_offset_sec  # absolute time of window start
+                window_offset = base_offset_sec  # absolute start time of window
 
                 if maybe_gate_window_with_vad(window):
                     diar_segs = diarize_window_in_memory(window)
@@ -460,11 +475,11 @@ def main():
                         if dur < FINALIZE_MIN_DUR_SEC:
                             continue
 
-                        # Absolute times
+                        # Absolute times (without padding)
                         s_abs = window_offset + seg_start
                         e_abs = window_offset + seg_end
 
-                        # Coarse key for dedupe across overlapping windows
+                        # Coarse dedupe key
                         key = (
                             round_time(s_abs, KEY_RES),
                             round_time(e_abs, KEY_RES),
@@ -473,23 +488,31 @@ def main():
                         if key in emitted_keys:
                             continue
 
-                        # Cut from this window
-                        s_idx = int(seg_start * SR)
-                        e_idx = int(seg_end * SR)
+                        # Convert to indices with padding
+                        pad = SEGMENT_PAD_SEC
+                        s_pad = max(0.0, seg_start - pad)
+                        e_pad = min(WINDOW_SEC, seg_end + pad)
+
+                        s_idx = int(s_pad * SR)
+                        e_idx = int(e_pad * SR)
                         s_idx = max(0, min(len(window), s_idx))
                         e_idx = max(0, min(len(window), e_idx))
+
                         if e_idx - s_idx < int(FINALIZE_MIN_DUR_SEC * SR):
                             continue
 
                         wave_chunk = window[s_idx:e_idx]
 
+                        # Use original (unpadded) start for display timestamp
+                        ts_str = format_ts(s_abs)
+
                         label = map_speaker_label(d["speaker"], wave_chunk)
                         text = asr_text_on_chunk(wave_chunk)
                         if text:
-                            print(f"{label}: {text}", flush=True)
+                            print(f"{ts_str} {label}: {text}", flush=True)
                             emitted_keys.add(key)
 
-                # Slide by HOP; overlapping part remains
+                # Slide by hop; keep overlap
                 buf = buf[HOP_SAMPLES:]
                 base_offset_sec += HOP_SAMPLES / SR
 
