@@ -2,27 +2,17 @@
 """
 Streaming diarization-first pipeline with WASAPI loopback, mic, or both.
 
-Design:
-- Capture:
-    - system audio via WASAPI loopback (remote side of call),
-    - mic input (local side),
-    - or both in parallel.
-- Resample to 16 kHz mono and push fixed-size blocks into a shared queue.
-- Rolling windows (WINDOW_SEC, HOP_SEC) over the stream.
-- For each window (indexed by window_index):
-    - optional VAD gate to skip silence
-    - run pyannote/speaker-diarization-community-1 on in-memory waveform
-    - get diarization segments (start, end, speaker)
-    - convert to absolute times
-    - for each segment (>= FINALIZE_MIN_DUR_SEC):
-        - assign an "owner window" by segment center / HOP_SEC
-        - only the owner window is allowed to emit that segment
-        - cut audio from this window
-        - (optional) map diar speaker → enrolled name using embeddings
-        - run faster-whisper on that chunk (vad_filter=False)
-        - print once (guarded by emitted_keys)
+Key points:
+- In "loopback" or "mic" mode:
+    - single source → 16k mono → rolling windows → diarization → ASR.
+- In "both" mode:
+    - mic and loopback are captured separately,
+    - resampled to 16k mono,
+    - time-aligned and MIXED (summed) into one mono stream,
+    - then same diarization+ASR pipeline.
+- Center-based "owner window" logic prevents dupes across overlaps.
+- Optional speaker enrollment to label diar clusters.
 """
-
 
 import os
 import time
@@ -50,29 +40,29 @@ WINDOW_SEC = 5.0              # diarization/ASR window size
 OVERLAP_SEC = 0.5             # overlap between windows
 HOP_SEC = WINDOW_SEC - OVERLAP_SEC
 
-LANG = "en"                   # "cs", "en", or None for autodetect
+LANG = "en"                   # "cs", "en", or None
 
-FINALIZE_MIN_DUR_SEC = 0.25   # ignore very short segments
+FINALIZE_MIN_DUR_SEC = 0.25   # ignore tiny segments
 
 # Capture mode: "loopback", "mic", or "both"
 CAPTURE_MODE = "both"
 
-# Mic device selection (None = default). Use sd.query_devices() to inspect.
+# Mic device selection (None = default). Use sd.query_devices() if needed.
 MIC_DEVICE_INDEX = None
 
-# Loopback selection by substring (None = default device)
+# Loopback selection by substring in device name, e.g. "Headphones" or None for default.
 LOOPBACK_NAME_CONTAINS = None
 
-# Window-level VAD (optional coarse gate)
+# Optional coarse VAD on each window
 USE_SILERO_VAD = False
 MIN_SPEECH_IN_WINDOW_SEC = 0.35
 VAD_MIN_SPEECH_MS = 350
 VAD_MIN_SILENCE_MS = 250
 
-# Speaker enrollment (optional, for labeling diar clusters)
+# Speaker enrollment
 USE_SPEAKER_ENROLLMENT = True
-ENROLL_DIR = "enrolled_speakers"   # e.g. "Jason.wav", "Alex_1.wav"
-ENROLL_SIM_THRESHOLD = 0.5         # cosine similarity threshold
+ENROLL_DIR = "enrolled_speakers"
+ENROLL_SIM_THRESHOLD = 0.35 #0.5
 
 # Debug toggles
 DEBUG_SEGMENTS = False
@@ -80,19 +70,26 @@ DEBUG_SPEAKER_MATCH = False
 
 # ===================== GLOBAL STATE =====================
 
+# For single-source modes
+q = queue.Queue()
+
+# For "both" mode: separate queues
+q_mic = queue.Queue()
+q_loop = queue.Queue()
+
+# Rolling analysis buffer (mixed mono stream)
 buf = np.zeros(0, dtype=np.float32)
-q: "queue.Queue[np.ndarray]" = queue.Queue()
 
 WINDOW_SAMPLES = int(WINDOW_SEC * SR)
 HOP_SAMPLES = int(HOP_SEC * SR)
 
-# Absolute time (sec) of LEFT edge of `buf`
+# Time of LEFT edge of `buf` in seconds
 base_offset_sec = 0.0
 
-# Window index for center-based ownership
+# Window index for center-ownership
 window_index = 0
 
-# Dedupe across overlaps: key = (round(start, KEY_RES), round(end, KEY_RES), label)
+# Dedup across overlapping windows: coarse (start,end,label)
 KEY_RES = 0.25
 emitted_keys: set[tuple[float, float, str]] = set()
 
@@ -102,41 +99,13 @@ get_speech_timestamps = None
 
 # Enrollment globals
 embedding_infer: EmbeddingInference | None = None
-enrolled_speakers: dict[str, np.ndarray] = {}  # name -> L2 embedding
+enrolled_speakers: dict[str, np.ndarray] = {}
 
 
-# ===================== AUDIO INPUT =====================
-
-def audio_cb(indata, frames, t, status):
-    if status:
-        print(status)
-    # indata: (frames, channels), float32
-    q.put(indata.copy())
-
-def mic_capture_thread(device_index=None):
-    """Capture from microphone → 16k mono → BLOCK chunks → q."""
-    kwargs = dict(
-        samplerate=SR,
-        channels=1,
-        dtype="float32",
-        blocksize=BLOCK,
-        callback=audio_cb,
-    )
-    if device_index is not None:
-        kwargs["device"] = device_index
-
-    try:
-        with sd.InputStream(**kwargs):
-            print(f"🎙️ Mic listening (device={device_index})… Ctrl+C to stop")
-            while True:
-                time.sleep(0.1)
-    except Exception:
-        print("❌ Mic thread crashed:")
-        traceback.print_exc()
-
+# ===================== AUDIO INPUT HELPERS =====================
 
 def _pick_wasapi_loopback(p: pyaudio.PyAudio, name_contains: str | None = None):
-    """Pick WASAPI loopback device (default or by substring)."""
+    """Pick WASAPI loopback device."""
     wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
     def_out = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
 
@@ -158,8 +127,41 @@ def _pick_wasapi_loopback(p: pyaudio.PyAudio, name_contains: str | None = None):
 
     raise RuntimeError("No WASAPI loopback device found.")
 
+
+# ===================== CAPTURE THREADS =====================
+
+def mic_callback(indata, frames, t, status):
+    if status:
+        print(status)
+    if CAPTURE_MODE == "both":
+        q_mic.put(indata.copy())
+    else:
+        q.put(indata.copy())
+
+def mic_capture_thread(device_index=None):
+    """Mic → 16k mono → BLOCK chunks via callback."""
+    kwargs = dict(
+        samplerate=SR,
+        channels=1,
+        dtype="float32",
+        blocksize=BLOCK,
+        callback=mic_callback,
+    )
+    if device_index is not None:
+        kwargs["device"] = device_index
+
+    try:
+        with sd.InputStream(**kwargs):
+            print(f"🎙️ Mic listening (device={device_index})… Ctrl+C to stop")
+            while True:
+                time.sleep(0.1)
+    except Exception:
+        print("❌ Mic thread crashed:")
+        traceback.print_exc()
+
+
 def loopback_capture_thread(name_contains: str | None = None):
-    """Capture system audio via WASAPI loopback → 16k mono → BLOCK chunks → q."""
+    """System audio via WASAPI loopback → 16k mono → BLOCK chunks."""
     print("🔁 Loopback thread starting…")
     pa = pyaudio.PyAudio()
     stream = None
@@ -190,7 +192,7 @@ def loopback_capture_thread(name_contains: str | None = None):
             if x.size == 0:
                 continue
 
-            # Mono mix
+            # Mono mix of device channels
             if in_ch > 1:
                 x = x.reshape(-1, in_ch)
                 L = x[:, 0]
@@ -205,10 +207,8 @@ def loopback_capture_thread(name_contains: str | None = None):
             else:
                 mono = x.astype(np.float32)
 
-            # Resample → 16k
+            # Resample to 16k
             y = resampler(torch.from_numpy(mono).unsqueeze(0)).squeeze(0).numpy()
-
-            # Chunk into BLOCK and push
             if out_rem.size:
                 y = np.concatenate([out_rem, y])
 
@@ -220,7 +220,10 @@ def loopback_capture_thread(name_contains: str | None = None):
                         -1.0,
                         1.0,
                     ).astype(np.float32)
-                    q.put(ch.copy())
+                    if CAPTURE_MODE == "both":
+                        q_loop.put(ch.copy())
+                    else:
+                        q.put(ch.copy())
                 out_rem = y[n_full:]
             else:
                 out_rem = y
@@ -231,7 +234,8 @@ def loopback_capture_thread(name_contains: str | None = None):
     finally:
         if stream is not None:
             try:
-                stream.stop_stream(); stream.close()
+                stream.stop_stream()
+                stream.close()
             except Exception:
                 pass
         pa.terminate()
@@ -243,21 +247,18 @@ def loopback_capture_thread(name_contains: str | None = None):
 HF_TOKEN = os.environ.get("HF_TOKEN")
 assert HF_TOKEN, "Set HF_TOKEN environment variable."
 
-# ASR
 asr = WhisperModel(
     "medium",
     device="cuda" if torch.cuda.is_available() else "cpu",
     compute_type="float16" if torch.cuda.is_available() else "int8_float32",
 )
 
-# Diarization
 pipe = Pipeline.from_pretrained(
     "pyannote/speaker-diarization-community-1",
     token=HF_TOKEN,
 )
 pipe.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
-# Optional Silero VAD
 if USE_SILERO_VAD:
     _vad_model, _vad_utils = torch.hub.load(
         repo_or_dir="snakers4/silero-vad",
@@ -273,7 +274,6 @@ if USE_SILERO_VAD:
      collect_chunks) = _vad_utils
     vad_model = _vad_model
 
-# Optional embeddings for enrollment
 if USE_SPEAKER_ENROLLMENT:
     try:
         emb_model = Model.from_pretrained("pyannote/embedding", use_auth_token=HF_TOKEN)
@@ -290,10 +290,9 @@ def round_time(t: float, resolution: float) -> float:
     return round(t / resolution) * resolution
 
 def diarize_window_in_memory(wave: np.ndarray):
-    """Run Community-1 on in-memory waveform (float32, (T,))."""
     if wave.size == 0:
         return []
-    w = torch.from_numpy(wave.copy()).unsqueeze(0)  # (1, T)
+    w = torch.from_numpy(wave.copy()).unsqueeze(0)
     out = pipe({"waveform": w, "sample_rate": SR})
     segs = []
     for turn, spk in out.speaker_diarization:
@@ -307,7 +306,6 @@ def diarize_window_in_memory(wave: np.ndarray):
     return segs
 
 def asr_text_on_chunk(wave: np.ndarray) -> str:
-    """ASR on a diarized chunk."""
     if wave.size < int(FINALIZE_MIN_DUR_SEC * SR):
         return ""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -340,7 +338,6 @@ def asr_text_on_chunk(wave: np.ndarray) -> str:
             pass
 
 def maybe_gate_window_with_vad(window: np.ndarray) -> bool:
-    """Optional coarse VAD: skip windows that are basically silence."""
     if np.sqrt(np.mean(window * window)) < 3e-5:
         return False
     if not USE_SILERO_VAD or vad_model is None:
@@ -361,10 +358,9 @@ def maybe_gate_window_with_vad(window: np.ndarray) -> bool:
     return speech_sec >= MIN_SPEECH_IN_WINDOW_SEC
 
 
-# ====== Speaker enrollment ======
+# ====== Enrollment ======
 
 def load_enrolled_speakers():
-    """Build name -> embedding from wavs in ENROLL_DIR."""
     global enrolled_speakers
     if not USE_SPEAKER_ENROLLMENT or embedding_infer is None:
         print("👤 Speaker enrollment disabled or unavailable.")
@@ -406,7 +402,6 @@ def load_enrolled_speakers():
         print("👤 No valid enrollment samples found.")
 
 def embed_wave(wave: np.ndarray) -> np.ndarray | None:
-    """L2-normalized embedding for a chunk."""
     if embedding_infer is None or wave.size < int(0.25 * SR):
         return None
     try:
@@ -422,7 +417,6 @@ def embed_wave(wave: np.ndarray) -> np.ndarray | None:
         return None
 
 def map_speaker_label(diar_label: str, wave_chunk: np.ndarray) -> str:
-    """Map diarization cluster → enrolled speaker if similarity is high enough."""
     if not USE_SPEAKER_ENROLLMENT or not enrolled_speakers:
         return diar_label
 
@@ -446,7 +440,60 @@ def map_speaker_label(diar_label: str, wave_chunk: np.ndarray) -> str:
     return diar_label
 
 
-# ===================== MAIN LOOP =====================
+# ===================== MAIN MIX + PIPELINE =====================
+
+def mix_two_sources_into_buf():
+    """For CAPTURE_MODE='both': mix q_mic + q_loop into global buf."""
+    global buf
+
+    # Local ring buffers for each source
+    if not hasattr(mix_two_sources_into_buf, "mic_buf"):
+        mix_two_sources_into_buf.mic_buf = np.zeros(0, dtype=np.float32)
+        mix_two_sources_into_buf.loop_buf = np.zeros(0, dtype=np.float32)
+
+    mic_buf = mix_two_sources_into_buf.mic_buf
+    loop_buf = mix_two_sources_into_buf.loop_buf
+
+    # Drain queues
+    while True:
+        try:
+            block = q_mic.get_nowait()
+            mic_buf = np.concatenate([mic_buf, block.reshape(-1)])
+        except queue.Empty:
+            break
+
+    while True:
+        try:
+            block = q_loop.get_nowait()
+            loop_buf = np.concatenate([loop_buf, block.reshape(-1)])
+        except queue.Empty:
+            break
+
+    # Produce mixed BLOCKs
+    while len(mic_buf) >= BLOCK or len(loop_buf) >= BLOCK:
+        m = np.zeros(BLOCK, dtype=np.float32)
+        l = np.zeros(BLOCK, dtype=np.float32)
+
+        if len(mic_buf) >= BLOCK:
+            m = mic_buf[:BLOCK]
+            mic_buf = mic_buf[BLOCK:]
+        elif len(mic_buf) > 0:
+            m[:len(mic_buf)] = mic_buf
+            mic_buf = mic_buf[0:0]
+
+        if len(loop_buf) >= BLOCK:
+            l = loop_buf[:BLOCK]
+            loop_buf = loop_buf[BLOCK:]
+        elif len(loop_buf) > 0:
+            l[:len(loop_buf)] += loop_buf
+            loop_buf = loop_buf[0:0]
+
+        mixed = np.clip(m + l, -1.0, 1.0)
+        buf = np.concatenate([buf, mixed])
+
+    mix_two_sources_into_buf.mic_buf = mic_buf
+    mix_two_sources_into_buf.loop_buf = loop_buf
+
 
 def main():
     global buf, base_offset_sec, window_index
@@ -454,9 +501,9 @@ def main():
     if USE_SPEAKER_ENROLLMENT:
         load_enrolled_speakers()
 
-    # ---- Start capture threads based on CAPTURE_MODE ----
+    # Start capture threads
     if CAPTURE_MODE == "mic":
-        print("🎛️ Capture mode: MIC only")
+        print("🎛️ Mode: MIC only")
         threading.Thread(
             target=mic_capture_thread,
             kwargs={"device_index": MIC_DEVICE_INDEX},
@@ -464,7 +511,7 @@ def main():
         ).start()
 
     elif CAPTURE_MODE == "loopback":
-        print("🎛️ Capture mode: LOOPBACK only")
+        print("🎛️ Mode: LOOPBACK only")
         threading.Thread(
             target=loopback_capture_thread,
             kwargs={"name_contains": LOOPBACK_NAME_CONTAINS},
@@ -472,7 +519,7 @@ def main():
         ).start()
 
     elif CAPTURE_MODE == "both":
-        print("🎛️ Capture mode: BOTH (mic + loopback)")
+        print("🎛️ Mode: BOTH (mic + loopback)")
         threading.Thread(
             target=mic_capture_thread,
             kwargs={"device_index": MIC_DEVICE_INDEX},
@@ -486,22 +533,25 @@ def main():
     else:
         raise ValueError(f"Unknown CAPTURE_MODE={CAPTURE_MODE!r}")
 
-    # ---- Consumer: diarization + ASR ----
     try:
         while True:
-            # 1) Drain new audio into buffer
-            while True:
-                try:
-                    block = q.get_nowait()
-                except queue.Empty:
-                    break
-                buf = np.concatenate([buf, block.reshape(-1)])
+            # 1) Ingest audio into buf
+            if CAPTURE_MODE == "both":
+                mix_two_sources_into_buf()
+            else:
+                # single-source: drain q into buf directly
+                while True:
+                    try:
+                        block = q.get_nowait()
+                    except queue.Empty:
+                        break
+                    buf = np.concatenate([buf, block.reshape(-1)])
 
-            # 2) Process all complete windows
+            # 2) Process complete windows
             while len(buf) >= WINDOW_SAMPLES:
                 window = buf[:WINDOW_SAMPLES]
                 window_offset = base_offset_sec
-                my_win_idx = window_index  # snapshot for this window
+                my_idx = window_index
 
                 if maybe_gate_window_with_vad(window):
                     diar_segs = diarize_window_in_memory(window)
@@ -518,12 +568,11 @@ def main():
                         e_abs = window_offset + seg_end
                         center_abs = 0.5 * (s_abs + e_abs)
 
-                        # Assign unique "owner" window based on segment center
+                        # Unique owner window via segment center
                         owner_idx = int(center_abs / HOP_SEC + 1e-6)
-                        if owner_idx != my_win_idx:
+                        if owner_idx != my_idx:
                             continue
 
-                        # Coarse dedupe key
                         key = (
                             round_time(s_abs, KEY_RES),
                             round_time(e_abs, KEY_RES),
@@ -532,7 +581,7 @@ def main():
                         if key in emitted_keys:
                             continue
 
-                        # Cut from current window
+                        # Cut from this window
                         s_idx = int(seg_start * SR)
                         e_idx = int(seg_end * SR)
                         s_idx = max(0, min(len(window), s_idx))
@@ -547,7 +596,7 @@ def main():
                             print(f"{label}: {text}", flush=True)
                             emitted_keys.add(key)
 
-                # Slide by HOP; keep overlap
+                # Slide window
                 buf = buf[HOP_SAMPLES:]
                 base_offset_sec += HOP_SAMPLES / SR
                 window_index += 1
