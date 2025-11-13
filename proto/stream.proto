@@ -1,0 +1,39 @@
+syntax = "proto3";
+package stream;
+
+// ~200–500 ms of PCM16 mono @16 kHz per message
+message AudioChunk {
+  string  session_id   = 1;
+  uint64  seq          = 2;   // incremental per session
+  int64   t0_ns        = 3;   // producer monotonic timestamp OR sample time
+  uint32  sample_rate  = 4;   // 16000
+  bytes   pcm16_le     = 5;   // little-endian PCM16 mono
+}
+
+enum AsrType { PARTIAL = 0; FINAL = 1; }
+
+message AsrEvent {
+  string  session_id = 1;
+  double  start_s    = 2;
+  double  end_s      = 3;
+  string  text       = 4;
+  AsrType type       = 5;
+  string  lang       = 6; // optional (e.g., "cs")
+}
+
+message DiarEvent {
+  string  session_id = 1;
+  double  start_s    = 2;
+  double  end_s      = 3;
+  string  speaker    = 4;   // "SPEAKER_00" or enrolled name
+  float   confidence = 5;   // 0..1
+}
+
+message RefinedEvent {
+  string  session_id   = 1;
+  double  start_s      = 2;
+  double  end_s        = 3;
+  string  text         = 4;
+  string  speaker      = 5;              // optional/mapped
+  repeated uint64 supersedes_seq = 6;    // optional linkage to live lines
+}
