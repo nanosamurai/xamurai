@@ -24,3 +24,8 @@ dependencies:
 # pip install --only-binary=:all: "scikit-learn>=1.6,<1.7"
 # pip install PyAudioWPatch
 # pip install "grpcio-tools>=1.62" protobuf
+# pip install pydantic>=2.8
+# pip install confluent-kafka>=2.
+# pip install protobuf>=5.29
+# pip install fastapi>=0.115
+# pip install uvicorn[standard]>=0.30
