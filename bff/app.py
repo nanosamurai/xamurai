@@ -2,6 +2,7 @@ import json
 import time
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from confluent_kafka import Producer
 
@@ -11,6 +12,9 @@ from bff.engine import RealtimeEngine
 
 app = FastAPI(title="BFF WS (Realtime + Kafka)")
 
+# serve / -> bff/web/index.html and any other assets in that folder
+app.mount("/", StaticFiles(directory="bff/web", html=True), name="web")
+
 # in-proc singletons (ok for MVP)
 engine = RealtimeEngine()
 producer: Producer = make_producer()
@@ -18,35 +22,6 @@ producer: Producer = make_producer()
 # Track sequence per session
 session_seq: Dict[str, int] = {}
 
-@app.get("/")
-async def index():
-    # tiny test page
-    return HTMLResponse("""
-<!DOCTYPE html>
-<meta charset="utf-8" />
-<title>BFF WS Test</title>
-<body>
-  <button id="connect">Connect</button>
-  <button id="send">Send dummy frame</button>
-  <pre id="log"></pre>
-<script>
-let ws;
-document.getElementById('connect').onclick = () => {
-  ws = new WebSocket("ws://" + location.host + "/ws?session_id=test1");
-  ws.binaryType = "arraybuffer";
-  ws.onmessage = (ev) => {
-    document.getElementById('log').textContent += ev.data + "\\n";
-  };
-};
-document.getElementById('send').onclick = () => {
-  if (!ws) return;
-  // send 320 samples of silence as 16-bit LE
-  const arr = new Int16Array(320);
-  ws.send(arr.buffer);
-};
-</script>
-</body>
-    """)
 
 @app.websocket("/ws")
 async def ws_audio(websocket: WebSocket, session_id: str = Query(...)):

@@ -1,0 +1,96 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WS Mic → PCM16 → BFF</title>
+<body>
+  <h3>Mic → WebSocket → BFF</h3>
+  <label>Session ID: <input id="sid" value="test1"></label>
+  <button id="start">Start</button>
+  <button id="stop" disabled>Stop</button>
+  <pre id="log" style="height: 220px; overflow:auto; border:1px solid #ccc; padding:8px"></pre>
+
+<script>
+let ws, ac, media, node, running = false;
+
+// Converts Float32Array [-1,1] to Int16Array little-endian
+function floatTo16le(float32) {
+  const out = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    let s = Math.max(-1, Math.min(1, float32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return out;
+}
+
+// Simple downsampler 48k -> 16k (factor 3). For other rates, we fallback to naive scale.
+function downsampleTo16k(input, inRate) {
+  if (inRate === 48000) {
+    const out = new Float32Array(Math.floor(input.length / 3));
+    let j = 0;
+    for (let i = 0; i + 2 < input.length; i += 3) out[j++] = input[i]; // decimate
+    return out;
+  } else if (inRate === 16000) {
+    return input;
+  } else {
+    // naive linear-resample (good enough for testing)
+    const ratio = 16000 / inRate;
+    const out = new Float32Array(Math.floor(input.length * ratio));
+    for (let i = 0; i < out.length; i++) {
+      const t = i / ratio;
+      const i0 = Math.floor(t);
+      const frac = t - i0;
+      const s0 = input[i0] || 0, s1 = input[i0 + 1] || 0;
+      out[i] = s0 + (s1 - s0) * frac;
+    }
+    return out;
+  }
+}
+
+function log(s){ const el=document.getElementById('log'); el.textContent += s + "\n"; el.scrollTop=el.scrollHeight; }
+
+async function start() {
+  if (running) return;
+  running = true;
+  document.getElementById('start').disabled = true;
+  document.getElementById('stop').disabled = false;
+
+  const sid = document.getElementById('sid').value || 'test1';
+  ws = new WebSocket(`ws://${location.host}/ws?session_id=${encodeURIComponent(sid)}`);
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = (ev)=> log(ev.data);
+  ws.onopen = ()=> log("[ws] connected");
+
+  ac = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+  media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, noiseSuppression: false, echoCancellation: false }, video: false });
+
+  const src = ac.createMediaStreamSource(media);
+
+  // ScriptProcessor is deprecated but simplest for a quick test
+  // Buffer size 2048 @ 48k ≈ 42.7 ms. BFF is fine with any frame length.
+  node = ac.createScriptProcessor(2048, 1, 1);
+  src.connect(node);
+  node.connect(ac.destination); // or ac.createGain() if you don't want to hear yourself
+
+  node.onaudioprocess = (e) => {
+    if (!ws || ws.readyState !== 1) return;
+    const ch0 = e.inputBuffer.getChannelData(0);
+    const ds = downsampleTo16k(ch0, ac.sampleRate);
+    const i16 = floatTo16le(ds);
+    ws.send(i16.buffer);
+  };
+}
+
+function stop() {
+  running = false;
+  document.getElementById('start').disabled = false;
+  document.getElementById('stop').disabled = true;
+  try { node && node.disconnect(); } catch(e){}
+  try { media && media.getTracks().forEach(t=>t.stop()); } catch(e){}
+  try { ac && ac.close(); } catch(e){}
+  try { ws && ws.close(); } catch(e){}
+  log("[stopped]");
+}
+
+document.getElementById('start').onclick = start;
+document.getElementById('stop').onclick = stop;
+</script>
+</body>
