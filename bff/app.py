@@ -1,9 +1,10 @@
+# bff/app.py
 import json
-import time
 from typing import Dict
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from confluent_kafka import Producer
 
 from bff.settings import settings
@@ -12,16 +13,18 @@ from bff.engine import RealtimeEngine
 
 app = FastAPI(title="BFF WS (Realtime + Kafka)")
 
-# serve / -> bff/web/index.html and any other assets in that folder
-app.mount("/", StaticFiles(directory="bff/web", html=True), name="web")
+# Serve your test GUI from /ui (bff/web/index.html)
+app.mount("/ui", StaticFiles(directory="bff/web", html=True), name="ui")
 
-# in-proc singletons (ok for MVP)
+# In-proc singletons (OK for MVP)
 engine = RealtimeEngine()
 producer: Producer = make_producer()
-
-# Track sequence per session
 session_seq: Dict[str, int] = {}
 
+@app.get("/")
+async def root():
+    # optional: simple pointer page
+    return HTMLResponse("<a href='/ui'>Open WS test UI</a>")
 
 @app.websocket("/ws")
 async def ws_audio(websocket: WebSocket, session_id: str = Query(...)):
@@ -32,36 +35,40 @@ async def ws_audio(websocket: WebSocket, session_id: str = Query(...)):
     try:
         while True:
             data = await websocket.receive()
+
             if "bytes" not in data or data["bytes"] is None:
-                # ignore non-binary control frames for MVP
+                # ignore non-binary frames for now
                 continue
 
             pcm16 = data["bytes"]
-            # 1) Produce to Kafka
-            session_seq[session_id] += 1
-            produce_audio_chunk(
-                producer,
-                session_id=session_id,
-                seq=session_seq[session_id],
-                pcm16_bytes=pcm16,
-                sample_rate=settings.sample_rate,
-            )
-            # Flush occasionally; tune in prod
-            if session_seq[session_id] % 10 == 0:
-                producer.poll(0)
 
-            # 2) Realtime engine in-process → events → push to client
+            # 1) Produce to Kafka (with basic error protection)
+            session_seq[session_id] += 1
+            try:
+                produce_audio_chunk(
+                    producer,
+                    session_id=session_id,
+                    seq=session_seq[session_id],
+                    pcm16_bytes=pcm16,
+                    sample_rate=settings.sample_rate,
+                )
+                if session_seq[session_id] % 10 == 0:
+                    producer.poll(0)  # service delivery callbacks
+            except Exception as e:
+                # Just log for now; do not kill the WS session
+                print(f"[KAFKA] produce failed: {e}")
+
+            # 2) Realtime engine → events → WS
             results = engine.feed(session_id, pcm16)
             for r in results:
                 ev = engine.to_asr_events(session_id, r)
-                # For dev ergonomics we send JSON over WS; you can switch to binary/protobuf
                 await websocket.send_text(json.dumps({
                     "type": "asr",
                     "session_id": ev.session_id,
                     "start_s": ev.start_s,
                     "end_s": ev.end_s,
                     "text": ev.text,
-                    "final": (ev.type == 1),
+                    "final": (ev.type == 1),  # AsrType.FINAL
                 }))
 
     except WebSocketDisconnect:
