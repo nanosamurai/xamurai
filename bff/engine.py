@@ -57,7 +57,7 @@ class RealtimeEngine:
     ENROLL_SIM_THRESHOLD = 0.35  # a bit lower for mixed/call audio
 
     # VAD (coarse gate per window) — lightweight, optional
-    USE_SILERO_VAD = False
+    USE_SILERO_VAD = True
     MIN_SPEECH_IN_WINDOW_SEC = 0.35
     VAD_MIN_SPEECH_MS = 350
     VAD_MIN_SILENCE_MS = 250
