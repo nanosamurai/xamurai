@@ -69,7 +69,7 @@ async def ws_audio(websocket: WebSocket, session_id: str = Query(...)):
                     "end_s": ev.end_s,
                     "text": ev.text,
                     "final": (ev.type == 1),  # AsrType.FINAL
-                }))
+                }, ensure_ascii=False))
 
     except WebSocketDisconnect:
         print(f"[WS] disconnected session={session_id}")
