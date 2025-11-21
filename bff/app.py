@@ -1,5 +1,6 @@
 # bff/app.py
 import json
+import logging
 from typing import Dict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
@@ -10,6 +11,17 @@ from confluent_kafka import Producer
 from bff.settings import settings
 from bff.kafka_io import make_producer, produce_audio_chunk
 from bff.engine import RealtimeEngine
+
+# --------------------------------------------------------------------------- #
+# Logging setup
+# --------------------------------------------------------------------------- #
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 
 app = FastAPI(title="BFF WS (Realtime + Kafka)")
 
@@ -30,7 +42,7 @@ async def root():
 async def ws_audio(websocket: WebSocket, session_id: str = Query(...)):
     await websocket.accept()
     session_seq.setdefault(session_id, 0)
-    print(f"[WS] connected session={session_id}")
+    logger.info(f"[WS] connected session={session_id}")
 
     try:
         while True:
@@ -56,7 +68,7 @@ async def ws_audio(websocket: WebSocket, session_id: str = Query(...)):
                     producer.poll(0)  # service delivery callbacks
             except Exception as e:
                 # Just log for now; do not kill the WS session
-                print(f"[KAFKA] produce failed: {e}")
+                logger.error(f"[KAFKA] produce failed: {e}")
 
             # 2) Realtime engine → events → WS
             results = engine.feed(session_id, pcm16)
@@ -72,11 +84,11 @@ async def ws_audio(websocket: WebSocket, session_id: str = Query(...)):
                 }, ensure_ascii=False))
 
     except WebSocketDisconnect:
-        print(f"[WS] disconnected session={session_id}")
+        logger.info(f"[WS] disconnected session={session_id}")
     except Exception as e:
-        print(f"[WS] error: {e}")
+        logger.exception(f"[WS] error: {e}")
     finally:
         try:
             producer.flush(2.0)
         except Exception:
-            pass
+            logger.exception("[WS] error while flushing Kafka producer")
