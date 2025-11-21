@@ -1,3 +1,4 @@
+import logging
 import os
 import tempfile
 import time
@@ -13,12 +14,23 @@ import stream_pb2
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 TOPIC_AUDIO = os.getenv("KAFKA_TOPIC_AUDIO", "audio.raw")
 TOPIC_REFINED = os.getenv("KAFKA_TOPIC_REFINED", "transcripts.refined")
-GROUP_ID = os.getenv("KAFKA_GROUP_ID", "whisperx-offline")
+GROUP_ID = os.getenv("KAFKA_GROUP_ID", "whisperx-async")
 
 SLICE_SECONDS = 60.0
 SR = 16000
 
+# --------------------------------------------------------------------------- #
+# Logging setup
+# --------------------------------------------------------------------------- #
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 def make_consumer() -> Consumer:
+    logger.info("Creating Kafka consumer")
     return Consumer({
         "bootstrap.servers": KAFKA_BOOTSTRAP,
         "group.id": GROUP_ID,
@@ -29,9 +41,10 @@ def make_consumer() -> Consumer:
     })
 
 def make_producer() -> Producer:
+    logger.info("Creating Kafka producer")
     return Producer({
         "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "client.id": "whisperx-offline",
+        "client.id": "whisperx-async",
         "compression.type": "zstd",
         "linger.ms": 10,
         "batch.size": 131072
@@ -43,12 +56,15 @@ def run_whisperx(wav_path: str) -> Tuple[str, list]:
     Return text and list of (start_s, end_s, text, speaker_opt).
     For MVP, we return the duration as text.
     """
+    logger.info(f"Running WhisperX on {wav_path}")
     import soundfile as sf
     _, sr = sf.read(wav_path)
     dur = sf.info(wav_path).duration
+    logger.debug(f"Audio duration: {dur:.1f}s")
     return f"[whisperx result ~{dur:.1f}s]", [(0.0, dur, "[offline text]", "")]
 
 def main():
+    logger.info("Starting whisperx_worker")
     c = make_consumer()
     p = make_producer()
     c.subscribe([TOPIC_AUDIO])
@@ -59,11 +75,15 @@ def main():
 
     try:
         while True:
-            msg = c.poll(0.1)
+            logger.debug("Waiting for message from Kafka")
+            msg = c.poll(timeout=1.0)
             if msg is None:
                 continue
             if msg.error():
+                logger.error(f"Kafka error: {msg.error()}")
                 raise KafkaException(msg.error())
+
+            logger.debug(f"Processing message for session {msg.key()}")
 
             key = msg.key().decode("utf-8") if msg.key() else ""
             audio = stream_pb2.AudioChunk()
@@ -73,6 +93,8 @@ def main():
             arr = np.frombuffer(audio.pcm16_le, dtype="<i2")
             buffers[audio.session_id].append(arr)
             buf_samples[audio.session_id] += arr.size
+
+            logger.debug(f"Buffer size for session {audio.session_id}: {buf_samples[audio.session_id]} samples")
 
             # If we have ≥ SLICE_SECONDS, dump to WAV and process
             if buf_samples[audio.session_id] >= int(SLICE_SECONDS * SR):
