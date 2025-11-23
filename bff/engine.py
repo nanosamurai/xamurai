@@ -32,9 +32,9 @@ FINALIZE_MIN_DUR_SEC = 0.25   # ignore tiny segments
 
 # VAD (window-level)
 USE_SILERO_VAD = False
-MIN_SPEECH_IN_WINDOW_SEC = 0.35
-VAD_MIN_SPEECH_MS = 350
-VAD_MIN_SILENCE_MS = 250
+VAD_MIN_SPEECH_MS = 150      # was 350
+VAD_MIN_SILENCE_MS = 400     # was 250
+# MIN_SPEECH_IN_WINDOW_SEC = 0.35
 
 # Speaker enrollment
 USE_SPEAKER_ENROLLMENT = True
@@ -332,12 +332,16 @@ class RealtimeEngine:
                 pass
 
     def _maybe_gate_window_with_vad(self, window: np.ndarray) -> bool:
-        # RMS pre-gate
-        if np.sqrt(np.mean(window * window)) < 3e-5:
+        # 1) RMS pre-gate: kill *really* quiet stuff
+        rms = float(np.sqrt(np.mean(window * window)) + 1e-12)
+        if rms < 3e-5:
             return False
+
+        # 2) If Silero is disabled or unavailable → always keep
         if not USE_SILERO_VAD or self._vad_model is None:
             return True
 
+        # 3) Silero: we only care if there is *any* speech at all
         wav16 = (np.clip(window, -1.0, 1.0) * 32767).astype(np.int16)
         ts = self._get_speech_timestamps(
             wav16,
@@ -347,10 +351,13 @@ class RealtimeEngine:
             min_speech_duration_ms=VAD_MIN_SPEECH_MS,
             min_silence_duration_ms=VAD_MIN_SILENCE_MS,
         )
+
         if not ts:
+            # pure silence: drop window, prevents hallucinations
             return False
-        speech_sec = sum(max(0.0, t["end"] - t["start"]) for t in ts)
-        return speech_sec >= MIN_SPEECH_IN_WINDOW_SEC
+
+        # some speech → keep the window and let diarization+ASR decide
+        return True
 
     # ====== Enrollment ======
 
