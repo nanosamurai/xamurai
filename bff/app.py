@@ -39,10 +39,10 @@ async def root():
     return HTMLResponse("<a href='/ui'>Open WS test UI</a>")
 
 @app.websocket("/ws")
-async def ws_audio(websocket: WebSocket, session_id: str = Query(...)):
+async def ws_audio(websocket: WebSocket, session_id: str = Query(...), session_lang: str = Query(...)):
     await websocket.accept()
     session_seq.setdefault(session_id, 0)
-    logger.info(f"[WS] connected session={session_id}")
+    logger.info("WS connected: session=%s lang=%s", session_id, session_lang)
 
     try:
         while True:
@@ -68,10 +68,10 @@ async def ws_audio(websocket: WebSocket, session_id: str = Query(...)):
                     producer.poll(0)  # service delivery callbacks
             except Exception as e:
                 # Just log for now; do not kill the WS session
-                logger.error(f"[KAFKA] produce failed: {e}")
+                logger.error("KAFKA produce failed: %s", e)
 
             # 2) Realtime engine → events → WS
-            results = engine.feed(session_id, pcm16)
+            results = engine.feed(session_id, pcm16, lang=session_lang)
             for r in results:
                 ev = engine.to_asr_events(session_id, r)
                 await websocket.send_text(json.dumps({
@@ -80,11 +80,12 @@ async def ws_audio(websocket: WebSocket, session_id: str = Query(...)):
                     "start_s": ev.start_s,
                     "end_s": ev.end_s,
                     "text": ev.text,
+                    "lang": ev.lang,
                     "final": (ev.type == 1),  # AsrType.FINAL
                 }, ensure_ascii=False))
 
     except WebSocketDisconnect:
-        logger.info(f"[WS] disconnected session={session_id}")
+        logger.info("WS disconnected: session=%s", session_id)
     except Exception as e:
         logger.exception(f"[WS] error: {e}")
     finally:

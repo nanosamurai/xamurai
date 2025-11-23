@@ -1,7 +1,6 @@
 # bff/engine.py
 
 import os
-import time
 import threading
 import logging
 from collections import defaultdict
@@ -26,7 +25,8 @@ WINDOW_SEC = 5.0              # diarization/ASR window size
 OVERLAP_SEC = 0.5             # overlap between windows
 HOP_SEC = WINDOW_SEC - OVERLAP_SEC
 
-LANG = "en"                   # "cs", "en", or None
+# default language; can be overridden per-session
+DEFAULT_LANG = os.getenv("FW_LANG_DEFAULT", None)   # "cs", "en", or None
 
 FINALIZE_MIN_DUR_SEC = 0.25   # ignore tiny segments
 
@@ -39,7 +39,7 @@ VAD_MIN_SILENCE_MS = 250
 # Speaker enrollment
 USE_SPEAKER_ENROLLMENT = True
 ENROLL_DIR = os.getenv("ENROLL_DIR", "enrolled_speakers")
-ENROLL_SIM_THRESHOLD = 0.35
+ENROLL_SIM_THRESHOLD = 0.30
 
 # Dedupe key resolution
 KEY_RES = 0.25  # seconds (250 ms)
@@ -51,6 +51,7 @@ class AsrResult:
     end_s: float
     text: str
     is_final: bool
+    lang: Optional[str] = None  # NEW
 
 
 class RealtimeEngine:
@@ -67,7 +68,7 @@ class RealtimeEngine:
             - center-based window "ownership" to avoid double ASR across overlaps
             - coarse dedupe key (round start/end, label)
             - optional speaker enrollment mapping
-            - faster-whisper ASR (vad_filter=False, language=LANG)
+            - faster-whisper ASR (vad_filter=False, language=per-session)
     - Output: list[AsrResult] for each feed() call.
     """
 
@@ -76,6 +77,7 @@ class RealtimeEngine:
             raise RuntimeError(f"Engine assumes {SR} Hz, got {settings.sample_rate}")
 
         self.sr = SR
+        self.default_lang = DEFAULT_LANG
 
         # Rolling analysis buffer (mixed mono stream)
         self._buf = np.zeros(0, dtype=np.float32)
@@ -161,25 +163,26 @@ class RealtimeEngine:
         self.HOP_SAMPLES = int(HOP_SEC * SR)
 
         logger.info(
-            "RealtimeEngine ready: SR=%d WINDOW=%.2fs HOP=%.2fs USE_VAD=%s ENROLL=%s",
+            "RealtimeEngine ready: SR=%d WINDOW=%.2fs HOP=%.2fs USE_VAD=%s ENROLL=%s default_lang=%s",
             SR,
             WINDOW_SEC,
             HOP_SEC,
             USE_SILERO_VAD,
             USE_SPEAKER_ENROLLMENT,
+            self.default_lang,
         )
 
     # ===================== PUBLIC API =====================
 
-    def feed(self, session_id: str, pcm16: bytes) -> List[AsrResult]:
+    def feed(self, session_id: str, pcm16: bytes, lang: Optional[str] = None) -> List[AsrResult]:
         """
         Append PCM16 mono audio to the rolling buffer, run as many 5s windows
         as available, and return finalized ASR results.
 
-        NOTE: This is 1:1 with the main loop of 20_stream_diar_first.py,
-        minus the capture/mixing parts (we assume the BFF already gives us
-        clean 16k mono blocks).
+        lang: optional ISO code ("cs", "en", etc.). If None, uses self.default_lang.
         """
+        effective_lang = lang or self.default_lang
+
         x = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
         out: List[AsrResult] = []
 
@@ -187,8 +190,8 @@ class RealtimeEngine:
             # 1) Ingest audio into buf
             self._buf = np.concatenate([self._buf, x])
             logger.debug(
-                "feed(session=%s): appended %d samples, buf_len=%d",
-                session_id, x.size, self._buf.size
+                "feed(session=%s, lang=%s): appended %d samples, buf_len=%d",
+                session_id, effective_lang, x.size, self._buf.size
             )
 
             # 2) Process complete windows
@@ -243,19 +246,20 @@ class RealtimeEngine:
 
                         wave_chunk = window[s_idx:e_idx]
                         label = self._map_speaker_label(d["speaker"], wave_chunk)
-                        text = self._asr_text_on_chunk(wave_chunk)
+                        text = self._asr_text_on_chunk(wave_chunk, effective_lang)
 
                         if text:
                             self._emitted_keys.add(key)
                             logger.debug(
-                                "Emitting session=%s speaker=%s [%.3f, %.3f]: %s",
-                                session_id, label, s_abs, e_abs, text
+                                "Emitting session=%s speaker=%s [%.3f, %.3f] lang=%s: %s",
+                                session_id, label, s_abs, e_abs, effective_lang, text
                             )
                             out.append(AsrResult(
                                 start_s=s_abs,
                                 end_s=e_abs,
                                 text=f"{label}: {text}",
                                 is_final=True,
+                                lang=effective_lang,
                             ))
 
                 # Slide window
@@ -272,10 +276,10 @@ class RealtimeEngine:
             end_s=r.end_s,
             text=r.text,
             type=stream_pb2.FINAL if r.is_final else stream_pb2.PARTIAL,
-            lang=LANG or "",
+            lang=(r.lang or self.default_lang or ""),
         )
 
-    # ===================== INTERNALS (1:1 with script) =====================
+    # ===================== INTERNALS (1:1 with script, + lang param) =====================
 
     def _round_time(self, t: float, resolution: float) -> float:
         return round(t / resolution) * resolution
@@ -294,7 +298,7 @@ class RealtimeEngine:
             })
         return segs
 
-    def _asr_text_on_chunk(self, wave: np.ndarray) -> str:
+    def _asr_text_on_chunk(self, wave: np.ndarray, lang: Optional[str]) -> str:
         if wave.size < int(FINALIZE_MIN_DUR_SEC * SR):
             return ""
         import tempfile, os as _os
@@ -304,7 +308,7 @@ class RealtimeEngine:
         try:
             segs, _ = self._asr.transcribe(
                 path,
-                language=LANG,
+                language=(lang or None),
                 task="transcribe",
                 beam_size=5,
                 temperature=[0.0],

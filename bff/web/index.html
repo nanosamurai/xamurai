@@ -4,6 +4,17 @@
 <body>
   <h3>Mic → WebSocket → BFF</h3>
   <label>Session ID: <input id="sid" value="test1"></label>
+
+  <div>
+      <label>Language:
+        <select id="langSelect">
+          <option value="cs" selected>Czech (cs)</option>
+          <option value="en">English (en)</option>
+          <option value="">Auto</option>
+        </select>
+      </label>
+  </div>
+
   <button id="start">Start</button>
   <button id="stop" disabled>Stop</button>
   <pre id="log" style="height: 220px; overflow:auto; border:1px solid #ccc; padding:8px"></pre>
@@ -58,7 +69,8 @@ async function start() {
   document.getElementById('stop').disabled = false;
 
   const sid = document.getElementById('sid').value || 'test1';
-  ws = new WebSocket(`ws://${location.host}/ws?session_id=${encodeURIComponent(sid)}`);
+  const lang = document.getElementById("langSelect").value;
+  ws = new WebSocket(`ws://${location.host}/ws?session_id=${encodeURIComponent(sid)}&session_lang=${encodeURIComponent(lang)}`);
   ws.binaryType = "arraybuffer";
   ws.onmessage = (ev) => {
         try {
