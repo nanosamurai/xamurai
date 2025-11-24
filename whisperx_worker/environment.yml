@@ -1,0 +1,21 @@
+name: drsynth-whisperx
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.13.5
+  - numpy
+  - scipy
+  - libsndfile
+  - ffmpeg
+  - pip
+
+  - pip:
+      - soundfile
+      - confluent-kafka>=2.0
+      - protobuf>=5.29
+
+      # WhisperX + friends
+      - whisperx
