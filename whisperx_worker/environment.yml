@@ -19,3 +19,4 @@ dependencies:
 
       # WhisperX + friends
       - whisperx
+      - hf-xet==1.1.10
