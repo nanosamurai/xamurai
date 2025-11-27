@@ -192,7 +192,7 @@ def main():
 
             key_bytes = msg.key()
             key = key_bytes.decode("utf-8") if key_bytes else ""
-            logger.debug("Processing message with key=%s", key)
+            logger.debug("Processing message with key=%s, offset=%i", key, msg.offset())
 
             audio = stream_pb2.AudioChunk()
             audio.ParseFromString(msg.value())
@@ -237,6 +237,7 @@ def main():
 
                 # WhisperX inference
                 text, segments = run_whisperx(wav_path, lang=lang)
+                logger.debug("Ran WhisperX inference, entire text is: %s", text)
 
                 # Compute base offset for this slice
                 base_start = slice_index[session_id] * SLICE_SECONDS
@@ -255,6 +256,7 @@ def main():
                         # later you can fill supersedes_seq with real-time seq ids
                         supersedes_seq=[],
                     )
+                    logger.debug("Sending a refined message with start_s:%0.1f, speaker: %s ; text: %s ", abs_start, speaker, seg_text)
                     p.produce(
                         topic=TOPIC_REFINED,
                         key=session_id.encode("utf-8"),
