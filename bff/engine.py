@@ -1,5 +1,3 @@
-# bff/engine.py
-
 import os
 import threading
 import logging
@@ -31,7 +29,7 @@ DEFAULT_LANG = os.getenv("FW_LANG_DEFAULT", None)   # "cs", "en", or None
 FINALIZE_MIN_DUR_SEC = 0.25   # ignore tiny segments
 
 # VAD (window-level)
-USE_SILERO_VAD = False
+USE_SILERO_VAD = True
 VAD_MIN_SPEECH_MS = 150      # was 350
 VAD_MIN_SILENCE_MS = 400     # was 250
 # MIN_SPEECH_IN_WINDOW_SEC = 0.35
@@ -51,25 +49,26 @@ class AsrResult:
     end_s: float
     text: str
     is_final: bool
-    lang: Optional[str] = None  # NEW
+    lang: Optional[str] = None  # per-result language
+    speaker: Optional[str] = None
 
 
 class RealtimeEngine:
     """
-    Realtime diarization+ASR engine, ported directly from 20_stream_diar_first.py:
+    Realtime diarization+ASR engine, ported from 20_stream_diar_first.py.
 
-    - Input: 16kHz mono PCM16 bytes (BLOCK=2048) from BFF WS.
-    - Internal:
-        * rolling buffer `buf` of float32 samples
-        * WINDOWS of length 5s, hop 4.5s
-        * per-window:
+    - Input: 16kHz mono PCM16 bytes (BLOCK=2048) from BFF WS (any session).
+    - Internal (global rolling stream):
+        * rolling buffer `self._buf` of float32 samples
+        * windows of length WINDOW_SEC (5s), hop HOP_SEC (4.5s)
+        * per window:
             - optional VAD gate
             - pyannote/speaker-diarization-community-1
             - center-based window "ownership" to avoid double ASR across overlaps
             - coarse dedupe key (round start/end, label)
-            - optional speaker enrollment mapping
+            - optional speaker enrollment mapping (SPEAKER_XX → enrolled name)
             - faster-whisper ASR (vad_filter=False, language=per-session)
-    - Output: list[AsrResult] for each feed() call.
+    - Output: list[AsrResult] for each feed() call, with absolute start_s/end_s.
     """
 
     def __init__(self) -> None:
@@ -107,7 +106,7 @@ class RealtimeEngine:
         if not hf_token:
             raise RuntimeError("Set HF_TOKEN environment variable for pyannote.")
 
-        # ---- Models (same as script) ----
+        # ---- Models ----
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         logger.info("Initializing Faster-Whisper 'medium' on %s", device)
@@ -257,9 +256,10 @@ class RealtimeEngine:
                             out.append(AsrResult(
                                 start_s=s_abs,
                                 end_s=e_abs,
-                                text=f"{label}: {text}",
+                                text=text,
                                 is_final=True,
                                 lang=effective_lang,
+                                speaker=label,
                             ))
 
                 # Slide window
@@ -277,9 +277,10 @@ class RealtimeEngine:
             text=r.text,
             type=stream_pb2.FINAL if r.is_final else stream_pb2.PARTIAL,
             lang=(r.lang or self.default_lang or ""),
+            speaker=(r.speaker or ""),
         )
 
-    # ===================== INTERNALS (1:1 with script, + lang param) =====================
+    # ===================== INTERNALS =====================
 
     def _round_time(self, t: float, resolution: float) -> float:
         return round(t / resolution) * resolution

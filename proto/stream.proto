@@ -19,6 +19,7 @@ message AsrEvent {
   string  text       = 4;
   AsrType type       = 5;
   string  lang       = 6; // optional (e.g., "cs")
+  string speaker    = 7;
 }
 
 message DiarEvent {
@@ -36,4 +37,7 @@ message RefinedEvent {
   string  text         = 4;
   string  speaker      = 5;              // optional/mapped
   repeated uint64 supersedes_seq = 6;    // optional linkage to live lines
+  string lang             = 7;
 }
+
+//python -m grpc_tools.protoc -I . --python_out=. stream.proto

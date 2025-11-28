@@ -6,18 +6,31 @@
   <label>Session ID: <input id="sid" value="test1"></label>
 
   <div>
-      <label>Language:
-        <select id="langSelect">
-          <option value="cs" selected>Czech (cs)</option>
-          <option value="en">English (en)</option>
-          <option value="">Auto</option>
-        </select>
-      </label>
+    <label>Language:
+      <select id="langSelect">
+        <option value="cs" selected>Czech (cs)</option>
+        <option value="en">English (en)</option>
+        <option value="">Auto</option>
+      </select>
+    </label>
   </div>
 
   <button id="start">Start</button>
   <button id="stop" disabled>Stop</button>
-  <pre id="log" style="height: 220px; overflow:auto; border:1px solid #ccc; padding:8px"></pre>
+  <button id="clear">Clear logs</button>
+
+  <div style="display:flex; gap:16px; margin-top:12px;">
+    <div style="flex:1; min-width:0;">
+      <h4>Realtime ASR</h4>
+      <pre id="asr_log"
+           style="height: 260px; overflow:auto; border:1px solid #ccc; padding:8px; white-space:pre-wrap;"></pre>
+    </div>
+    <div style="flex:1; min-width:0;">
+      <h4>Refined (offline / WhisperX)</h4>
+      <pre id="refined_log"
+           style="height: 260px; overflow:auto; border:1px solid #ccc; padding:8px; white-space:pre-wrap;"></pre>
+    </div>
+  </div>
 
 <script>
 let ws, ac, media, node, running = false;
@@ -56,10 +69,16 @@ function downsampleTo16k(input, inRate) {
   }
 }
 
-function log(s){
-  const el = document.getElementById('log');
+// Append text to a specific <pre>
+function appendLine(id, s) {
+  const el = document.getElementById(id);
   el.textContent += s + "\n";
   el.scrollTop = el.scrollHeight;
+}
+
+function clearLogs() {
+  document.getElementById('asr_log').textContent = "";
+  document.getElementById('refined_log').textContent = "";
 }
 
 async function start() {
@@ -70,22 +89,56 @@ async function start() {
 
   const sid = document.getElementById('sid').value || 'test1';
   const lang = document.getElementById("langSelect").value;
+
   ws = new WebSocket(`ws://${location.host}/ws?session_id=${encodeURIComponent(sid)}&session_lang=${encodeURIComponent(lang)}`);
   ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    appendLine('asr_log', "[ws] connected");
+  };
+
+  ws.onclose = () => {
+    appendLine('asr_log', "[ws] closed");
+  };
+
+  ws.onerror = (e) => {
+    appendLine('asr_log', "[ws] error: " + e.toString());
+  };
+
   ws.onmessage = (ev) => {
-        try {
-            const msg = JSON.parse(ev.data);
-            const tag = msg.final ? "FINAL" : "PARTIAL";
-            log(`[${tag}] ${msg.text}`);
-        } catch (e) {
-            // fallback if anything weird comes in
-            log(ev.data);
-        }
-    };
-  ws.onopen = ()=> log("[ws] connected");
+    try {
+      const msg = JSON.parse(ev.data);
+
+      if (msg.type === "asr") {
+        // Realtime ASR event
+        const tag = msg.final ? "FINAL" : "PARTIAL";
+        const start = typeof msg.start_s === "number" ? msg.start_s : Number(msg.start_s || 0);
+        const end   = typeof msg.end_s === "number" ? msg.end_s : Number(msg.end_s || 0);
+        const speaker = msg.speaker || "UNK";
+        const ts = `[${tag} ${start.toFixed(2)}–${end.toFixed(2)}]`;
+        appendLine("asr_log", `${ts} ${speaker}: ${msg.text}`);
+      } else if (msg.type === "refined") {
+        // Offline WhisperX-refined event
+        const start = typeof msg.start_s === "number" ? msg.start_s : Number(msg.start_s || 0);
+        const end   = typeof msg.end_s === "number" ? msg.end_s : Number(msg.end_s || 0);
+        const speaker = msg.speaker || "UNK";
+        const ts = `[REFINED ${start.toFixed(2)}–${end.toFixed(2)}]`;
+        appendLine("refined_log", `${ts} ${speaker}: ${msg.text}`);
+      } else {
+        // Unknown message type: dump to ASR log
+        appendLine("asr_log", ev.data);
+      }
+    } catch (e) {
+      // fallback if parsing fails
+      appendLine("asr_log", ev.data);
+    }
+  };
 
   ac = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-  media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, noiseSuppression: false, echoCancellation: false }, video: false });
+  media = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, noiseSuppression: false, echoCancellation: false },
+    video: false
+  });
 
   const src = ac.createMediaStreamSource(media);
 
@@ -108,14 +161,17 @@ function stop() {
   running = false;
   document.getElementById('start').disabled = false;
   document.getElementById('stop').disabled = true;
+
   try { node && node.disconnect(); } catch(e){}
-  try { media && media.getTracks().forEach(t=>t.stop()); } catch(e){}
+  try { media && media.getTracks().forEach(t => t.stop()); } catch(e){}
   try { ac && ac.close(); } catch(e){}
   try { ws && ws.close(); } catch(e){}
-  log("[stopped]");
+
+  appendLine('asr_log', "[stopped]");
 }
 
 document.getElementById('start').onclick = start;
 document.getElementById('stop').onclick = stop;
+document.getElementById('clear').onclick = clearLogs;
 </script>
 </body>
