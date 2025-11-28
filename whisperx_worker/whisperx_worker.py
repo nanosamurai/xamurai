@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
-# WhisperX globals (lazy init)
+# WhisperX globals (initialized at startup)
 # --------------------------------------------------------------------------- #
 _WHISPERX_MODEL = None
 _ALIGN_MODEL = None
@@ -37,39 +37,63 @@ _ALIGN_METADATA = None
 _WHISPERX_DEVICE = None
 
 
-def _init_whisperx(lang_hint: Optional[str] = None):
+def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     """
-    Lazy global initialization of WhisperX.
-    lang_hint is only used as a hint for which align model we might need first,
-    but WhisperX will autodetect language if not provided.
+    Global initialization of WhisperX.
+
+    Called once at startup from main() so the first slice does not pay
+    the full model download/compile cost.
+
+    lang_hint is currently unused, but kept for future extension.
     """
     global _WHISPERX_MODEL, _ALIGN_MODEL, _ALIGN_METADATA, _WHISPERX_DEVICE
 
     if _WHISPERX_MODEL is not None:
+        logger.debug("WhisperX model already initialized, skipping.")
         return
 
     import torch
     import whisperx
 
-    _WHISPERX_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    compute_type = "float16" if _WHISPERX_DEVICE == "cuda" else "int8"
+    # Allow overriding device via env if you ever want CPU-only for tests
+    env_device = os.getenv("WHISPERX_DEVICE", "").lower().strip()
+    if env_device in ("cuda", "gpu"):
+        _WHISPERX_DEVICE = "cuda"
+    elif env_device in ("cpu",):
+        _WHISPERX_DEVICE = "cpu"
+    else:
+        _WHISPERX_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-    logger.info("Loading WhisperX ASR model (medium) on %s, compute_type=%s",
-                _WHISPERX_DEVICE, compute_type)
+    # Compute type: float16 on GPU, int8 on CPU (you can tweak via env)
+    env_compute = os.getenv("WHISPERX_COMPUTE_TYPE", "").strip()
+    if env_compute:
+        compute_type = env_compute
+    else:
+        compute_type = "float16" if _WHISPERX_DEVICE == "cuda" else "int8"
+
+    logger.info(
+        "Loading WhisperX ASR model (medium) on %s, compute_type=%s",
+        _WHISPERX_DEVICE,
+        compute_type,
+    )
+
     _WHISPERX_MODEL = whisperx.load_model(
         "medium",
         device=_WHISPERX_DEVICE,
         compute_type=compute_type,
     )
 
-    # We will load align model lazily once we know the language
+    # We will load the alignment model lazily per language (first segment)
     _ALIGN_MODEL = None
     _ALIGN_METADATA = None
 
+    logger.info("WhisperX ASR model initialized successfully on %s", _WHISPERX_DEVICE)
 
-def _ensure_align_model(language_code: str):
+
+def _ensure_align_model(language_code: str) -> None:
     """
     Ensure we have an alignment model for the given language code.
+    Will lazy-load and cache it in globals.
     """
     global _ALIGN_MODEL, _ALIGN_METADATA, _WHISPERX_DEVICE
 
@@ -86,26 +110,31 @@ def _ensure_align_model(language_code: str):
     )
 
 
-def run_whisperx(wav_path: str, lang: Optional[str] = None) -> Tuple[str, List[Tuple[float, float, str, str]]]:
+def run_whisperx(
+    wav_path: str,
+    lang: Optional[str] = None
+) -> Tuple[str, List[Tuple[float, float, str, str]]]:
     """
     Run WhisperX on a wav file.
 
     Returns:
-      - full_text: concatenated text
+      - full_text: concatenated text over all segments
       - segments: list of (start_s, end_s, text, speaker_label)
-        For now, speaker_label is "" (no offline diarization).
 
-    If lang is None, WhisperX will autodetect language.
+    For now, speaker_label is "" (no offline diarization).
     """
     import whisperx
 
-    _init_whisperx(lang_hint=lang)
+    if _WHISPERX_MODEL is None:
+        # Should not happen because we init at startup, but keep a guard.
+        logger.warning("WhisperX model not initialized yet; initializing now.")
+        _init_whisperx(lang_hint=lang)
 
     # Load audio
     audio = whisperx.load_audio(wav_path)
     logger.info("WhisperX: transcribing %s (lang=%s)", wav_path, lang or "auto")
 
-    # Transcribe (WhisperX wrapper around Whisper)
+    # Transcribe using WhisperX wrapper
     if lang:
         result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
     else:
@@ -138,37 +167,53 @@ def run_whisperx(wav_path: str, lang: Optional[str] = None) -> Tuple[str, List[T
         words_out.append(text)
 
     full_text = " ".join(words_out).strip()
-    logger.info("WhisperX: got %d segments, total_text_len=%d",
-                len(segments_out), len(full_text))
+    logger.info(
+        "WhisperX: got %d segments, total_text_len=%d",
+        len(segments_out),
+        len(full_text),
+    )
 
     return full_text, segments_out
 
 
 def make_consumer() -> Consumer:
     logger.info("Creating Kafka consumer")
-    return Consumer({
-        "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "group.id": GROUP_ID,
-        "enable.auto.commit": False,
-        "auto.offset.reset": "earliest",
-        "max.partition.fetch.bytes": 5_000_000,
-        "fetch.wait.max.ms": 50,
-    })
+    return Consumer(
+        {
+            "bootstrap.servers": KAFKA_BOOTSTRAP,
+            "group.id": GROUP_ID,
+            "enable.auto.commit": False,
+            "auto.offset.reset": "earliest",
+            "max.partition.fetch.bytes": 5_000_000,
+            "fetch.wait.max.ms": 50,
+        }
+    )
 
 
 def make_producer() -> Producer:
     logger.info("Creating Kafka producer")
-    return Producer({
-        "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "client.id": "whisperx-async",
-        "compression.type": "zstd",
-        "linger.ms": 10,
-        "batch.size": 131072
-    })
+    return Producer(
+        {
+            "bootstrap.servers": KAFKA_BOOTSTRAP,
+            "client.id": "whisperx-async",
+            "compression.type": "zstd",
+            "linger.ms": 10,
+            "batch.size": 131072,
+        }
+    )
 
 
 def main():
     logger.info("Starting whisperx_worker")
+
+    # ---------- Initialize WhisperX at startup ----------
+    try:
+        _init_whisperx()
+    except Exception as e:
+        logger.exception("Failed to initialize WhisperX at startup: %s", e)
+        return
+    # ---------------------------------------------------
+
     c = make_consumer()
     p = make_producer()
     c.subscribe([TOPIC_AUDIO])
@@ -187,12 +232,16 @@ def main():
             if msg is None:
                 continue
             if msg.error():
-                logger.error(f"Kafka error: {msg.error()}")
+                logger.error("Kafka error: %s", msg.error())
                 raise KafkaException(msg.error())
 
             key_bytes = msg.key()
             key = key_bytes.decode("utf-8") if key_bytes else ""
-            logger.debug("Processing message with key=%s, offset=%i", key, msg.offset())
+            logger.debug(
+                "Processing message with key=%s, offset=%i",
+                key,
+                msg.offset(),
+            )
 
             audio = stream_pb2.AudioChunk()
             audio.ParseFromString(msg.value())
@@ -205,13 +254,16 @@ def main():
             buffers[session_id].append(arr)
             buf_samples[session_id] += arr.size
 
-            logger.debug("Buffer size for session %s: %d samples",
-                         session_id, buf_samples[session_id])
+            logger.debug(
+                "Buffer size for session %s: %d samples",
+                session_id,
+                buf_samples[session_id],
+            )
 
             # If we have ≥ SLICE_SECONDS, dump to WAV and process
             if buf_samples[session_id] >= int(SLICE_SECONDS * SR):
                 need = int(SLICE_SECONDS * SR)
-                parts = []
+                parts: List[np.ndarray] = []
                 while need > 0 and buffers[session_id]:
                     ch = buffers[session_id][0]
                     if ch.size <= need:
@@ -232,12 +284,19 @@ def main():
                 x = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
                 sf.write(wav_path, x, SR, subtype="PCM_16")
 
-                logger.info("Session %s: built %0.1fs slice → %s",
-                            session_id, SLICE_SECONDS, wav_path)
+                logger.info(
+                    "Session %s: built %0.1fs slice → %s",
+                    session_id,
+                    SLICE_SECONDS,
+                    wav_path,
+                )
 
                 # WhisperX inference
                 text, segments = run_whisperx(wav_path, lang=lang)
-                logger.debug("Ran WhisperX inference, entire text is: %s", text)
+                logger.debug(
+                    "Ran WhisperX inference, entire text is: %s",
+                    text,
+                )
 
                 # Compute base offset for this slice
                 base_start = slice_index[session_id] * SLICE_SECONDS
@@ -256,7 +315,12 @@ def main():
                         # later you can fill supersedes_seq with real-time seq ids
                         supersedes_seq=[],
                     )
-                    logger.debug("Sending a refined message with start_s:%0.1f, speaker: %s ; text: %s ", abs_start, speaker, seg_text)
+                    logger.debug(
+                        "Sending a refined message with start_s:%0.1f, speaker:%s ; text:%s ",
+                        abs_start,
+                        speaker,
+                        seg_text,
+                    )
                     p.produce(
                         topic=TOPIC_REFINED,
                         key=session_id.encode("utf-8"),
