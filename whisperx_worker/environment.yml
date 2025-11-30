@@ -20,3 +20,4 @@ dependencies:
       # WhisperX + friends
       - whisperx
       - hf-xet==1.1.10
+# pip install "torch==2.8.0+cu128" "torchaudio==2.8.0+cu128" --index-url https://download.pytorch.org/whl/cu128
