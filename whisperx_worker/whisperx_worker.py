@@ -43,8 +43,6 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
 
     Called once at startup from main() so the first slice does not pay
     the full model download/compile cost.
-
-    lang_hint is currently unused, but kept for future extension.
     """
     global _WHISPERX_MODEL, _ALIGN_MODEL, _ALIGN_METADATA, _WHISPERX_DEVICE
 
@@ -55,16 +53,14 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     import torch
     import whisperx
 
-    # Allow overriding device via env if you ever want CPU-only for tests
-    env_device = os.getenv("WHISPERX_DEVICE", "").lower().strip()
-    if env_device in ("cuda", "gpu"):
+    # 🔥 Hard-coded policy: use CUDA if available, otherwise CPU
+    if torch.cuda.is_available():
         _WHISPERX_DEVICE = "cuda"
-    elif env_device in ("cpu",):
-        _WHISPERX_DEVICE = "cpu"
     else:
-        _WHISPERX_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+        _WHISPERX_DEVICE = "cpu"
 
-    # Compute type: float16 on GPU, int8 on CPU (you can tweak via env)
+    # Optionally let compute_type be overridden via env,
+    # but default to float16 on GPU, int8 on CPU.
     env_compute = os.getenv("WHISPERX_COMPUTE_TYPE", "").strip()
     if env_compute:
         compute_type = env_compute
@@ -83,7 +79,7 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
         compute_type=compute_type,
     )
 
-    # We will load the alignment model lazily per language (first segment)
+    # Align model will be loaded lazily for the detected language
     _ALIGN_MODEL = None
     _ALIGN_METADATA = None
 
