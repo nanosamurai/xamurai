@@ -111,60 +111,55 @@ def run_whisperx(
     lang: Optional[str] = None
 ) -> Tuple[str, List[Tuple[float, float, str, str]]]:
     """
-    Run WhisperX on a wav file.
+    Run WhisperX ASR on a wav file, but use the *original* Whisper
+    segments as the source of truth (no forced alignment).
 
     Returns:
-      - full_text: concatenated text over all segments
-      - segments: list of (start_s, end_s, text, speaker_label)
-
-    For now, speaker_label is "" (no offline diarization).
+      - full_text: concatenated text of all segments
+      - segments: list of (start_s, end_s, text, speaker_label="")
     """
     import whisperx
 
-    if _WHISPERX_MODEL is None:
-        # Should not happen because we init at startup, but keep a guard.
-        logger.warning("WhisperX model not initialized yet; initializing now.")
-        _init_whisperx(lang_hint=lang)
+    # Make sure global model is ready
+    _init_whisperx(lang_hint=lang)
 
     # Load audio
     audio = whisperx.load_audio(wav_path)
     logger.info("WhisperX: transcribing %s (lang=%s)", wav_path, lang or "auto")
 
-    # Transcribe using WhisperX wrapper
+    # Transcribe with WhisperX wrapper (faster-whisper under the hood)
     if lang:
-        result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
+        result = _WHISPERX_MODEL.transcribe(
+            audio,
+            batch_size=16,
+            language=lang,
+        )
     else:
-        result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
+        result = _WHISPERX_MODEL.transcribe(
+            audio,
+            batch_size=16,
+        )
 
     detected_lang = result.get("language", lang or "unknown")
     logger.debug("WhisperX: detected language=%s", detected_lang)
 
-    # Alignment
-    _ensure_align_model(detected_lang)
-    aligned = whisperx.align(
-        result["segments"],
-        _ALIGN_MODEL,
-        _ALIGN_METADATA,
-        audio,
-        _WHISPERX_DEVICE,
-        return_char_alignments=False,
-    )
-
+    # Use original ASR segments directly (no align step).
     segments_out: List[Tuple[float, float, str, str]] = []
     words_out: List[str] = []
 
-    for seg in aligned["segments"]:
-        s0 = float(seg["start"])
-        s1 = float(seg["end"])
-        text = seg.get("text", "").strip()
+    for seg in result.get("segments", []):
+        s0 = float(seg.get("start", 0.0))
+        s1 = float(seg.get("end", 0.0))
+        text = (seg.get("text") or "").strip()
         if not text:
             continue
+
         segments_out.append((s0, s1, text, ""))  # speaker="" for now
         words_out.append(text)
 
     full_text = " ".join(words_out).strip()
     logger.info(
-        "WhisperX: got %d segments, total_text_len=%d",
+        "WhisperX: got %d ASR segments, total_text_len=%d",
         len(segments_out),
         len(full_text),
     )
