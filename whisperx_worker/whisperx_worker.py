@@ -10,6 +10,9 @@ from confluent_kafka import Consumer, Producer, KafkaException
 
 import stream_pb2
 
+import torch
+import whisperx
+
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 TOPIC_AUDIO = os.getenv("KAFKA_TOPIC_AUDIO", "audio.raw")
 TOPIC_REFINED = os.getenv("KAFKA_TOPIC_REFINED", "transcripts.refined")
@@ -49,9 +52,6 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     if _WHISPERX_MODEL is not None:
         logger.debug("WhisperX model already initialized, skipping.")
         return
-
-    import torch
-    import whisperx
 
     # 🔥 Hard-coded policy: use CUDA if available, otherwise CPU
     if torch.cuda.is_available():
@@ -108,63 +108,129 @@ def _ensure_align_model(language_code: str) -> None:
 
 def run_whisperx(
     wav_path: str,
-    lang: Optional[str] = None
+    lang: Optional[str] = None,
+    use_alignment: bool = False,
+    alignment_min_coverage: float = 0.7,
 ) -> Tuple[str, List[Tuple[float, float, str, str]]]:
     """
-    Run WhisperX ASR on a wav file, but use the *original* Whisper
-    segments as the source of truth (no forced alignment).
+    Run WhisperX on a wav file.
+
+    Args:
+      wav_path: path to 16k mono wav.
+      lang: optional language code (e.g. "cs", "en"). If None, WhisperX will detect.
+      use_alignment: if True, try to refine timestamps with WhisperX aligner.
+                     if False, use raw ASR segments only.
+      alignment_min_coverage: if alignment is enabled, require that the
+          total time covered by aligned segments is at least this fraction
+          of the original ASR coverage. Otherwise, fall back to non-aligned.
 
     Returns:
-      - full_text: concatenated text of all segments
-      - segments: list of (start_s, end_s, text, speaker_label="")
+      full_text: concatenated segments text
+      segments: List[(start_s, end_s, text, speaker_label)]
+                speaker_label is "" for now.
     """
-    import whisperx
 
-    # Make sure global model is ready
     _init_whisperx(lang_hint=lang)
 
-    # Load audio
     audio = whisperx.load_audio(wav_path)
-    logger.info("WhisperX: transcribing %s (lang=%s)", wav_path, lang or "auto")
+    logger.info(
+        "WhisperX: transcribing %s (lang=%s, use_alignment=%s)",
+        wav_path, lang or "auto", use_alignment
+    )
 
-    # Transcribe with WhisperX wrapper (faster-whisper under the hood)
+    # --- 1) ASR ---
     if lang:
-        result = _WHISPERX_MODEL.transcribe(
-            audio,
-            batch_size=16,
-            language=lang,
-        )
+        result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
     else:
-        result = _WHISPERX_MODEL.transcribe(
-            audio,
-            batch_size=16,
-        )
+        result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
 
     detected_lang = result.get("language", lang or "unknown")
     logger.debug("WhisperX: detected language=%s", detected_lang)
 
-    # Use original ASR segments directly (no align step).
-    segments_out: List[Tuple[float, float, str, str]] = []
-    words_out: List[str] = []
+    # Base segments from ASR
+    asr_segments = result.get("segments", []) or []
 
-    for seg in result.get("segments", []):
-        s0 = float(seg.get("start", 0.0))
-        s1 = float(seg.get("end", 0.0))
-        text = (seg.get("text") or "").strip()
-        if not text:
-            continue
+    def from_asr_segments():
+        segs_out: List[Tuple[float, float, str, str]] = []
+        words_out: List[str] = []
+        for seg in asr_segments:
+            s0 = float(seg.get("start", 0.0))
+            s1 = float(seg.get("end", 0.0))
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+            segs_out.append((s0, s1, text, ""))  # speaker="" for now
+            words_out.append(text)
+        full = " ".join(words_out).strip()
+        logger.info(
+            "WhisperX (no align): %d segments, total_text_len=%d",
+            len(segs_out), len(full)
+        )
+        return full, segs_out
 
-        segments_out.append((s0, s1, text, ""))  # speaker="" for now
-        words_out.append(text)
+    # If alignment disabled → just return ASR segments.
+    if not use_alignment:
+        return from_asr_segments()
 
-    full_text = " ".join(words_out).strip()
-    logger.info(
-        "WhisperX: got %d ASR segments, total_text_len=%d",
-        len(segments_out),
-        len(full_text),
-    )
+    # --- 2) Try alignment ---
+    try:
+        _ensure_align_model(detected_lang)
+        aligned = whisperx.align(
+            asr_segments,
+            _ALIGN_MODEL,
+            _ALIGN_METADATA,
+            audio,
+            _WHISPERX_DEVICE,
+            return_char_alignments=False,
+        )
 
-    return full_text, segments_out
+        aligned_segments = aligned.get("segments", []) or []
+
+        # Compute coverage for a simple safety check
+        def total_duration(segs):
+            return sum(
+                max(0.0, float(s.get("end", 0.0)) - float(s.get("start", 0.0)))
+                for s in segs
+            )
+
+        asr_cov = total_duration(asr_segments)
+        aln_cov = total_duration(aligned_segments)
+        coverage_ratio = (aln_cov / asr_cov) if asr_cov > 0 else 1.0
+
+        if asr_cov > 0 and coverage_ratio < alignment_min_coverage:
+            logger.warning(
+                "WhisperX alignment coverage too low: %.2f (ASR=%.2fs, aligned=%.2fs). "
+                "Falling back to unaligned segments.",
+                coverage_ratio, asr_cov, aln_cov,
+            )
+            return from_asr_segments()
+
+        segs_out: List[Tuple[float, float, str, str]] = []
+        words_out: List[str] = []
+
+        for seg in aligned_segments:
+            s0 = float(seg.get("start", 0.0))
+            s1 = float(seg.get("end", 0.0))
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+            segs_out.append((s0, s1, text, ""))  # speaker="" for now
+            words_out.append(text)
+
+        full = " ".join(words_out).strip()
+        logger.info(
+            "WhisperX (aligned): %d segments, total_text_len=%d, coverage_ratio=%.2f",
+            len(segs_out), len(full), coverage_ratio
+        )
+        return full, segs_out
+
+    except Exception as e:
+        logger.warning(
+            "WhisperX alignment failed (%s); falling back to unaligned segments.",
+            e
+        )
+        return from_asr_segments()
+
 
 
 def make_consumer() -> Consumer:
@@ -283,7 +349,7 @@ def main():
                 )
 
                 # WhisperX inference
-                text, segments = run_whisperx(wav_path, lang=lang)
+                text, segments = run_whisperx(wav_path, lang=lang, use_alignment=False)
                 logger.debug(
                     "Ran WhisperX inference, entire text is: %s",
                     text,
