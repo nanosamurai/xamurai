@@ -40,4 +40,23 @@ message RefinedEvent {
   string lang             = 7;
 }
 
+message RecordingFinalized {
+  // Session this recording belongs to (same as AudioChunk.session_id)
+  string session_id = 1;
+
+  // Where the finalized WAV/FLAC lives, e.g. s3://bucket/recordings/...
+  string recording_url = 2;
+
+  // Total duration in seconds (optional but very handy).
+  double duration_s = 3;
+
+  // Sample rate (e.g. 16000).
+  int32 sample_rate = 4;
+
+  // Language hint (e.g. "cs", "en"; may be empty if unknown).
+  string lang = 5;
+
+  // When this event was emitted (monotonic or wall-clock, your choice).
+  int64 created_at_ns = 6;
+}
 //python -m grpc_tools.protoc -I . --python_out=. stream.proto
