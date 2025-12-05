@@ -72,3 +72,5 @@ message FinalEvent {
 
   repeated WordAlignment words = 7;
 }
+
+//python -m grpc_tools.protoc -I . --python_out=../ ./proto/stream.proto
