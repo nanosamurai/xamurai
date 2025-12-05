@@ -40,7 +40,6 @@ message RefinedEvent {
   string lang             = 7;
 }
 
-
 // Recording-level metadata: “recording finished, file is available”
 message RecordingFinished {
   string session_id   = 1;
@@ -53,4 +52,23 @@ message RecordingFinished {
   string tenant_id    = 6;
 
   int64 created_at_ns = 7;   // when this event was created
+}
+
+message WordAlignment {
+  double start_s = 1;  // absolute word start time in seconds
+  double end_s   = 2;  // absolute word end time in seconds
+  string text    = 3;  // the word text (normalized)
+}
+
+message FinalEvent {
+  string session_id = 1;
+
+  double start_s    = 2;
+  double end_s      = 3;
+
+  string text       = 4;
+  string speaker    = 5;
+  string lang       = 6;
+
+  repeated WordAlignment words = 7;
 }
