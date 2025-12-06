@@ -1,0 +1,3 @@
+name: drsynth-infra
+runtime: python
+description: Infrastructure for drsynth (BFF, realtime, Kafka, workers, Keycloak ALB)
