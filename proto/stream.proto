@@ -73,4 +73,8 @@ message FinalEvent {
   repeated WordAlignment words = 7;
 }
 
+service RealtimeASR {
+  rpc Stream (stream AudioChunk) returns (stream AsrEvent);
+}
+
 //python -m grpc_tools.protoc -I . --python_out=../ ./proto/stream.proto
