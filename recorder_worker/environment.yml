@@ -1,0 +1,13 @@
+name: drsynth-recorder
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - numpy
+  - libsndfile        # needed by soundfile
+  - pip
+  - pip:
+      - soundfile>=0.12
+      - confluent-kafka>=2.6
+      - protobuf>=5.29
+      - boto3>=1.35    # only actually needed if we use the S3 backend
