@@ -1,17 +1,20 @@
+# bff/app.py
 import asyncio
 import json
 import logging
-from typing import Dict
+import os
+from typing import Dict, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from confluent_kafka import Producer
 
+from bff.refined_bus import RefinedBus
 from bff.settings import settings
 from bff.kafka_io import make_producer, produce_audio_chunk
 from bff.engine import RealtimeEngine
-from bff.refined_bus import RefinedBus  # <— your RefinedBus class
+from bff.auth import verify_token, OIDCError, OIDCUser
 
 # --------------------------------------------------------------------------- #
 # Logging setup
@@ -22,6 +25,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "false").lower() == "true"
 
 app = FastAPI(title="BFF WS (Realtime + Kafka)")
 
@@ -60,6 +65,58 @@ async def root():
     return HTMLResponse("<a href='/ui'>Open WS test UI</a>")
 
 
+async def _authenticate_ws(websocket: WebSocket) -> Optional[OIDCUser]:
+    """
+    Extract and verify a Bearer token from the WS handshake.
+
+    We check:
+    1) Authorization: Bearer <token>
+    2) ?token=<token> query param
+
+    Returns OIDCUser on success, or None if no/invalid token AND AUTH_REQUIRED is False.
+    Raises WebSocketDisconnect if AUTH_REQUIRED and auth fails.
+    """
+    # 1) From headers
+    auth_header = websocket.headers.get("authorization")
+    token: Optional[str] = None
+
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+
+    # 2) From query param (e.g. ws://.../ws?token=eyJ...)
+    if token is None:
+        token_q = websocket.query_params.get("token")
+        if token_q:
+            token = token_q.strip()
+
+    if not token:
+        if AUTH_REQUIRED:
+            logger.info("WS auth failed: missing token")
+            await websocket.close(code=1008)  # policy violation
+            raise WebSocketDisconnect(code=1008)
+        else:
+            logger.warning("WS: no token provided, continuing (AUTH_REQUIRED=false)")
+            return None
+
+    try:
+        user = verify_token(token)
+        logger.info(
+            "WS auth success: sub=%s username=%s email=%s",
+            user.sub,
+            user.preferred_username,
+            user.email,
+        )
+        return user
+    except OIDCError as e:
+        if AUTH_REQUIRED:
+            logger.info("WS auth failed: %s", e)
+            await websocket.close(code=1008)
+            raise WebSocketDisconnect(code=1008)
+        else:
+            logger.warning("WS auth error (ignored because AUTH_REQUIRED=false): %s", e)
+            return None
+
+
 @app.websocket("/ws")
 async def ws_audio(
     websocket: WebSocket,
@@ -67,6 +124,15 @@ async def ws_audio(
     session_lang: str = Query(...),
 ):
     await websocket.accept()
+
+    # Authenticate (or not, depending on AUTH_REQUIRED)
+    user: Optional[OIDCUser] = None
+    try:
+        user = await _authenticate_ws(websocket)
+    except WebSocketDisconnect:
+        # Already closed in _authenticate_ws
+        return
+
     session_seq.setdefault(session_id, 0)
 
     # register for refined (offline) events for this session
