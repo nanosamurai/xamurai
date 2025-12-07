@@ -1,4 +1,4 @@
-name: drsynth-bff
+name: drsynth-rtservice
 channels:
   - conda-forge
   - anaconda
@@ -148,7 +148,7 @@ dependencies:
       - ruamel-yaml==0.18.15
       - ruamel-yaml-clib==0.2.14
       - safetensors==0.6.2
-      - scikit-learn==1.5.2
+      - scikit-learn==1.6.1
       - setuptools==80.9.0
       - six==1.17.0
       - sniffio==1.3.1
@@ -185,4 +185,5 @@ dependencies:
       - zipp==3.23.0
       - "python-jose[cryptography]>=3.3"
       - httpx>=0.27
-prefix: C:\Users\miros\miniconda3\envs\drsynth-bff
+      - grpcio
+prefix: C:\Users\miros\miniconda3\envs\drsynth-rtservice
