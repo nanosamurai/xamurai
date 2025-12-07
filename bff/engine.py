@@ -13,7 +13,7 @@ from pyannote.audio import Pipeline, Model
 from pyannote.audio import Inference as EmbeddingInference
 
 from bff.settings import settings
-import stream_pb2
+from proto import stream_pb2
 
 logger = logging.getLogger(__name__)
 
