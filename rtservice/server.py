@@ -1,6 +1,8 @@
 import os
 import asyncio
 import logging
+from concurrent import futures
+from typing import Optional
 
 import grpc
 
@@ -26,9 +28,9 @@ class RealtimeAsrServicer(stream_pb2_grpc.RealtimeASRServicer):
     - Streams back AsrEvent for any finalized segments.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, engine: RealtimeEngine) -> None:
         super().__init__()
-        self._engine = RealtimeEngine()
+        self._engine = engine
 
     async def Stream(self, request_iterator, context):
         """
@@ -74,5 +76,31 @@ async def serve() -> None:
     await server.wait_for_termination()
 
 
+def create_realtime_asr_server(
+    engine: Optional[RealtimeEngine] = None,
+    port: int = None
+) -> grpc.Server:
+    """
+    Creates a gRPC server instance but does not start it yet.
+    """
+    if engine is None:
+        engine = RealtimeEngine()
+
+    if port is None:
+        port = os.getenv("RT_GRPC_PORT", 50051)
+
+    logger.info("Creating a RealtimeASR gRPC server on port: %s", port)
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    servicer = RealtimeAsrServicer(engine)
+    stream_pb2_grpc.add_RealtimeASRServicer_to_server(servicer, server)
+    server.add_insecure_port(f"[::]:{port}")
+    return server
+
+def main():
+    server = create_realtime_asr_server(port=50051)
+    logger.info("Starting RealtimeASR gRPC server...")
+    server.start()
+    server.wait_for_termination()
+
 if __name__ == "__main__":
-    asyncio.run(serve())
+    main()
