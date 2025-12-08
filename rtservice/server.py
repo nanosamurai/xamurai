@@ -8,9 +8,7 @@ import grpc
 
 from proto import stream_pb2
 from proto import stream_pb2_grpc
-
-# Reuse your existing engine implementation
-from engine import RealtimeEngine, AsrResult
+from rtservice.engine import RealtimeEngine
 
 logging.basicConfig(
     level=logging.INFO,
