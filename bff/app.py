@@ -71,6 +71,9 @@ async def root():
     return HTMLResponse("<a href='/ui'>Open WS test UI</a>")
 
 
+# --------------------------------------------------------------------------- #
+# Auth helper
+# --------------------------------------------------------------------------- #
 async def _authenticate_ws(websocket: WebSocket) -> Optional[OIDCUser]:
     """
     Extract and verify a Bearer token from the WS handshake.
@@ -123,6 +126,9 @@ async def _authenticate_ws(websocket: WebSocket) -> Optional[OIDCUser]:
             return None
 
 
+# --------------------------------------------------------------------------- #
+# gRPC stream helper
+# --------------------------------------------------------------------------- #
 def _start_grpc_stream(
     session_id: str,
     lang: str,
@@ -166,7 +172,9 @@ def _start_grpc_stream(
                 getattr(e, "code", lambda: None)(),
             )
         except Exception as e:
-            logger.exception("gRPC stream unexpected error for session=%s: %s", session_id, e)
+            logger.exception(
+                "gRPC stream unexpected error for session=%s: %s", session_id, e
+            )
         finally:
             try:
                 channel.close()
@@ -181,6 +189,9 @@ def _start_grpc_stream(
     return t
 
 
+# --------------------------------------------------------------------------- #
+# WebSocket endpoint
+# --------------------------------------------------------------------------- #
 @app.websocket("/ws")
 async def ws_audio(
     websocket: WebSocket,
@@ -190,9 +201,8 @@ async def ws_audio(
     await websocket.accept()
 
     # Authenticate (or not, depending on AUTH_REQUIRED)
-    user: Optional[OIDCUser] = None
     try:
-        user = await _authenticate_ws(websocket)
+        user: Optional[OIDCUser] = await _authenticate_ws(websocket)
     except WebSocketDisconnect:
         # Already closed in _authenticate_ws
         return
@@ -219,6 +229,15 @@ async def ws_audio(
         try:
             while True:
                 data = await websocket.receive()
+
+                # Explicitly handle disconnect frame to avoid RuntimeError on next receive()
+                if data.get("type") == "websocket.disconnect":
+                    logger.info(
+                        "WS disconnect frame received (recv loop): session=%s code=%s",
+                        session_id,
+                        data.get("code"),
+                    )
+                    break
 
                 if "bytes" not in data or data["bytes"] is None:
                     # ignore non-binary frames for now
@@ -276,7 +295,6 @@ async def ws_audio(
     async def send_asr_loop():
         """Read AsrEvent from gRPC response queue and push via WS."""
         try:
-            loop = asyncio.get_running_loop()
             while True:
                 ev = await asyncio.to_thread(resp_q.get)
                 if ev is None:
@@ -327,18 +345,22 @@ async def ws_audio(
             t.cancel()
     finally:
         refined_bus.unregister(session_id)
+
         # close gRPC request side if not already
         try:
             req_q.put_nowait(None)
         except Exception:
             pass
+
         # give the gRPC thread a moment to finish
         try:
             grpc_thread.join(timeout=1.0)
         except Exception:
             pass
+
         try:
             producer.flush(2.0)
         except Exception:
             logger.exception("[WS final] error while flushing Kafka producer")
+
         logger.info("WS closed: session=%s", session_id)
