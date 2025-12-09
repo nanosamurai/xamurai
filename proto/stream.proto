@@ -8,6 +8,7 @@ message AudioChunk {
   int64   t0_ns        = 3;   // producer monotonic timestamp OR sample time
   uint32  sample_rate  = 4;   // 16000
   bytes   pcm16_le     = 5;   // little-endian PCM16 mono
+  string  lang       = 6;
 }
 
 enum AsrType { PARTIAL = 0; FINAL = 1; }
@@ -77,4 +78,4 @@ service RealtimeASR {
   rpc Stream (stream AudioChunk) returns (stream AsrEvent);
 }
 
-//python -m grpc_tools.protoc -I . --python_out=../ ./proto/stream.proto
+//python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. ./proto/stream.proto
