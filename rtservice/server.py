@@ -1,5 +1,4 @@
 import os
-import asyncio
 import logging
 from concurrent import futures
 from typing import Optional
@@ -10,95 +9,97 @@ from proto import stream_pb2
 from proto import stream_pb2_grpc
 from rtservice.engine import RealtimeEngine
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("rtservice")
+logger = logging.getLogger(__name__)
 
-
-class RealtimeAsrServicer(stream_pb2_grpc.RealtimeASRServicer):
+class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
     """
-    gRPC wrapper around RealtimeEngine.
+    Synchronous gRPC servicer for the RealtimeASR bidirectional stream.
 
-    - Accepts a stream of AudioChunk.
-    - For each chunk, runs engine.feed(session_id, pcm16, lang).
-    - Streams back AsrEvent for any finalized segments.
+    - Client sends AudioChunk messages (stream_pb2.AudioChunk)
+    - For each chunk we feed PCM16 into RealtimeEngine
+    - For every finalized segment, we yield an AsrEvent back.
     """
 
     def __init__(self, engine: RealtimeEngine) -> None:
-        super().__init__()
         self._engine = engine
+        self._log = logging.getLogger(__name__)
 
-    async def Stream(self, request_iterator, context):
+    def Stream(self, request_iterator, context):
         """
-        Bi-di streaming RPC:
-          client -> stream AudioChunk
-          server -> stream AsrEvent
+        NOTE: this MUST be a normal (sync) generator for grpc.server(),
+        not async def and not an async generator.
         """
-        async for chunk in request_iterator:
+        for chunk in request_iterator:
             session_id = chunk.session_id or "unknown"
-            lang = chunk.lang or None
+            lang = getattr(chunk, "lang", "") or None
 
-            # Reuse the engine’s feed() just like your old in-process BFF
-            results = self._engine.feed(
-                session_id=session_id,
-                pcm16=bytes(chunk.pcm16_le),
-                lang=lang,
+            self._log.debug(
+                "gRPC Stream: received chunk session=%s seq=%d bytes=%d lang=%s",
+                session_id,
+                getattr(chunk, "seq", 0),
+                len(chunk.pcm16_le),
+                lang,
             )
 
+            # Feed into realtime engine
+            results = self._engine.feed(session_id, chunk.pcm16_le, lang=lang)
+
+            # Fan out final events
             for r in results:
-                # r is AsrResult(start_s, end_s, text, is_final, lang, speaker)
-                ev = stream_pb2.AsrEvent(
-                    session_id=session_id,
-                    start_s=r.start_s,
-                    end_s=r.end_s,
-                    text=r.text,
-                    type=stream_pb2.FINAL if r.is_final else stream_pb2.PARTIAL,
-                    lang=(r.lang or ""),
-                    speaker=(r.speaker or ""),
+                ev = self._engine.to_asr_events(session_id, r)
+                self._log.debug(
+                    "gRPC Stream: sending AsrEvent session=%s [%.3f, %.3f] speaker=%s text=%s",
+                    ev.session_id,
+                    ev.start_s,
+                    ev.end_s,
+                    ev.speaker,
+                    ev.text,
                 )
                 yield ev
 
 
-async def serve() -> None:
-    server = grpc.aio.server()
-    servicer = RealtimeAsrServicer()
-    stream_pb2_grpc.add_RealtimeASRServicer_to_server(servicer, server)
-
-    bind_addr = os.getenv("RT_GRPC_BIND", "[::]:50051")
-    server.add_insecure_port(bind_addr)
-
-    logger.info("Starting RealtimeASR gRPC server on %s", bind_addr)
-    await server.start()
-    await server.wait_for_termination()
-
-
 def create_realtime_asr_server(
+    port: int = None,
     engine: Optional[RealtimeEngine] = None,
-    port: int = None
 ) -> grpc.Server:
     """
-    Creates a gRPC server instance but does not start it yet.
+    Factory that builds (but does NOT start) a gRPC server.
+
+    Your tests (and production main) can call server.start() and server.wait_for_termination().
     """
     if engine is None:
         engine = RealtimeEngine()
 
     if port is None:
-        port = os.getenv("RT_GRPC_PORT", 50051)
+        port = os.getenv("RT_GRPC_PORT", 50052)
 
     logger.info("Creating a RealtimeASR gRPC server on port: %s", port)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
-    servicer = RealtimeAsrServicer(engine)
-    stream_pb2_grpc.add_RealtimeASRServicer_to_server(servicer, server)
+    stream_pb2_grpc.add_RealtimeASRServicer_to_server(
+        RealtimeASRServicer(engine),
+        server,
+    )
+
     server.add_insecure_port(f"[::]:{port}")
+    logger.info("Creating a RealtimeASR gRPC server on port: %d", port)
     return server
 
+
 def main():
-    server = create_realtime_asr_server(port=50051)
-    logger.info("Starting RealtimeASR gRPC server...")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    server = create_realtime_asr_server()
     server.start()
-    server.wait_for_termination()
+    logger.info("RealtimeASR server started, waiting for termination…")
+    try:
+        server.wait_for_termination()
+    except KeyboardInterrupt:
+        logger.info("Stopping RealtimeASR server")
+        server.stop(grace=5.0)
+
 
 if __name__ == "__main__":
     main()
