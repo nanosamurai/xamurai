@@ -186,4 +186,5 @@ dependencies:
       - "python-jose[cryptography]>=3.3"
       - httpx>=0.27
       - grpcio
+      - pytest
 prefix: C:\Users\miros\miniconda3\envs\drsynth-rtservice
