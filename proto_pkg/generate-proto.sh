@@ -1,1 +1,0 @@
-python -m grpc_tools.protoc -I ../proto --python_out=src/drsynth_proto --grpc_python_out=src/drsynth_proto ../proto/stream.proto

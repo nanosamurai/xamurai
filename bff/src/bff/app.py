@@ -18,7 +18,7 @@ from bff.settings import settings
 from bff.kafka_io import make_producer, produce_audio_chunk
 from bff.auth import verify_token, OIDCError, OIDCUser
 
-from drsynth_proto import stream_pb2, stream_pb2_grpc
+import stream_pb2, stream_pb2_grpc
 
 # --------------------------------------------------------------------------- #
 # Logging setup

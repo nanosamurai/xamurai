@@ -3,7 +3,7 @@ import os
 import sys
 from confluent_kafka import Consumer, KafkaException
 
-from drsynth_proto import stream_pb2  # generated from proto/stream.proto
+import stream_pb2  # generated from proto/stream.proto
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 TOPIC_REFINED = os.getenv("KAFKA_TOPIC_REFINED", "transcripts.refined")

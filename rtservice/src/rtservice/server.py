@@ -5,8 +5,8 @@ from typing import Optional
 
 import grpc
 
-from proto import stream_pb2
-from proto import stream_pb2_grpc
+import stream_pb2
+import stream_pb2_grpc
 from rtservice.engine import RealtimeEngine
 
 logger = logging.getLogger(__name__)

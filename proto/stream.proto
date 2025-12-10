@@ -1,5 +1,4 @@
 syntax = "proto3";
-package stream;
 
 // ~200–500 ms of PCM16 mono @16 kHz per message
 message AudioChunk {
@@ -80,3 +79,4 @@ service RealtimeASR {
 
 //python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. ./proto/stream.proto
 //python -m grpc_tools.protoc -I ../proto --python_out=src/drsynth_proto --grpc_python_out=src/drsynth_proto ../proto/stream.proto
+//python -m grpc_tools.protoc -I proto --python_out=proto_pkg/src --grpc_python_out=proto_pkg/src proto/stream.proto

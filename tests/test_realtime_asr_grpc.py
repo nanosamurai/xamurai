@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-import proto.stream_pb2
-import proto.stream_pb2_grpc
+import stream_pb2
+import stream_pb2_grpc
 
 from rtservice.server import create_realtime_asr_server
 
@@ -47,7 +47,7 @@ def gen_chunks(
     audio: np.ndarray,
     lang: str = "cs",
     chunk_samples: int = CHUNK_SAMPLES,
-) -> Iterable[proto.stream_pb2.AudioChunk]:
+) -> Iterable[stream_pb2.AudioChunk]:
     """
     Turn a mono 16k float32 waveform into a stream of AudioChunk messages.
     """
@@ -58,7 +58,7 @@ def gen_chunks(
         end = min(start + chunk_samples, n)
         frame = pcm16[start:end]
         seq += 1
-        msg = proto.stream_pb2.AudioChunk(
+        msg = stream_pb2.AudioChunk(
             session_id=session_id,
             seq=seq,
             t0_ns=0,
@@ -75,7 +75,7 @@ def gen_chunks(
         )
         yield msg
 
-    yield proto.stream_pb2.AudioChunk(
+    yield stream_pb2.AudioChunk(
         session_id=session_id,
         seq=seq + 1,
         t0_ns=0,
@@ -127,7 +127,7 @@ def test_realtime_asr_stream_basic(grpc_channel):
     """
     Sanity check: send a full test WAV and ensure at least one AsrEvent with text.
     """
-    stub = proto.stream_pb2_grpc.RealtimeASRStub(grpc_channel)
+    stub = stream_pb2_grpc.RealtimeASRStub(grpc_channel)
 
     wav_path = Path(__file__).parent / "data" / "test_cs.wav"
     audio = load_audio_mono_16k(wav_path)
@@ -143,7 +143,7 @@ def test_realtime_asr_stream_basic(grpc_channel):
             print("[debug] gen_chunks raised:", repr(e))
             raise
 
-    events: List[proto.stream_pb2.AsrEvent] = list(stub.Stream(wrapped_gen()))
+    events: List[stream_pb2.AsrEvent] = list(stub.Stream(wrapped_gen()))
 
     for ev in events:
         logger.debug(
@@ -166,14 +166,14 @@ def test_realtime_asr_stream(grpc_channel):
     More 'streamy' test: same as basic, but log everything explicitly and give
     clearer failure if we somehow get an empty transcript.
     """
-    stub = proto.stream_pb2_grpc.RealtimeASRStub(grpc_channel)
+    stub = stream_pb2_grpc.RealtimeASRStub(grpc_channel)
 
     wav_path = Path(__file__).parent / "data" / "test_cs.wav"
     audio = load_audio_mono_16k(wav_path)
 
     chunks_iter = gen_chunks("test-grpc-stream", audio, lang="cs")
 
-    events: List[proto.stream_pb2.AsrEvent] = []
+    events: List[stream_pb2.AsrEvent] = []
     for ev in stub.Stream(chunks_iter):
         logger.debug(
             "[test-stream] got AsrEvent session=%s [%.2f, %.2f] speaker=%s text=%r",
