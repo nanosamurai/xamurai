@@ -79,3 +79,4 @@ service RealtimeASR {
 }
 
 //python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. ./proto/stream.proto
+//python -m grpc_tools.protoc -I ../proto --python_out=src/drsynth_proto --grpc_python_out=src/drsynth_proto ../proto/stream.proto
