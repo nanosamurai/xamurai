@@ -35,7 +35,7 @@ class RealtimeASRStub(object):
             channel: A grpc.Channel.
         """
         self.Stream = channel.stream_stream(
-                '/drsynth_proto.RealtimeASR/Stream',
+                '/RealtimeASR/Stream',
                 request_serializer=stream__pb2.AudioChunk.SerializeToString,
                 response_deserializer=stream__pb2.AsrEvent.FromString,
                 _registered_method=True)
@@ -60,9 +60,9 @@ def add_RealtimeASRServicer_to_server(servicer, server):
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'drsynth_proto.RealtimeASR', rpc_method_handlers)
+            'RealtimeASR', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('drsynth_proto.RealtimeASR', rpc_method_handlers)
+    server.add_registered_method_handlers('RealtimeASR', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -83,7 +83,7 @@ class RealtimeASR(object):
         return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            '/drsynth_proto.RealtimeASR/Stream',
+            '/RealtimeASR/Stream',
             stream__pb2.AudioChunk.SerializeToString,
             stream__pb2.AsrEvent.FromString,
             options,

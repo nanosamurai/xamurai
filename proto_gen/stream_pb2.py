@@ -24,29 +24,33 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cstream.proto\x12\rdrsynth_proto\"q\n\nAudioChunk\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0b\n\x03seq\x18\x02 \x01(\x04\x12\r\n\x05t0_ns\x18\x03 \x01(\x03\x12\x13\n\x0bsample_rate\x18\x04 \x01(\r\x12\x10\n\x08pcm16_le\x18\x05 \x01(\x0c\x12\x0c\n\x04lang\x18\x06 \x01(\t\"\x91\x01\n\x08\x41srEvent\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0f\n\x07start_s\x18\x02 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x03 \x01(\x01\x12\x0c\n\x04text\x18\x04 \x01(\t\x12$\n\x04type\x18\x05 \x01(\x0e\x32\x16.drsynth_proto.AsrType\x12\x0c\n\x04lang\x18\x06 \x01(\t\x12\x0f\n\x07speaker\x18\x07 \x01(\t\"d\n\tDiarEvent\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0f\n\x07start_s\x18\x02 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x03 \x01(\x01\x12\x0f\n\x07speaker\x18\x04 \x01(\t\x12\x12\n\nconfidence\x18\x05 \x01(\x02\"\x87\x01\n\x0cRefinedEvent\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0f\n\x07start_s\x18\x02 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x03 \x01(\x01\x12\x0c\n\x04text\x18\x04 \x01(\t\x12\x0f\n\x07speaker\x18\x05 \x01(\t\x12\x16\n\x0esupersedes_seq\x18\x06 \x03(\x04\x12\x0c\n\x04lang\x18\x07 \x01(\t\"\x9f\x01\n\x11RecordingFinished\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x15\n\rrecording_url\x18\x02 \x01(\t\x12\x12\n\nduration_s\x18\x03 \x01(\x01\x12\x13\n\x0bsample_rate\x18\x04 \x01(\x05\x12\x0c\n\x04lang\x18\x05 \x01(\t\x12\x11\n\ttenant_id\x18\x06 \x01(\t\x12\x15\n\rcreated_at_ns\x18\x07 \x01(\x03\"=\n\rWordAlignment\x12\x0f\n\x07start_s\x18\x01 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x02 \x01(\x01\x12\x0c\n\x04text\x18\x03 \x01(\t\"\x9a\x01\n\nFinalEvent\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0f\n\x07start_s\x18\x02 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x03 \x01(\x01\x12\x0c\n\x04text\x18\x04 \x01(\t\x12\x0f\n\x07speaker\x18\x05 \x01(\t\x12\x0c\n\x04lang\x18\x06 \x01(\t\x12+\n\x05words\x18\x07 \x03(\x0b\x32\x1c.drsynth_proto.WordAlignment*!\n\x07\x41srType\x12\x0b\n\x07PARTIAL\x10\x00\x12\t\n\x05\x46INAL\x10\x01\x32O\n\x0bRealtimeASR\x12@\n\x06Stream\x12\x19.drsynth_proto.AudioChunk\x1a\x17.drsynth_proto.AsrEvent(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cstream.proto\"q\n\nAudioChunk\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0b\n\x03seq\x18\x02 \x01(\x04\x12\r\n\x05t0_ns\x18\x03 \x01(\x03\x12\x13\n\x0bsample_rate\x18\x04 \x01(\r\x12\x10\n\x08pcm16_le\x18\x05 \x01(\x0c\x12\x0c\n\x04lang\x18\x06 \x01(\t\"\x83\x01\n\x08\x41srEvent\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0f\n\x07start_s\x18\x02 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x03 \x01(\x01\x12\x0c\n\x04text\x18\x04 \x01(\t\x12\x16\n\x04type\x18\x05 \x01(\x0e\x32\x08.AsrType\x12\x0c\n\x04lang\x18\x06 \x01(\t\x12\x0f\n\x07speaker\x18\x07 \x01(\t\"d\n\tDiarEvent\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0f\n\x07start_s\x18\x02 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x03 \x01(\x01\x12\x0f\n\x07speaker\x18\x04 \x01(\t\x12\x12\n\nconfidence\x18\x05 \x01(\x02\"\x87\x01\n\x0cRefinedEvent\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0f\n\x07start_s\x18\x02 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x03 \x01(\x01\x12\x0c\n\x04text\x18\x04 \x01(\t\x12\x0f\n\x07speaker\x18\x05 \x01(\t\x12\x16\n\x0esupersedes_seq\x18\x06 \x03(\x04\x12\x0c\n\x04lang\x18\x07 \x01(\t\"\x9f\x01\n\x11RecordingFinished\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x15\n\rrecording_url\x18\x02 \x01(\t\x12\x12\n\nduration_s\x18\x03 \x01(\x01\x12\x13\n\x0bsample_rate\x18\x04 \x01(\x05\x12\x0c\n\x04lang\x18\x05 \x01(\t\x12\x11\n\ttenant_id\x18\x06 \x01(\t\x12\x15\n\rcreated_at_ns\x18\x07 \x01(\x03\"=\n\rWordAlignment\x12\x0f\n\x07start_s\x18\x01 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x02 \x01(\x01\x12\x0c\n\x04text\x18\x03 \x01(\t\"\x8c\x01\n\nFinalEvent\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0f\n\x07start_s\x18\x02 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x03 \x01(\x01\x12\x0c\n\x04text\x18\x04 \x01(\t\x12\x0f\n\x07speaker\x18\x05 \x01(\t\x12\x0c\n\x04lang\x18\x06 \x01(\t\x12\x1d\n\x05words\x18\x07 \x03(\x0b\x32\x0e.WordAlignment\"Y\n\x18SessionTranscriptSegment\x12\x0f\n\x07start_s\x18\x01 \x01(\x01\x12\r\n\x05\x65nd_s\x18\x02 \x01(\x01\x12\x0c\n\x04text\x18\x03 \x01(\t\x12\x0f\n\x07speaker\x18\x04 \x01(\t\"\xca\x01\n\x11SessionTranscript\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x15\n\rrecording_url\x18\x02 \x01(\t\x12\x0c\n\x04lang\x18\x03 \x01(\t\x12\x12\n\nduration_s\x18\x04 \x01(\x02\x12+\n\x08segments\x18\x05 \x03(\x0b\x32\x19.SessionTranscriptSegment\x12\x11\n\tfull_text\x18\x06 \x01(\t\x12\x11\n\ttenant_id\x18\x07 \x01(\t\x12\x15\n\rcreated_at_ns\x18\x08 \x01(\x04*!\n\x07\x41srType\x12\x0b\n\x07PARTIAL\x10\x00\x12\t\n\x05\x46INAL\x10\x01\x32\x33\n\x0bRealtimeASR\x12$\n\x06Stream\x12\x0b.AudioChunk\x1a\t.AsrEvent(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'stream_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_ASRTYPE']._serialized_start=916
-  _globals['_ASRTYPE']._serialized_end=949
-  _globals['_AUDIOCHUNK']._serialized_start=31
-  _globals['_AUDIOCHUNK']._serialized_end=144
-  _globals['_ASREVENT']._serialized_start=147
-  _globals['_ASREVENT']._serialized_end=292
-  _globals['_DIAREVENT']._serialized_start=294
-  _globals['_DIAREVENT']._serialized_end=394
-  _globals['_REFINEDEVENT']._serialized_start=397
-  _globals['_REFINEDEVENT']._serialized_end=532
-  _globals['_RECORDINGFINISHED']._serialized_start=535
-  _globals['_RECORDINGFINISHED']._serialized_end=694
-  _globals['_WORDALIGNMENT']._serialized_start=696
-  _globals['_WORDALIGNMENT']._serialized_end=757
-  _globals['_FINALEVENT']._serialized_start=760
-  _globals['_FINALEVENT']._serialized_end=914
-  _globals['_REALTIMEASR']._serialized_start=951
-  _globals['_REALTIMEASR']._serialized_end=1030
+  _globals['_ASRTYPE']._serialized_start=1169
+  _globals['_ASRTYPE']._serialized_end=1202
+  _globals['_AUDIOCHUNK']._serialized_start=16
+  _globals['_AUDIOCHUNK']._serialized_end=129
+  _globals['_ASREVENT']._serialized_start=132
+  _globals['_ASREVENT']._serialized_end=263
+  _globals['_DIAREVENT']._serialized_start=265
+  _globals['_DIAREVENT']._serialized_end=365
+  _globals['_REFINEDEVENT']._serialized_start=368
+  _globals['_REFINEDEVENT']._serialized_end=503
+  _globals['_RECORDINGFINISHED']._serialized_start=506
+  _globals['_RECORDINGFINISHED']._serialized_end=665
+  _globals['_WORDALIGNMENT']._serialized_start=667
+  _globals['_WORDALIGNMENT']._serialized_end=728
+  _globals['_FINALEVENT']._serialized_start=731
+  _globals['_FINALEVENT']._serialized_end=871
+  _globals['_SESSIONTRANSCRIPTSEGMENT']._serialized_start=873
+  _globals['_SESSIONTRANSCRIPTSEGMENT']._serialized_end=962
+  _globals['_SESSIONTRANSCRIPT']._serialized_start=965
+  _globals['_SESSIONTRANSCRIPT']._serialized_end=1167
+  _globals['_REALTIMEASR']._serialized_start=1204
+  _globals['_REALTIMEASR']._serialized_end=1255
 # @@protoc_insertion_point(module_scope)
