@@ -9,8 +9,6 @@ from typing import List
 import numpy as np
 import pytest
 from confluent_kafka import Producer, Consumer
-from confluent_kafka.admin import AdminClient, NewTopic
-from confluent_kafka import KafkaException, KafkaError
 
 import stream_pb2  # adjust import if your proto package is named differently
 
@@ -39,26 +37,6 @@ def _make_consumer(bootstrap: str, group_id: str) -> Consumer:
         }
     )
 
-def _ensure_topics(bootstrap: str, topics: list[str], num_partitions: int = 1) -> None:
-    admin = AdminClient({"bootstrap.servers": bootstrap})
-    new_topics = [
-        NewTopic(topic, num_partitions=num_partitions, replication_factor=1)
-        for topic in topics
-    ]
-    fs = admin.create_topics(new_topics)
-
-    for topic, f in fs.items():
-        try:
-            f.result()
-        except KafkaException as e:
-            err = e.args[0]
-            # Ignore "already exists" in case test reuses a container
-            if getattr(err, "code", lambda: None)() == KafkaError.TOPIC_ALREADY_EXISTS:
-                print(f"[test] Topic already exists: {topic}")
-                continue
-            raise
-
-
 @pytest.mark.timeout(900)           # WhisperX model load can be sloooow on first run
 @pytest.mark.integration
 def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
@@ -84,8 +62,6 @@ def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
     os.environ["KAFKA_TOPIC_REFINED"] = topic_refined
     # Use shorter slices than 60s so test doesn't need a 1-minute clip
     os.environ["WHISPERX_SLICE_SECONDS"] = "10.0"
-
-    _ensure_topics(kafka_bootstrap, [topic_audio, topic_refined])
 
     # Import AFTER env is set so module-level constants pick them up
     import importlib
