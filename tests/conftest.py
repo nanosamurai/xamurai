@@ -7,15 +7,40 @@ from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
 import sys
 from pathlib import Path
+from confluent_kafka.admin import AdminClient, NewTopic
+from confluent_kafka import KafkaException, KafkaError
 
 # Ensure project root (the directory that contains rtservice/, bff/, etc.) is on sys.path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 sys.path.append(os.path.join(ROOT, "whisperx_worker", "src"))
+sys.path.append(os.path.join(ROOT, "recorder_worker", "src"))
 sys.path.append(os.path.join(ROOT, "proto_gen"))
 
 KAFKA_IMAGE = os.getenv("TEST_KAFKA_IMAGE", "apache/kafka:latest")
+topic_audio = "audio.raw.test"
+topic_refined = "transcripts.refined.test"
+TOPICS = [topic_audio, topic_refined]
+
+def _ensure_topics(bootstrap: str, topics: list[str], num_partitions: int = 1) -> None:
+    admin = AdminClient({"bootstrap.servers": bootstrap})
+    new_topics = [
+        NewTopic(topic, num_partitions=num_partitions, replication_factor=1)
+        for topic in topics
+    ]
+    fs = admin.create_topics(new_topics)
+
+    for topic, f in fs.items():
+        try:
+            f.result()
+        except KafkaException as e:
+            err = e.args[0]
+            # Ignore "already exists" in case test reuses a container
+            if getattr(err, "code", lambda: None)() == KafkaError.TOPIC_ALREADY_EXISTS:
+                print(f"[test] Topic already exists: {topic}")
+                continue
+            raise
 
 @pytest.fixture(scope="session")
 def kafka_bootstrap():
@@ -74,6 +99,9 @@ def kafka_bootstrap():
 
         bootstrap = "localhost:9092"
         print(f"[tests] Kafka bootstrap: {bootstrap}")
+
+        _ensure_topics(bootstrap, TOPICS)
+
         yield bootstrap
 
 @pytest.fixture(scope="session")
