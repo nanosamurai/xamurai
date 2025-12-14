@@ -77,6 +77,26 @@ service RealtimeASR {
   rpc Stream (stream AudioChunk) returns (stream AsrEvent);
 }
 
+message SessionTranscriptSegment {
+  double start_s = 1;
+  double end_s   = 2;
+  string text    = 3;
+  string speaker = 4; // optional, "" if unknown
+}
+
+message SessionTranscript {
+  string session_id    = 1;
+  string recording_url = 2;
+  string lang          = 3;
+  float  duration_s    = 4;
+
+  repeated SessionTranscriptSegment segments = 5;
+  string full_text = 6;
+
+  string tenant_id     = 7;
+  uint64 created_at_ns = 8;
+}
+
 //python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. ./proto/stream.proto
 //python -m grpc_tools.protoc -I ../proto --python_out=src/drsynth_proto --grpc_python_out=src/drsynth_proto ../proto/stream.proto
 //python -m grpc_tools.protoc -I proto --python_out=proto_pkg/src --grpc_python_out=proto_pkg/src proto/stream.proto
