@@ -1,0 +1,144 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>nanosamur.ai — Recordings</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#0f1620; --line:#223046; --txt:#e6f0ff; --muted:#9fb2c9;
+    --neon:#7CFF6B; --warn:#FFC857; --bad:#FF5C7A; --ok:#6BCBFF;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,var(--bg),#070a0f);color:var(--txt);font-family:Inter,system-ui}
+  .top{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:18px 20px;border-bottom:1px solid var(--line);background:rgba(15,22,32,.75);backdrop-filter:blur(8px);
+    position:sticky;top:0;
+  }
+  .brand{display:flex;align-items:center;gap:12px}
+  .brand .mark{width:28px;height:28px;image-rendering:pixelated;border:1px solid var(--line);border-radius:6px}
+  .brand .name{font-family:"Press Start 2P";font-size:12px;letter-spacing:.5px}
+  .wrap{display:grid;grid-template-columns:220px 1fr;min-height:calc(100vh - 64px)}
+  nav{border-right:1px solid var(--line);padding:16px}
+  .navitem{padding:10px 10px;border:1px solid var(--line);border-radius:10px;margin-bottom:10px;background:var(--panel);color:var(--txt)}
+  .navitem.active{outline:2px solid rgba(124,255,107,.25);border-color:rgba(124,255,107,.45)}
+  main{padding:18px}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .search{flex:1;min-width:220px;display:flex;gap:10px}
+  input,select,button{border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--txt);padding:10px 12px}
+  input{width:100%}
+  button.primary{border-color:rgba(124,255,107,.5);box-shadow:0 0 0 3px rgba(124,255,107,.12) inset;cursor:pointer}
+  .table{border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .thead,.tr{display:grid;grid-template-columns: 1.6fr .7fr .6fr .6fr .4fr;gap:10px;align-items:center}
+  .thead{background:#0c121b;color:var(--muted);padding:10px 14px;font-size:12px}
+  .tr{padding:12px 14px;border-top:1px solid var(--line)}
+  .title{font-weight:600}
+  .meta{color:var(--muted);font-size:12px;margin-top:4px}
+  .pill{display:inline-flex;gap:6px;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid var(--line);font-size:12px}
+  .dot{width:8px;height:8px;border-radius:99px;background:var(--muted)}
+  .pill.live .dot{background:var(--warn)}
+  .pill.proc .dot{background:var(--ok)}
+  .pill.ready .dot{background:var(--neon)}
+  .pill.fail .dot{background:var(--bad)}
+  .open{justify-self:end}
+  a{color:var(--txt);text-decoration:none}
+</style>
+
+<body>
+  <header class="top">
+    <div class="brand">
+      <img class="mark" alt="mark" src="data:image/svg+xml;utf8,
+      <svg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 16 16'>
+        <rect width='16' height='16' fill='%230f1620'/>
+        <rect x='4' y='3' width='8' height='2' fill='%237CFF6B'/>
+        <rect x='3' y='5' width='10' height='2' fill='%23e6f0ff'/>
+        <rect x='4' y='7' width='8' height='5' fill='%23223046'/>
+        <rect x='5' y='8' width='2' height='2' fill='%23e6f0ff'/>
+        <rect x='9' y='8' width='2' height='2' fill='%23e6f0ff'/>
+      </svg>"/>
+      <div class="name">nanosamur.ai</div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <span style="color:var(--muted);font-size:12px">alpha5</span>
+      <button class="primary">+ New Recording</button>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <nav>
+      <div class="navitem active">Recordings</div>
+      <div class="navitem">Speakers</div>
+      <div class="navitem">Settings</div>
+    </nav>
+
+    <main>
+      <div class="row">
+        <div class="search">
+          <input placeholder="Search recordings (title or session_id)..." />
+          <select>
+            <option>All statuses</option>
+            <option>LIVE</option><option>PROCESSING</option><option>READY</option><option>FAILED</option>
+          </select>
+          <select>
+            <option>All sources</option>
+            <option>LIVE</option><option>UPLOAD</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="table">
+        <div class="thead">
+          <div>Title</div><div>Status</div><div>Duration</div><div>Speakers</div><div></div>
+        </div>
+
+        <div class="tr">
+          <div>
+            <div class="title">Weekly sync</div>
+            <div class="meta">session_id: test1 · lang: cs · 2025-12-15</div>
+          </div>
+          <div><span class="pill ready"><span class="dot"></span>READY</span></div>
+          <div>42:10</div>
+          <div>3</div>
+          <div class="open"><a href="recording.html">Open →</a></div>
+        </div>
+
+        <div class="tr">
+          <div>
+            <div class="title">Sales call (live)</div>
+            <div class="meta">session_id: test2 · lang: en · 2025-12-15</div>
+          </div>
+          <div><span class="pill live"><span class="dot"></span>LIVE</span></div>
+          <div>12:08</div>
+          <div>2</div>
+          <div class="open"><a href="recording.html">Open →</a></div>
+        </div>
+
+        <div class="tr">
+          <div>
+            <div class="title">Upload: interview.mp3</div>
+            <div class="meta">session_id: up_77a1 · lang: auto · 2025-12-14</div>
+          </div>
+          <div><span class="pill proc"><span class="dot"></span>PROCESSING</span></div>
+          <div>58:33</div>
+          <div>?</div>
+          <div class="open"><a href="recording.html">Open →</a></div>
+        </div>
+
+        <div class="tr">
+          <div>
+            <div class="title">Townhall</div>
+            <div class="meta">session_id: th_09 · lang: en · 2025-12-01</div>
+          </div>
+          <div><span class="pill fail"><span class="dot"></span>FAILED</span></div>
+          <div>—</div>
+          <div>—</div>
+          <div class="open"><a href="recording.html">Open →</a></div>
+        </div>
+      </div>
+    </main>
+  </div>
+</body>

@@ -1,0 +1,329 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>nanosamur.ai — Live</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#0f1620; --line:#223046; --txt:#e6f0ff; --muted:#9fb2c9;
+    --neon:#7CFF6B; --ok:#6BCBFF; --warn:#FFC857; --bad:#FF5C7A;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,var(--bg),#070a0f);color:var(--txt);font-family:Inter,system-ui}
+  a{color:inherit;text-decoration:none}
+  .top{
+    display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+    padding:18px 20px;border-bottom:1px solid var(--line);
+    background:rgba(15,22,32,.75);backdrop-filter:blur(8px);position:sticky;top:0;z-index:10
+  }
+  .brand{display:flex;align-items:center;gap:12px}
+  .brand .mark{width:130px;image-rendering:pixelated;border:1px solid var(--line);border-radius:6px}
+  .brand .name{font-family:"Press Start 2P";font-size:12px;letter-spacing:.5px}
+  .sub{color:var(--muted);font-size:12px;margin-top:6px}
+  .pill{display:inline-flex;gap:6px;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid var(--line);font-size:12px}
+  .dot{width:8px;height:8px;border-radius:99px;background:var(--muted)}
+  .pill.live{border-color:rgba(255,200,87,.5)}
+  .pill.live .dot{background:var(--warn)}
+  .pill.refining{border-color:rgba(107,203,255,.45)}
+  .pill.refining .dot{background:var(--ok)}
+  button,select,input{
+    border-radius:12px;border:1px solid var(--line);background:var(--panel);
+    color:var(--txt);padding:10px 12px
+  }
+  button.primary{border-color:rgba(124,255,107,.5);box-shadow:0 0 0 3px rgba(124,255,107,.12) inset;cursor:pointer}
+  button.danger{border-color:rgba(255,92,122,.6);cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+
+  .wrap{display:grid;grid-template-columns: 280px 1fr 1fr;gap:14px;padding:14px}
+  @media (max-width: 1100px){
+    .wrap{grid-template-columns:1fr}
+  }
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;min-width:0}
+  .card h3{margin:0 0 10px 0;font-size:14px}
+  .meta{color:var(--muted);font-size:12px;line-height:1.6}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .kv{display:flex;gap:8px;align-items:center}
+  .kv label{color:var(--muted);font-size:12px}
+
+  .log{
+    height:420px;overflow:auto;border:1px solid var(--line);border-radius:12px;
+    padding:10px;background:#0c121b;font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size:12px;white-space:pre-wrap;line-height:1.35
+  }
+
+  .seg{
+    padding:10px;border:1px solid var(--line);border-radius:12px;background:#0c121b;margin-bottom:10px
+  }
+  .seg .head{display:flex;gap:10px;align-items:center;justify-content:space-between}
+  .seg .who{font-weight:600}
+  .seg .ts{color:var(--muted);font-size:12px}
+  .seg .txt{margin-top:6px}
+  .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 8px;font-size:12px;color:var(--muted)}
+  .chip .mini{width:7px;height:7px;border-radius:99px;background:var(--muted)}
+  .chip.on .mini{background:var(--neon)}
+  .hint{color:var(--muted);font-size:12px;margin-top:8px}
+  .tiny{font-size:11px;color:var(--muted)}
+</style>
+
+<body>
+  <header class="top">
+    <div class="brand">
+      <img class="mark" alt="logo" src="../img/nonosamurai_art.jpg" />
+      <div>
+        <div class="name"><a href="recordings.html">nanosamur.ai</a></div>
+        <div class="sub">
+          Live session: <b id="sidLabel">test1</b>
+          <span class="pill live" style="margin-left:10px"><span class="dot"></span>LIVE</span>
+          <span class="pill refining" style="margin-left:6px"><span class="dot"></span>Refining…</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="chip on"><span class="mini"></span>WS</div>
+      <div class="chip on"><span class="mini"></span>MIC</div>
+
+      <button id="start" class="primary">Start</button>
+      <button id="stop" class="danger" disabled>Stop</button>
+      <button id="mark">★ Mark</button>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <!-- LEFT: Controls / session info -->
+    <aside class="card">
+      <h3>Session</h3>
+
+      <div class="seg">
+        <div class="head">
+          <div class="kv">
+            <label>Session ID</label>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <input id="sid" value="test1" style="flex:1;min-width:180px" />
+          <button id="applySid">Apply</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div class="kv">
+            <label>Language</label>
+            <select id="langSelect">
+              <option value="cs" selected>Czech (cs)</option>
+              <option value="en">English (en)</option>
+              <option value="">Auto</option>
+            </select>
+          </div>
+          <div class="kv">
+            <label>Chunk</label>
+            <span class="tiny">~200–500ms PCM16</span>
+          </div>
+        </div>
+
+        <div class="hint">
+          Live text may change as WhisperX refinement arrives (every ~60s).
+        </div>
+      </div>
+
+      <div class="seg">
+        <div class="head">
+          <div class="who">Speakers</div>
+          <span class="ts">rename inline</span>
+        </div>
+
+        <div class="row" style="margin-top:10px;gap:8px">
+          <input style="width:110px" value="SPEAKER_00" disabled />
+          <input style="flex:1;min-width:120px" placeholder="Alice" />
+          <button>Save</button>
+        </div>
+        <div class="row" style="margin-top:8px;gap:8px">
+          <input style="width:110px" value="SPEAKER_01" disabled />
+          <input style="flex:1;min-width:120px" placeholder="Bob" />
+          <button>Save</button>
+        </div>
+        <div class="row" style="margin-top:8px;gap:8px">
+          <input style="width:110px" value="SPEAKER_02" disabled />
+          <input style="flex:1;min-width:120px" placeholder="(unassigned)" />
+          <button>Save</button>
+        </div>
+
+        <div class="hint">
+          (MVP) This only changes display names for this session. Persist via REST later.
+        </div>
+      </div>
+
+      <div class="seg">
+        <div class="head">
+          <div class="who">Stats</div>
+          <span class="ts" id="elapsed">00:00</span>
+        </div>
+        <div class="meta">
+          <div>seq sent: <b id="seqSent">0</b></div>
+          <div>asr events: <b id="asrCount">0</b></div>
+          <div>refined events: <b id="refCount">0</b></div>
+          <div>last refined: <b id="lastRef">—</b></div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MIDDLE: Live transcript view -->
+    <section class="card" style="min-width:0">
+      <h3>Realtime ASR (live)</h3>
+      <div id="liveView" class="log" aria-label="Live transcript log"></div>
+      <div class="hint">Tip: click “★ Mark” when something important happens (creates a timestamped note).</div>
+    </section>
+
+    <!-- RIGHT: Refined transcript view -->
+    <section class="card" style="min-width:0">
+      <h3>Refined (WhisperX)</h3>
+      <div id="refinedView" class="log" aria-label="Refined transcript log"></div>
+      <div class="hint">Refined lines may supersede earlier live lines (via <code>supersedes_seq</code>).</div>
+    </section>
+  </div>
+
+<script>
+let ws, ac, media, node, running = false;
+
+// Converts Float32Array [-1,1] to Int16Array little-endian
+function floatTo16le(float32) {
+  const out = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    let s = Math.max(-1, Math.min(1, float32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return out;
+}
+
+// Simple downsampler 48k -> 16k (factor 3). For other rates, we fallback to naive scale.
+function downsampleTo16k(input, inRate) {
+  if (inRate === 48000) {
+    const out = new Float32Array(Math.floor(input.length / 3));
+    let j = 0;
+    for (let i = 0; i + 2 < input.length; i += 3) out[j++] = input[i]; // decimate
+    return out;
+  } else if (inRate === 16000) {
+    return input;
+  } else {
+    // naive linear-resample (good enough for testing)
+    const ratio = 16000 / inRate;
+    const out = new Float32Array(Math.floor(input.length * ratio));
+    for (let i = 0; i < out.length; i++) {
+      const t = i / ratio;
+      const i0 = Math.floor(t);
+      const frac = t - i0;
+      const s0 = input[i0] || 0, s1 = input[i0 + 1] || 0;
+      out[i] = s0 + (s1 - s0) * frac;
+    }
+    return out;
+  }
+}
+
+// Append text to a specific <pre>
+function appendLine(id, s) {
+  const el = document.getElementById(id);
+  el.textContent += s + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearLogs() {
+  document.getElementById('asr_log').textContent = "";
+  document.getElementById('refined_log').textContent = "";
+}
+
+async function start() {
+  if (running) return;
+  running = true;
+  document.getElementById('start').disabled = true;
+  document.getElementById('stop').disabled = false;
+
+  const sid = document.getElementById('sid').value || 'test1';
+  const lang = document.getElementById("langSelect").value;
+
+  ws = new WebSocket(`ws://${location.host}/ws?session_id=${encodeURIComponent(sid)}&session_lang=${encodeURIComponent(lang)}`);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    appendLine('asr_log', "[ws] connected");
+  };
+
+  ws.onclose = () => {
+    appendLine('asr_log', "[ws] closed");
+  };
+
+  ws.onerror = (e) => {
+    appendLine('asr_log', "[ws] error: " + e.toString());
+  };
+
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+
+      if (msg.type === "asr") {
+        // Realtime ASR event
+        const tag = msg.final ? "FINAL" : "PARTIAL";
+        const start = typeof msg.start_s === "number" ? msg.start_s : Number(msg.start_s || 0);
+        const end   = typeof msg.end_s === "number" ? msg.end_s : Number(msg.end_s || 0);
+        const speaker = msg.speaker || "UNK";
+        const ts = `[${tag} ${start.toFixed(2)}–${end.toFixed(2)}]`;
+        appendLine("asr_log", `${ts} ${speaker}: ${msg.text}`);
+      } else if (msg.type === "refined") {
+        // Offline WhisperX-refined event
+        const start = typeof msg.start_s === "number" ? msg.start_s : Number(msg.start_s || 0);
+        const end   = typeof msg.end_s === "number" ? msg.end_s : Number(msg.end_s || 0);
+        const speaker = msg.speaker || "UNK";
+        const ts = `[REFINED ${start.toFixed(2)}–${end.toFixed(2)}]`;
+        appendLine("refined_log", `${ts} ${speaker}: ${msg.text}`);
+      } else {
+        // Unknown message type: dump to ASR log
+        appendLine("asr_log", ev.data);
+      }
+    } catch (e) {
+      // fallback if parsing fails
+      appendLine("asr_log", ev.data);
+    }
+  };
+
+  ac = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+  media = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, noiseSuppression: false, echoCancellation: false },
+    video: false
+  });
+
+  const src = ac.createMediaStreamSource(media);
+
+  // ScriptProcessor is deprecated but simplest for a quick test
+  // Buffer size 2048 @ 48k ≈ 42.7 ms. BFF is fine with any frame length.
+  node = ac.createScriptProcessor(2048, 1, 1);
+  src.connect(node);
+  node.connect(ac.destination); // or ac.createGain() if you don't want to hear yourself
+
+  node.onaudioprocess = (e) => {
+    if (!ws || ws.readyState !== 1) return;
+    const ch0 = e.inputBuffer.getChannelData(0);
+    const ds = downsampleTo16k(ch0, ac.sampleRate);
+    const i16 = floatTo16le(ds);
+    ws.send(i16.buffer);
+  };
+}
+
+function stop() {
+  running = false;
+  document.getElementById('start').disabled = false;
+  document.getElementById('stop').disabled = true;
+
+  try { node && node.disconnect(); } catch(e){}
+  try { media && media.getTracks().forEach(t => t.stop()); } catch(e){}
+  try { ac && ac.close(); } catch(e){}
+  try { ws && ws.close(); } catch(e){}
+
+  appendLine('asr_log', "[stopped]");
+}
+
+document.getElementById('start').onclick = start;
+document.getElementById('stop').onclick = stop;
+document.getElementById('clear').onclick = clearLogs;
+</script>
+</body>

@@ -1,0 +1,141 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>nanosamur.ai — Recording</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#0f1620; --line:#223046; --txt:#e6f0ff; --muted:#9fb2c9;
+    --neon:#7CFF6B; --ok:#6BCBFF;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,var(--bg),#070a0f);color:var(--txt);font-family:Inter,system-ui}
+  .top{padding:18px 20px;border-bottom:1px solid var(--line);background:rgba(15,22,32,.75);backdrop-filter:blur(8px);position:sticky;top:0}
+  .title{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .brand{font-family:"Press Start 2P";font-size:12px}
+  .h1{font-size:18px;font-weight:600}
+  .pill{display:inline-flex;gap:6px;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid rgba(124,255,107,.45)}
+  .layout{display:grid;grid-template-columns: 240px 1fr 280px;gap:14px;padding:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px}
+  button,select,input{border-radius:12px;border:1px solid var(--line);background:#0c121b;color:var(--txt);padding:10px 12px}
+  .player{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .bar{flex:1;min-width:240px;height:12px;border-radius:999px;background:#0c121b;border:1px solid var(--line);position:relative}
+  .bar .pos{position:absolute;left:18%;top:0;bottom:0;border-radius:999px;background:rgba(107,203,255,.7)}
+  .spk{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px;border:1px solid var(--line);border-radius:12px;margin-bottom:10px}
+  .spk small{color:var(--muted)}
+  .seg{padding:10px;border-top:1px solid var(--line)}
+  .seg:first-child{border-top:0}
+  .ts{color:var(--muted);font-size:12px;margin-right:8px}
+  .who{font-weight:600;margin-right:10px}
+  .word{padding:2px 4px;border-radius:6px}
+  .word.active{background:rgba(124,255,107,.18);outline:1px solid rgba(124,255,107,.4)}
+  .meta{color:var(--muted);font-size:12px;line-height:1.6}
+</style>
+
+<body>
+  <header class="top">
+    <div class="title">
+      <div>
+        <div class="brand"><a href="recordings.html" style="color:inherit;text-decoration:none">← nanosamur.ai</a></div>
+        <div class="h1">Weekly sync <span class="pill">READY</span></div>
+        <div class="meta">session_id: test1 · lang: cs · duration_s: 2530.4 · sample_rate: 16000</div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <select>
+          <option>FINAL</option><option>REFINED</option><option>LIVE</option>
+        </select>
+        <button>Share</button>
+        <button>Export</button>
+      </div>
+    </div>
+
+    <div style="margin-top:12px" class="card">
+      <div class="player">
+        <button>▶</button>
+        <div class="meta">00:13 / 42:10</div>
+        <div class="bar" title="timeline">
+          <div class="pos"></div>
+        </div>
+        <select><option>1.0×</option><option>1.25×</option><option>1.5×</option></select>
+        <button>★ Mark</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="card">
+      <div style="font-weight:600;margin-bottom:10px">Speakers</div>
+      <div class="spk">
+        <div>
+          <div>Alice</div>
+          <small>maps SPEAKER_00</small>
+        </div>
+        <button>Edit</button>
+      </div>
+      <div class="spk">
+        <div>
+          <div>Bob</div>
+          <small>maps SPEAKER_01</small>
+        </div>
+        <button>Edit</button>
+      </div>
+      <div class="spk">
+        <div>
+          <div>SPEAKER_02</div>
+          <small>unassigned</small>
+        </div>
+        <button>Assign</button>
+      </div>
+    </aside>
+
+    <main class="card">
+      <div style="font-weight:600;margin-bottom:10px">Transcript</div>
+
+      <div class="seg">
+        <span class="ts">00:12.36–00:16.90</span>
+        <span class="who">Alice</span>
+        <span class="word active">Takže</span>
+        <span class="word">hlavní</span>
+        <span class="word">problém</span>
+        <span class="word">je</span>
+        <span class="word">latence.</span>
+      </div>
+
+      <div class="seg">
+        <span class="ts">00:20.10–00:24.50</span>
+        <span class="who">Bob</span>
+        <span class="word">Jo</span>
+        <span class="word">a</span>
+        <span class="word">diarizace</span>
+        <span class="word">vypadá</span>
+        <span class="word">dobře.</span>
+      </div>
+
+      <div class="seg">
+        <span class="ts">00:26.00–00:30.20</span>
+        <span class="who">SPEAKER_02</span>
+        <span class="word">Potřebujeme</span>
+        <span class="word">ještě</span>
+        <span class="word">doladit</span>
+        <span class="word">UI.</span>
+      </div>
+    </main>
+
+    <aside class="card">
+      <div style="font-weight:600;margin-bottom:10px">Details</div>
+      <div class="meta">
+        <div><b>Status:</b> READY</div>
+        <div><b>tenant_id:</b> alpha5</div>
+        <div><b>recording_url:</b> (hidden; use /media for signed URL)</div>
+        <div style="margin-top:10px"><b>Processing:</b></div>
+        <div>live_asr: DONE</div>
+        <div>refinement_60s: DONE</div>
+        <div>final_refinement: DONE</div>
+      </div>
+    </aside>
+  </div>
+</body>
