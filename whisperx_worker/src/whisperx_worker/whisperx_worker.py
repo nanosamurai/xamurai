@@ -12,6 +12,7 @@ import stream_pb2
 
 import torch
 import whisperx
+import time
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 TOPIC_AUDIO = os.getenv("KAFKA_TOPIC_AUDIO", "audio.raw")
@@ -19,7 +20,11 @@ TOPIC_REFINED = os.getenv("KAFKA_TOPIC_REFINED", "transcripts.refined")
 GROUP_ID = os.getenv("KAFKA_GROUP_ID", "whisperx-async")
 
 SLICE_SECONDS = float(os.getenv("WHISPERX_SLICE_SECONDS", "60.0"))
+SESSION_IDLE_SEC = float(os.getenv("WHISPERX_IDLE_SECONDS", "30.0"))
 SR = 16000
+
+last_activity: Dict[str, float] = defaultdict(lambda: 0.0)
+session_lang: Dict[str, Optional[str]] = defaultdict(lambda: None)
 
 # --------------------------------------------------------------------------- #
 # Logging setup
@@ -38,6 +43,85 @@ _WHISPERX_MODEL = None
 _ALIGN_MODEL = None
 _ALIGN_METADATA = None
 _WHISPERX_DEVICE = None
+
+def _flush_session_partial(
+    session_id: str,
+    lang_hint: Optional[str],
+    buffers: Dict[str, Deque[np.ndarray]],
+    buf_samples: Dict[str, int],
+    slice_index: Dict[str, int],
+    producer: Producer,
+) -> None:
+    """
+    Flush whatever remains in buffers[session_id] as a final (possibly < SLICE_SECONDS)
+    slice, run WhisperX, emit RefinedEvent(s), and clear the session buffers.
+    """
+    if buf_samples[session_id] <= 0 or not buffers[session_id]:
+        # Nothing to flush
+        buffers.pop(session_id, None)
+        buf_samples.pop(session_id, None)
+        slice_index.pop(session_id, None)
+        return
+
+    parts: List[np.ndarray] = []
+    while buffers[session_id]:
+        parts.append(buffers[session_id].popleft())
+    buf_samples[session_id] = 0
+
+    pcm = np.concatenate(parts).astype("<i2")
+
+    # Write temp WAV
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = tmp.name
+
+    x = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
+    sf.write(wav_path, x, SR, subtype="PCM_16")
+
+    base_start = slice_index[session_id] * SLICE_SECONDS
+    slice_index[session_id] += 1
+
+    logger.info(
+        "Idle flush for session %s: final slice dur=%.2fs → %s",
+        session_id,
+        len(pcm) / SR,
+        wav_path,
+    )
+
+    try:
+        text, segments = run_whisperx(
+            wav_path,
+            lang=lang_hint,
+            use_alignment=False,  # keep streaming worker lightweight
+        )
+        logger.debug("Idle WhisperX result (session=%s): %s", session_id, text)
+
+        for (s0, s1, seg_text, speaker) in segments:
+            abs_start = base_start + s0
+            abs_end = base_start + s1
+            ev = stream_pb2.RefinedEvent(
+                session_id=session_id,
+                start_s=abs_start,
+                end_s=abs_end,
+                text=seg_text,
+                speaker=speaker,
+                supersedes_seq=[],
+            )
+            producer.produce(
+                topic=TOPIC_REFINED,
+                key=session_id.encode("utf-8"),
+                value=ev.SerializeToString(),
+            )
+        producer.poll(0)
+    finally:
+        try:
+            os.unlink(wav_path)
+        except Exception:
+            pass
+
+    # Clear session state
+    buffers.pop(session_id, None)
+    buf_samples.pop(session_id, None)
+    slice_index.pop(session_id, None)
 
 
 def _init_whisperx(lang_hint: Optional[str] = None) -> None:
@@ -263,27 +347,46 @@ def make_producer() -> Producer:
 def main():
     logger.info("Starting whisperx_worker")
 
-    # ---------- Initialize WhisperX at startup ----------
     try:
         _init_whisperx()
     except Exception as e:
         logger.exception("Failed to initialize WhisperX at startup: %s", e)
         return
-    # ---------------------------------------------------
 
     c = make_consumer()
     p = make_producer()
     c.subscribe([TOPIC_AUDIO])
 
-    # Per-session rolling PCM16 mono buffer
     buffers: Dict[str, Deque[np.ndarray]] = defaultdict(deque)
     buf_samples: Dict[str, int] = defaultdict(int)
-
-    # Per-session slice index → used to compute absolute time of each 60s slice
     slice_index: Dict[str, int] = defaultdict(int)
+    last_activity: Dict[str, float] = defaultdict(lambda: 0.0)
+    session_lang: Dict[str, Optional[str]] = defaultdict(lambda: None)
 
     try:
         while True:
+            now = time.time()
+
+            # --- 1) Idle session eviction + final partial flush ---
+            idle_sessions = [
+                sid for sid, ts in list(last_activity.items())
+                if now - ts > SESSION_IDLE_SEC
+            ]
+            for sid in idle_sessions:
+                logger.info(
+                    "Session %s idle for %.1fs (threshold=%.1fs) → flushing & evicting",
+                    sid,
+                    now - last_activity[sid],
+                    SESSION_IDLE_SEC,
+                )
+                lang_hint = session_lang.get(sid)
+                _flush_session_partial(
+                    sid, lang_hint, buffers, buf_samples, slice_index, p
+                )
+                last_activity.pop(sid, None)
+                session_lang.pop(sid, None)
+
+            # --- 2) Normal Kafka polling ---
             logger.debug("Waiting for message from Kafka")
             msg = c.poll(timeout=1.0)
             if msg is None:
@@ -294,11 +397,7 @@ def main():
 
             key_bytes = msg.key()
             key = key_bytes.decode("utf-8") if key_bytes else ""
-            logger.debug(
-                "Processing message with key=%s, offset=%i",
-                key,
-                msg.offset(),
-            )
+            logger.debug("Processing message with key=%s, offset=%i", key, msg.offset())
 
             audio = stream_pb2.AudioChunk()
             audio.ParseFromString(msg.value())
@@ -306,7 +405,12 @@ def main():
             session_id = audio.session_id
             lang = getattr(audio, "lang", "") or None
 
-            # Append to session buffer
+            # Track lang hint & activity
+            if lang:
+                session_lang[session_id] = lang
+            last_activity[session_id] = now
+
+            # Append to buffer
             arr = np.frombuffer(audio.pcm16_le, dtype="<i2")
             buffers[session_id].append(arr)
             buf_samples[session_id] += arr.size
@@ -317,7 +421,7 @@ def main():
                 buf_samples[session_id],
             )
 
-            # If we have ≥ SLICE_SECONDS, dump to WAV and process
+            # --- 3) Full-slice processing as before ---
             if buf_samples[session_id] >= int(SLICE_SECONDS * SR):
                 need = int(SLICE_SECONDS * SR)
                 parts: List[np.ndarray] = []
@@ -334,12 +438,15 @@ def main():
                         need = 0
 
                 pcm = np.concatenate(parts).astype("<i2")
-                # Write temp WAV
+
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                     wav_path = tmp.name
 
                 x = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
                 sf.write(wav_path, x, SR, subtype="PCM_16")
+
+                base_start = slice_index[session_id] * SLICE_SECONDS
+                slice_index[session_id] += 1
 
                 logger.info(
                     "Session %s: built %0.1fs slice → %s",
@@ -348,18 +455,11 @@ def main():
                     wav_path,
                 )
 
-                # WhisperX inference
-                text, segments = run_whisperx(wav_path, lang=lang, use_alignment=False)
-                logger.debug(
-                    "Ran WhisperX inference, entire text is: %s",
-                    text,
+                text, segments = run_whisperx(
+                    wav_path, lang=session_lang.get(session_id), use_alignment=False
                 )
+                logger.debug("Ran WhisperX inference, entire text is: %s", text)
 
-                # Compute base offset for this slice
-                base_start = slice_index[session_id] * SLICE_SECONDS
-                slice_index[session_id] += 1
-
-                # Publish RefinedEvent(s)
                 for (s0, s1, seg_text, speaker) in segments:
                     abs_start = base_start + s0
                     abs_end = base_start + s1
@@ -369,11 +469,10 @@ def main():
                         end_s=abs_end,
                         text=seg_text,
                         speaker=speaker,
-                        # later you can fill supersedes_seq with real-time seq ids
                         supersedes_seq=[],
                     )
                     logger.debug(
-                        "Sending a refined message with start_s:%0.1f, speaker:%s ; text:%s ",
+                        "Sending refined message start_s=%.1f, speaker=%s, text=%s",
                         abs_start,
                         speaker,
                         seg_text,
@@ -390,12 +489,17 @@ def main():
                 except Exception:
                     pass
 
-            # Commit offset (you can switch to batched commits)
             c.commit(msg, asynchronous=True)
 
     except KeyboardInterrupt:
         logger.info("Stopping whisperx_worker (KeyboardInterrupt)")
     finally:
+        # Optional: flush *all* remaining sessions on shutdown
+        for sid in list(buffers.keys()):
+            lang_hint = session_lang.get(sid)
+            _flush_session_partial(
+                sid, lang_hint, buffers, buf_samples, slice_index, p
+            )
         try:
             c.close()
         except Exception:
