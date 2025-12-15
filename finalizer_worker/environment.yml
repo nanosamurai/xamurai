@@ -1,0 +1,25 @@
+name: drsynth-finalizer
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.13.5
+  - numpy
+  - scipy
+  - libsndfile
+  - ffmpeg
+  - pip
+
+  - pip:
+      - soundfile
+      - confluent-kafka>=2.0
+      - protobuf>=5.29
+
+      # WhisperX + friends
+      - whisperx
+      - hf-xet==1.1.10
+      - pytest
+      - testcontainers[kafka]
+# pip install "torch==2.8.0+cu128" "torchaudio==2.8.0+cu128" --index-url https://download.pytorch.org/whl/cu128
