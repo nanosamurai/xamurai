@@ -8,7 +8,7 @@ from testcontainers.core.waiting_utils import wait_for_logs
 import sys
 from pathlib import Path
 from confluent_kafka.admin import AdminClient, NewTopic
-from confluent_kafka import KafkaException, KafkaError
+from confluent_kafka import KafkaException, KafkaError, Producer, Consumer
 
 # Ensure project root (the directory that contains rtservice/, bff/, etc.) is on sys.path
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,12 +16,37 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 sys.path.append(os.path.join(ROOT, "whisperx_worker", "src"))
 sys.path.append(os.path.join(ROOT, "recorder_worker", "src"))
+sys.path.append(os.path.join(ROOT, "finalizer_worker", "src"))
 sys.path.append(os.path.join(ROOT, "proto_gen"))
 
 KAFKA_IMAGE = os.getenv("TEST_KAFKA_IMAGE", "apache/kafka:latest")
 topic_audio = "audio.raw.test"
 topic_refined = "transcripts.refined.test"
-TOPICS = [topic_audio, topic_refined]
+topic_recording_finished = "recordings.finished"
+topic_full_transcripts = "transcripts.full"
+TOPICS = [topic_audio, topic_refined, topic_recording_finished, topic_full_transcripts]
+
+def _make_producer(bootstrap: str) -> Producer:
+    return Producer(
+        {
+            "bootstrap.servers": bootstrap,
+            "client.id": "test-whisperx-producer",
+            "compression.type": "zstd",
+            "linger.ms": 5,
+            "batch.size": 128_000,
+        }
+    )
+
+
+def _make_consumer(bootstrap: str, group_id: str) -> Consumer:
+    return Consumer(
+        {
+            "bootstrap.servers": bootstrap,
+            "group.id": group_id,
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": True,
+        }
+    )
 
 def _ensure_topics(bootstrap: str, topics: list[str], num_partitions: int = 1) -> None:
     admin = AdminClient({"bootstrap.servers": bootstrap})
