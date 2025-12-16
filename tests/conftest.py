@@ -22,8 +22,8 @@ sys.path.append(os.path.join(ROOT, "proto_gen"))
 KAFKA_IMAGE = os.getenv("TEST_KAFKA_IMAGE", "apache/kafka:latest")
 topic_audio = "audio.raw.test"
 topic_refined = "transcripts.refined.test"
-topic_recording_finished = "recordings.finished"
-topic_full_transcripts = "transcripts.full"
+topic_recording_finished = "recordings.finished.test"
+topic_full_transcripts = "transcripts.full.test"
 TOPICS = [topic_audio, topic_refined, topic_recording_finished, topic_full_transcripts]
 
 def _make_producer(bootstrap: str) -> Producer:
