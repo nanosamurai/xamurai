@@ -1,7 +1,7 @@
 import time
 from typing import Optional
 from confluent_kafka import Producer
-from proto import stream_pb2
+import stream_pb2
 from bff.settings import settings
 
 def _on_delivery(err, msg):
