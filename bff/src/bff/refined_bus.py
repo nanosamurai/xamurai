@@ -4,7 +4,7 @@ import threading
 from typing import Dict, Optional
 
 from confluent_kafka import Consumer, KafkaException
-from proto import stream_pb2
+import stream_pb2
 
 logger = logging.getLogger(__name__)
 
