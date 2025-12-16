@@ -20,9 +20,7 @@ from bff.auth import verify_token, OIDCError, OIDCUser
 
 import stream_pb2, stream_pb2_grpc
 
-# --------------------------------------------------------------------------- #
 # Logging setup
-# --------------------------------------------------------------------------- #
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -35,6 +33,9 @@ AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "false").lower() == "true"
 # Address of realtime gRPC service
 RTSERVICE_ADDR = os.getenv("RTSERVICE_ADDR", "localhost:50052")
 
+#to run this locally in powershell:
+#$env:PYTHONPATH = ".;bff\src;proto_gen"
+#python -m uvicorn bff.app:app --host 0.0.0.0 --port 8000
 app = FastAPI(title="BFF WS (Realtime + Kafka + gRPC)")
 
 # Serve your test GUI from /ui (bff/web/index.html)
