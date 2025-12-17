@@ -18,8 +18,27 @@ services:
     ports:
       - 9092:9092
       - 9093:9093
+  postgres:
+    image: postgres:18.1-alpine
+    container_name: drsynth-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: drsynth
+      POSTGRES_PASSWORD: drsynth
+      POSTGRES_DB: drsynth
+    ports:
+      - 5432:5432
+    volumes:
+      - drsynth_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drsynth -d drsynth"]
+      interval: 10s
+      timeout: 30s
+      retries: 5
+volumes:
+  drsynth_pgdata:
 
-#within the image, for testing create following topics:
+#within the Kafka image, for testing create following topics:
 #/ $ cd /opt/kafka/bin/
 #/opt/kafka/bin $ ./kafka-topics.sh --bootstrap-server localhost:9092 --create --topic audio.raw
 #/opt/kafka/bin $ ./kafka-topics.sh --bootstrap-server localhost:9092 --create --topic transcripts.refined
