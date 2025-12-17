@@ -31,8 +31,8 @@ def test_finalizer_worker_writes_json_and_emits_event(tmp_path: Path, kafka_boot
     """
 
     # -------------------- 1) Topics and env configuration -------------------- #
-    topic_recording_finished = "recordings.finished"
-    topic_session_transcripts = "transcripts.final"
+    topic_recording_finished = "recordings.finished.test"
+    topic_session_transcripts = "transcripts.final.test"
 
     admin = AdminClient({"bootstrap.servers": kafka_bootstrap})
     existing = admin.list_topics(timeout=10).topics.keys()
