@@ -1,9 +1,8 @@
-
+-- migrations/0001_create_core_schema.up.sql
 -- Tenants (companies, clinics, etc.)
 CREATE TABLE tenants (
     id             uuid PRIMARY KEY,
     name           text NOT NULL,
-    email          text NOT NULL,
     created_at     timestamptz NOT NULL DEFAULT now()
 );
 
@@ -12,7 +11,9 @@ CREATE TABLE app_users (
     id             uuid PRIMARY KEY,
     tenant_id      uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     external_id    text UNIQUE,          -- e.g. auth provider ID or email
-    display_name   text,
+    email          text NOT NULL,
+    name           text,
+    roles          text,
     created_at     timestamptz NOT NULL DEFAULT now()
 );
 

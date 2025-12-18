@@ -1,3 +1,4 @@
+#migrations/0001_create_core_schema.py
 from sql_helpers import run_sql_pair, run_sql_pair_down
 
 revision = "0001_create_core_schema"
