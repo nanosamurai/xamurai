@@ -31,3 +31,4 @@ dependencies:
 # pip install protobuf>=5.29
 # pip install fastapi>=0.115
 # pip install uvicorn[standard]>=0.30
+#pip install alembic sqlalchemy "psycopg[binary]"
