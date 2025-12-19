@@ -1,6 +1,7 @@
 # migrations/env.py
 from __future__ import annotations
 
+import os
 from logging.config import fileConfig
 from pathlib import Path
 
@@ -10,6 +11,12 @@ from sqlalchemy import engine_from_config, pool
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+db_url = os.getenv("DATABASE_URL")
+if not db_url:
+    raise RuntimeError("DATABASE_URL is not set")
+
+config.set_main_option("sqlalchemy.url", db_url)
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
