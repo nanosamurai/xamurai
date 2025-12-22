@@ -1,5 +1,6 @@
 # tests/conftest.py
 import os
+import subprocess
 import time
 
 import pytest
@@ -9,6 +10,8 @@ import sys
 from pathlib import Path
 from confluent_kafka.admin import AdminClient, NewTopic
 from confluent_kafka import KafkaException, KafkaError, Producer, Consumer
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 # Ensure project root (the directory that contains rtservice/, bff/, etc.) is on sys.path
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +20,17 @@ if str(ROOT) not in sys.path:
 sys.path.append(os.path.join(ROOT, "whisperx_worker", "src"))
 sys.path.append(os.path.join(ROOT, "recorder_worker", "src"))
 sys.path.append(os.path.join(ROOT, "finalizer_worker", "src"))
+sys.path.append(os.path.join(ROOT, "shared", "src"))
+sys.path.append(os.path.join(ROOT, "proto_gen"))
+
+# Ensure project root (the directory that contains rtservice/, bff/, etc.) is on sys.path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+sys.path.append(os.path.join(ROOT, "whisperx_worker", "src"))
+sys.path.append(os.path.join(ROOT, "recorder_worker", "src"))
+sys.path.append(os.path.join(ROOT, "finalizer_worker", "src"))
+sys.path.append(os.path.join(ROOT, "shared", "src"))
 sys.path.append(os.path.join(ROOT, "proto_gen"))
 
 KAFKA_IMAGE = os.getenv("TEST_KAFKA_IMAGE", "apache/kafka:latest")
@@ -137,3 +151,78 @@ def kafka_bootstrap_existing():
     e.g. docker compose up kafka
     """
     return os.getenv("TEST_KAFKA_BOOTSTRAP", "localhost:9092")
+
+@pytest.fixture(scope="session")
+def postgres_container():
+    """Start a PostgreSQL container with the drsynth database and run migrations."""
+    container = (
+        DockerContainer("postgres:18.1-alpine")
+        .with_bind_ports(5432, 5432)
+        .with_env("POSTGRES_USER", "drsynth")
+        .with_env("POSTGRES_PASSWORD", "drsynth")
+        .with_env("POSTGRES_DB", "drsynth")
+    )
+
+    with container as postgres:
+        # Wait for PostgreSQL to be ready
+        try:
+            wait_for_logs(
+                postgres,
+                "database system is ready to accept connections",
+                timeout=60,
+                interval=2,
+            )
+        except Exception as e:
+            stdout, stderr = postgres.get_logs()
+            print("=== PostgreSQL STDOUT ===")
+            print(stdout.decode("utf-8", errors="ignore"))
+            print("=== PostgreSQL STDERR ===")
+            print(stderr.decode("utf-8", errors="ignore"))
+            raise
+
+        # Run alembic migrations
+        print("[tests] Running alembic migrations...")
+        try:
+            subprocess.run(
+                ["alembic", "upgrade", "head"],
+                cwd=str(ROOT),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            print("[tests] Alembic migrations completed successfully")
+        except subprocess.CalledProcessError as e:
+            print(f"[tests] Alembic migration failed: {e}")
+            print(f"stdout: {e.stdout}")
+            print(f"stderr: {e.stderr}")
+            raise
+
+        # Set DATABASE_URL environment variable for tests
+        os.environ["DATABASE_URL"] = "postgresql://drsynth:drsynth@localhost:5432/drsynth"
+
+        yield "postgresql://drsynth:drsynth@localhost:5432/drsynth"
+
+@pytest.fixture(scope="session")
+def db_engine(postgres_container):
+    """Create a SQLAlchemy engine connected to the PostgreSQL container."""
+    engine = create_engine(
+        "postgresql://drsynth:drsynth@localhost:5432/drsynth",
+        pool_pre_ping=True,
+        pool_recycle=3600,
+    )
+    yield engine
+    engine.dispose()
+
+@pytest.fixture(scope="function")
+def db_session(db_engine):
+    """Create a database session for each test."""
+    connection = db_engine.connect()
+    trans = connection.begin()
+    Session = sessionmaker(bind=connection)
+    session = Session()
+
+    yield session
+
+    session.close()
+    trans.rollback()
+    connection.close()
