@@ -336,6 +336,7 @@ Key test data:
 * Topic creation timing: we should not rely on Kafka auto-create in tests; topics should be created in fixtures.
 * Windows + Torch DLL issues: Torch import can fail if envs diverge. `drsynth-whisperx` is the “known-good” heavy env.
 * `PYTHONPATH` vs editable installs: editable installs (`pip install -e`) are the cleanest way to avoid module import issues (including protobuf modules).
+* Cline has issues with running tests - it has to use correct conda env: for instance for running bff-related tests it has to run: `conda activate drsynth-bff && "C:\Users\miros\miniconda3\envs\drsynth-bff\python.exe" -m pytest tests/test_bff_session_persistence.py -v`
 
 ---
 
