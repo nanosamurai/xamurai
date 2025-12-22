@@ -1,6 +1,5 @@
 # tests/conftest.py
 import os
-import subprocess
 import time
 
 import pytest
@@ -12,6 +11,13 @@ from confluent_kafka.admin import AdminClient, NewTopic
 from confluent_kafka import KafkaException, KafkaError, Producer, Consumer
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from alembic.config import Config
+from alembic.command import upgrade
+
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Ensure project root (the directory that contains rtservice/, bff/, etc.) is on sys.path
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,11 +33,16 @@ sys.path.append(os.path.join(ROOT, "proto_gen"))
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+sys.path.append(os.path.join(ROOT, "bff", "src"))
 sys.path.append(os.path.join(ROOT, "whisperx_worker", "src"))
 sys.path.append(os.path.join(ROOT, "recorder_worker", "src"))
 sys.path.append(os.path.join(ROOT, "finalizer_worker", "src"))
 sys.path.append(os.path.join(ROOT, "shared", "src"))
 sys.path.append(os.path.join(ROOT, "proto_gen"))
+
+# Set DATABASE_URL environment variable for tests
+# This needs to be set before any imports that might use it
+os.environ["DATABASE_URL"] = "postgresql://drsynth:drsynth@localhost:5432/drsynth"
 
 KAFKA_IMAGE = os.getenv("TEST_KAFKA_IMAGE", "apache/kafka:latest")
 topic_audio = "audio.raw.test"
@@ -50,7 +61,6 @@ def _make_producer(bootstrap: str) -> Producer:
             "batch.size": 128_000,
         }
     )
-
 
 def _make_consumer(bootstrap: str, group_id: str) -> Consumer:
     return Consumer(
@@ -102,7 +112,7 @@ def kafka_bootstrap():
         )
         .with_env(
             "KAFKA_ADVERTISED_LISTENERS",
-            # from the host we’ll connect via localhost + mapped port
+            # from the host we'll connect via localhost + mapped port
             "PLAINTEXT://localhost:9092",
         )
         .with_env("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER")
@@ -155,6 +165,8 @@ def kafka_bootstrap_existing():
 @pytest.fixture(scope="session")
 def postgres_container():
     """Start a PostgreSQL container with the drsynth database and run migrations."""
+
+    logger.info("Starting PostgreSQL container...")
     container = (
         DockerContainer("postgres:18.1-alpine")
         .with_bind_ports(5432, 5432)
@@ -163,7 +175,9 @@ def postgres_container():
         .with_env("POSTGRES_DB", "drsynth")
     )
 
+    logger.info("PostgreSQL container created, starting it...")
     with container as postgres:
+        logger.info("PostgreSQL container started, waiting for readiness...")
         # Wait for PostgreSQL to be ready
         try:
             wait_for_logs(
@@ -172,41 +186,69 @@ def postgres_container():
                 timeout=60,
                 interval=2,
             )
+            logger.info("PostgreSQL is ready to accept connections")
         except Exception as e:
+            logger.error(f"Failed to wait for PostgreSQL readiness: {e}")
             stdout, stderr = postgres.get_logs()
-            print("=== PostgreSQL STDOUT ===")
-            print(stdout.decode("utf-8", errors="ignore"))
-            print("=== PostgreSQL STDERR ===")
-            print(stderr.decode("utf-8", errors="ignore"))
+            logger.error("=== PostgreSQL STDOUT ===")
+            logger.error(stdout.decode("utf-8", errors="ignore"))
+            logger.error("=== PostgreSQL STDERR ===")
+            logger.error(stderr.decode("utf-8", errors="ignore"))
             raise
 
-        # Run alembic migrations
-        print("[tests] Running alembic migrations...")
+        # Set environment variables for database connections
+        # Use SQLALCHEMY_DATABASE_URL for Alembic/SQLAlchemy
+        # Use DATABASE_URL for psycopg/psycopg_pool
+        SQLALCHEMY_DATABASE_URL = "postgresql+psycopg://drsynth:drsynth@localhost:5432/drsynth"
+        DATABASE_URL = "postgresql://drsynth:drsynth@localhost:5432/drsynth"
+        os.environ["SQLALCHEMY_DATABASE_URL"] = SQLALCHEMY_DATABASE_URL
+
+        # Run alembic migrations using Alembic API
+        logger.info("Running alembic migrations...")
         try:
-            subprocess.run(
-                ["alembic", "upgrade", "head"],
-                cwd=str(ROOT),
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            print("[tests] Alembic migrations completed successfully")
-        except subprocess.CalledProcessError as e:
-            print(f"[tests] Alembic migration failed: {e}")
-            print(f"stdout: {e.stdout}")
-            print(f"stderr: {e.stderr}")
+            # Create Alembic configuration
+            alembic_cfg = Config()
+            alembic_cfg.set_main_option("script_location", str(ROOT / "migrations"))
+            alembic_cfg.set_main_option("sqlalchemy.url", SQLALCHEMY_DATABASE_URL)
+            logger.info(f"Alembic script_location: {str(ROOT / 'migrations')}")
+            logger.info(f"Alembic sqlalchemy.url: {SQLALCHEMY_DATABASE_URL}")
+
+            # Run migrations
+            upgrade(alembic_cfg, "head")
+            logger.info("Alembic migrations completed successfully")
+        except Exception as e:
+            logger.error(f"Alembic migration failed: {e}")
+            import traceback
+            logger.error("Full traceback:")
+            logger.error(traceback.format_exc())
             raise
 
-        # Set DATABASE_URL environment variable for tests
-        os.environ["DATABASE_URL"] = "postgresql://drsynth:drsynth@localhost:5432/drsynth"
+        # Create a test tenant for integration tests
+        logger.info("Creating test tenant...")
+        from drsynth_common.db import exec1
+        try:
+            exec1(
+                "INSERT INTO tenants (id, name) VALUES (%s, %s)",
+                ("00000000-0000-0000-0000-000000000000", "Test Tenant")
+            )
+            logger.info("Test tenant created successfully")
+        except Exception as e:
+            logger.error(f"Failed to create test tenant: {e}")
+            import traceback
+            logger.error("Full traceback:")
+            logger.error(traceback.format_exc())
+            raise
 
-        yield "postgresql://drsynth:drsynth@localhost:5432/drsynth"
+        logger.info("PostgreSQL fixture yielding connection string")
+        os.environ["DATABASE_URL"] = DATABASE_URL
+        yield DATABASE_URL
+        logger.info("PostgreSQL fixture cleanup complete")
 
 @pytest.fixture(scope="session")
 def db_engine(postgres_container):
     """Create a SQLAlchemy engine connected to the PostgreSQL container."""
     engine = create_engine(
-        "postgresql://drsynth:drsynth@localhost:5432/drsynth",
+        "postgresql+psycopg://drsynth:drsynth@localhost:5432/drsynth",
         pool_pre_ping=True,
         pool_recycle=3600,
     )
