@@ -22,4 +22,6 @@ dependencies:
       - hf-xet==1.1.10
       - pytest
       - testcontainers[kafka]
+      - psycopg[binary]
+      - psycopg_pool
 # pip install "torch==2.8.0+cu128" "torchaudio==2.8.0+cu128" --index-url https://download.pytorch.org/whl/cu128
