@@ -30,7 +30,7 @@ def _start_session_db(x_tenant_id: str, x_user_id: str | None):
         (session_id, x_tenant_id, x_user_id, session_key),
     )
 
-    return {"session_id": str(session_id), "session_key": session_key}
+    return {"session_id": session_id, "session_key": session_key}
 
 @router.post("/sessions/start")
 def start_session(
