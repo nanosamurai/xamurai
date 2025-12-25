@@ -1,3 +1,4 @@
+#bff/src/bff/app.py
 import asyncio
 import json
 import logging
@@ -8,7 +9,7 @@ import time
 from typing import Dict, Optional
 
 import grpc
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Header
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from confluent_kafka import Producer
@@ -17,6 +18,7 @@ from bff.refined_bus import RefinedBus
 from bff.settings import settings
 from bff.kafka_io import make_producer, produce_audio_chunk
 from bff.auth import verify_token, OIDCError, OIDCUser
+from bff.sessions import start_session_db
 
 import stream_pb2, stream_pb2_grpc
 
@@ -198,6 +200,8 @@ async def ws_audio(
     websocket: WebSocket,
     session_id: str = Query(...),
     session_lang: str = Query(...),
+    x_tenant_id: str = Header(...),
+    x_user_id: str | None = Header(None),
 ):
     await websocket.accept()
 
@@ -207,6 +211,19 @@ async def ws_audio(
     except WebSocketDisconnect:
         # Already closed in _authenticate_ws
         return
+
+    # Persist the session in the database
+    try:
+        session_data = start_session_db(x_tenant_id=x_tenant_id, x_user_id=x_user_id)
+        logger.info(
+            "Session persisted: session_id=%s session_key=%s",
+            session_data["session_id"],
+            session_data["session_key"],
+        )
+    except Exception as e:
+        logger.error("Failed to persist session: %s", e)
+        # Continue with the session even if persistence fails
+        # (this allows the session to work even if DB is down)
 
     session_seq.setdefault(session_id, 0)
 
