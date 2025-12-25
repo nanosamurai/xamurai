@@ -1,3 +1,4 @@
+#bff/src/bff/auth.py
 import os
 import logging
 from dataclasses import dataclass
@@ -11,9 +12,9 @@ logger = logging.getLogger(__name__)
 
 KEYCLOAK_ISSUER = os.getenv(
     "KEYCLOAK_ISSUER",
-    "https://auth.nanosamur.ai/realms/your-realm-name",
+    "https://auth.nanosamur.ai/realms/nanosamurai",
 )
-KEYCLOAK_AUDIENCE = os.getenv("KEYCLOAK_AUDIENCE", "bff-api")  # your Keycloak client-id
+KEYCLOAK_AUDIENCE = os.getenv("KEYCLOAK_AUDIENCE", "bff-web")  # Keycloak client-id
 
 # We cache JWKS in memory; in prod you’d refresh periodically.
 _JWKS: Dict[str, Any] | None = None
