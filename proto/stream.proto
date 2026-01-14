@@ -1,4 +1,9 @@
+// proto/stream.proto
 syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "samuraibff.proto";
+option java_outer_classname = "StreamProto";
 
 // ~200–500 ms of PCM16 mono @16 kHz per message
 message AudioChunk {
@@ -7,7 +12,13 @@ message AudioChunk {
   int64   t0_ns        = 3;   // producer monotonic timestamp OR sample time
   uint32  sample_rate  = 4;   // 16000
   bytes   pcm16_le     = 5;   // little-endian PCM16 mono
-  string  lang       = 6;
+  string  lang         = 6;
+
+  // Base URI of the BFF instance that originated this session.
+  // Used as a "reply-to" for refined events when Kafka partitions
+  // distribute consumption across multiple BFF instances.
+  // Example: "http://bff-1.internal:8000".
+  string  bff_origin_uri = 7;
 }
 
 enum AsrType { PARTIAL = 0; FINAL = 1; }
@@ -37,7 +48,11 @@ message RefinedEvent {
   string  text         = 4;
   string  speaker      = 5;              // optional/mapped
   repeated uint64 supersedes_seq = 6;    // optional linkage to live lines
-  string lang             = 7;
+  string  lang         = 7;
+
+  // Base URI of the BFF instance that originated this session.
+  // This value is copied from AudioChunk.bff_origin_uri by the worker.
+  string  bff_origin_uri = 8;
 }
 
 // Recording-level metadata: “recording finished, file is available”
