@@ -25,6 +25,7 @@ SR = 16000
 
 last_activity: Dict[str, float] = defaultdict(lambda: 0.0)
 session_lang: Dict[str, Optional[str]] = defaultdict(lambda: None)
+bff_origin_uri: Dict[str, Optional[str]] = defaultdict(lambda: None)
 
 # --------------------------------------------------------------------------- #
 # Logging setup
@@ -105,6 +106,7 @@ def _flush_session_partial(
                 text=seg_text,
                 speaker=speaker,
                 supersedes_seq=[],
+                bff_origin_uri=bff_origin_uri.get(session_id),
             )
             producer.produce(
                 topic=TOPIC_REFINED,
@@ -122,7 +124,6 @@ def _flush_session_partial(
     buffers.pop(session_id, None)
     buf_samples.pop(session_id, None)
     slice_index.pop(session_id, None)
-
 
 def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     """
@@ -169,7 +170,6 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
 
     logger.info("WhisperX ASR model initialized successfully on %s", _WHISPERX_DEVICE)
 
-
 def _ensure_align_model(language_code: str) -> None:
     """
     Ensure we have an alignment model for the given language code.
@@ -188,7 +188,6 @@ def _ensure_align_model(language_code: str) -> None:
         language_code=language_code,
         device=_WHISPERX_DEVICE,
     )
-
 
 def run_whisperx(
     wav_path: str,
@@ -315,8 +314,6 @@ def run_whisperx(
         )
         return from_asr_segments()
 
-
-
 def make_consumer() -> Consumer:
     logger.info("Creating Kafka consumer")
     return Consumer(
@@ -330,7 +327,6 @@ def make_consumer() -> Consumer:
         }
     )
 
-
 def make_producer() -> Producer:
     logger.info("Creating Kafka producer")
     return Producer(
@@ -342,7 +338,6 @@ def make_producer() -> Producer:
             "batch.size": 131072,
         }
     )
-
 
 def main():
     logger.info("Starting whisperx_worker")
@@ -362,6 +357,7 @@ def main():
     slice_index: Dict[str, int] = defaultdict(int)
     last_activity: Dict[str, float] = defaultdict(lambda: 0.0)
     session_lang: Dict[str, Optional[str]] = defaultdict(lambda: None)
+    bff_origin_uri: Dict[str, Optional[str]] = defaultdict(lambda: None)
 
     try:
         while True:
@@ -404,10 +400,13 @@ def main():
 
             session_id = audio.session_id
             lang = getattr(audio, "lang", "") or None
+            bff_uri = getattr(audio, "bff_origin_uri", "") or None
 
             # Track lang hint & activity
             if lang:
                 session_lang[session_id] = lang
+            if bff_uri:
+                bff_origin_uri[session_id] = bff_uri
             last_activity[session_id] = now
 
             # Append to buffer
@@ -470,6 +469,7 @@ def main():
                         text=seg_text,
                         speaker=speaker,
                         supersedes_seq=[],
+                        bff_origin_uri=bff_origin_uri.get(session_id),
                     )
                     logger.debug(
                         "Sending refined message start_s=%.1f, speaker=%s, text=%s",
@@ -508,7 +508,6 @@ def main():
             p.flush(2.0)
         except Exception:
             pass
-
 
 if __name__ == "__main__":
     main()
