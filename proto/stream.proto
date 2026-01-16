@@ -19,6 +19,9 @@ message AudioChunk {
   // distribute consumption across multiple BFF instances.
   // Example: "http://bff-1.internal:8000".
   string  bff_origin_uri = 7;
+
+  // Tenant id for routing/isolation.
+  string tenant_id = 8;
 }
 
 enum AsrType { PARTIAL = 0; FINAL = 1; }
@@ -53,6 +56,10 @@ message RefinedEvent {
   // Base URI of the BFF instance that originated this session.
   // This value is copied from AudioChunk.bff_origin_uri by the worker.
   string  bff_origin_uri = 8;
+
+  // Tenant id for routing/isolation.
+  // This value is copied from AudioChunk.tenant_id by the worker.
+  string tenant_id = 9;
 }
 
 // Recording-level metadata: “recording finished, file is available”

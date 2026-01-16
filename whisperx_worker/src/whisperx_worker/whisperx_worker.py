@@ -26,6 +26,7 @@ SR = 16000
 last_activity: Dict[str, float] = defaultdict(lambda: 0.0)
 session_lang: Dict[str, Optional[str]] = defaultdict(lambda: None)
 bff_origin_uri: Dict[str, Optional[str]] = defaultdict(lambda: None)
+tenant_id: Dict[str, Optional[str]] = defaultdict(lambda: None)
 
 # --------------------------------------------------------------------------- #
 # Logging setup
@@ -107,6 +108,7 @@ def _flush_session_partial(
                 speaker=speaker,
                 supersedes_seq=[],
                 bff_origin_uri=bff_origin_uri.get(session_id),
+                tenant_id=tenant_id.get(session_id),
             )
             producer.produce(
                 topic=TOPIC_REFINED,
@@ -401,12 +403,15 @@ def main():
             session_id = audio.session_id
             lang = getattr(audio, "lang", "") or None
             bff_uri = getattr(audio, "bff_origin_uri", "") or None
+            tenant = getattr(audio, "tenant_id", "") or None
 
             # Track lang hint & activity
             if lang:
                 session_lang[session_id] = lang
             if bff_uri:
                 bff_origin_uri[session_id] = bff_uri
+            if tenant:
+                tenant_id[session_id] = tenant
             last_activity[session_id] = now
 
             # Append to buffer
@@ -470,6 +475,7 @@ def main():
                         speaker=speaker,
                         supersedes_seq=[],
                         bff_origin_uri=bff_origin_uri.get(session_id),
+                        tenant_id=tenant_id.get(session_id),
                     )
                     logger.debug(
                         "Sending refined message start_s=%.1f, speaker=%s, text=%s",
