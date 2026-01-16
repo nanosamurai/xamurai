@@ -107,6 +107,7 @@ def _flush_session_partial(
                 text=seg_text,
                 speaker=speaker,
                 supersedes_seq=[],
+                lang=session_lang.get(session_id),
                 bff_origin_uri=bff_origin_uri.get(session_id),
                 tenant_id=tenant_id.get(session_id),
             )
@@ -474,6 +475,7 @@ def main():
                         text=seg_text,
                         speaker=speaker,
                         supersedes_seq=[],
+                        lang=session_lang.get(session_id),
                         bff_origin_uri=bff_origin_uri.get(session_id),
                         tenant_id=tenant_id.get(session_id),
                     )
