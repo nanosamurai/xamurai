@@ -1,4 +1,4 @@
-#bff/src/bff/app.py
+# bff/src/bff/app.py
 import asyncio
 import json
 import logging
@@ -9,7 +9,7 @@ import time
 from typing import Dict, Optional
 
 import grpc
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from confluent_kafka import Producer
@@ -35,12 +35,12 @@ AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "false").lower() == "true"
 # Address of realtime gRPC service
 RTSERVICE_ADDR = os.getenv("RTSERVICE_ADDR", "localhost:50052")
 
-#to run this locally in powershell:
-#$env:PYTHONPATH = ".;bff\src;proto_gen"
-#python -m uvicorn bff.app:app --host 0.0.0.0 --port 8000
+# to run locally in powershell:
+# $env:PYTHONPATH = ".;bff\src;proto_gen"
+# python -m uvicorn bff.app:app --host 0.0.0.0 --port 8000
 app = FastAPI(title="BFF WS (Realtime + Kafka + gRPC)")
 
-# Serve your test GUI from /ui (bff/web/index.html)
+# Serve GUI from /ui (bff/web/index.html)
 app.mount("/ui", StaticFiles(directory="bff/web", html=True), name="ui")
 
 # In-proc singletons (OK for MVP)
@@ -70,45 +70,73 @@ async def on_shutdown():
 
 @app.get("/")
 async def root():
-    # optional: simple pointer page
     return HTMLResponse("<a href='/ui'>Open WS test UI</a>")
 
 
 # --------------------------------------------------------------------------- #
-# Auth helper
+# Auth helpers
 # --------------------------------------------------------------------------- #
-async def _authenticate_ws(websocket: WebSocket) -> Optional[OIDCUser]:
+def _extract_token(websocket: WebSocket, token_q: Optional[str]) -> Optional[str]:
     """
-    Extract and verify a Bearer token from the WS handshake.
-
-    We check:
-    1) Authorization: Bearer <token>
-    2) ?token=<token> query param
-
-    Returns OIDCUser on success, or None if no/invalid token AND AUTH_REQUIRED is False.
-    Raises WebSocketDisconnect if AUTH_REQUIRED and auth fails.
+    Token sources (in order):
+      1) Authorization: Bearer <token>
+      2) ?token=<token>
     """
-    # 1) From headers
     auth_header = websocket.headers.get("authorization")
-    token: Optional[str] = None
-
     if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1].strip()
+        return auth_header.split(" ", 1)[1].strip()
+    if token_q:
+        return token_q.strip()
+    return None
 
-    # 2) From query param (e.g. ws://.../ws?token=eyJ...)
-    if token is None:
-        token_q = websocket.query_params.get("token")
-        if token_q:
-            token = token_q.strip()
+
+def _extract_tenant_from_claims(user: Optional[OIDCUser]) -> Optional[str]:
+    """
+    Best-effort tenant extraction from token claims.
+    Adjust these keys once we standardize Keycloak mapper.
+    """
+    if not user:
+        return None
+
+    claims = user.raw or {}
+    for k in ("tenant_id", "tenant", "org_id", "organization_id", "company_id"):
+        v = claims.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+
+    # Optional role encoding: realm_access.roles contains e.g. "tenant:<uuid>"
+    try:
+        roles = (claims.get("realm_access") or {}).get("roles") or []
+        for r in roles:
+            if isinstance(r, str) and r.startswith("tenant:"):
+                return r.split("tenant:", 1)[1].strip() or None
+    except Exception:
+        pass
+
+    return None
+
+
+async def _authenticate_before_accept(
+    websocket: WebSocket,
+    token_q: Optional[str],
+) -> Optional[OIDCUser]:
+    """
+    Authenticate *before* websocket.accept().
+
+    If AUTH_REQUIRED is True:
+      - missing/invalid token => HTTP 403 (handshake rejected)
+    If AUTH_REQUIRED is False:
+      - missing/invalid token => return None
+      - valid token => return OIDCUser
+    """
+    token = _extract_token(websocket, token_q)
 
     if not token:
         if AUTH_REQUIRED:
-            logger.info("WS auth failed: missing token")
-            await websocket.close(code=1008)  # policy violation
-            raise WebSocketDisconnect(code=1008)
-        else:
-            logger.warning("WS: no token provided, continuing (AUTH_REQUIRED=false)")
-            return None
+            logger.info("WS auth failed: missing token (AUTH_REQUIRED=true)")
+            raise HTTPException(status_code=403, detail="Missing token")
+        logger.warning("WS: no token provided, continuing (AUTH_REQUIRED=false)")
+        return None
 
     try:
         user = verify_token(token)
@@ -121,12 +149,10 @@ async def _authenticate_ws(websocket: WebSocket) -> Optional[OIDCUser]:
         return user
     except OIDCError as e:
         if AUTH_REQUIRED:
-            logger.info("WS auth failed: %s", e)
-            await websocket.close(code=1008)
-            raise WebSocketDisconnect(code=1008)
-        else:
-            logger.warning("WS auth error (ignored because AUTH_REQUIRED=false): %s", e)
-            return None
+            logger.info("WS auth failed: %s (AUTH_REQUIRED=true)", e)
+            raise HTTPException(status_code=403, detail="Invalid token")
+        logger.warning("WS auth error ignored (AUTH_REQUIRED=false): %s", e)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -138,17 +164,6 @@ def _start_grpc_stream(
     req_q: "queue.Queue[Optional[stream_pb2.AudioChunk]]",
     resp_q: "queue.Queue[Optional[stream_pb2.AsrEvent]]",
 ) -> threading.Thread:
-    """
-    Start a background thread that:
-      - reads AudioChunk from req_q
-      - sends them to RealtimeASR.Stream
-      - pushes AsrEvent into resp_q
-
-    Sentinels:
-      - None in req_q => close request iterator
-      - Puts None in resp_q when stream finishes
-    """
-
     def run():
         logger.info("Starting gRPC stream thread for session=%s", session_id)
         channel = grpc.insecure_channel(RTSERVICE_ADDR)
@@ -158,9 +173,7 @@ def _start_grpc_stream(
             while True:
                 chunk = req_q.get()
                 if chunk is None:
-                    logger.info(
-                        "gRPC request iterator closing for session=%s", session_id
-                    )
+                    logger.info("gRPC request iterator closing for session=%s", session_id)
                     break
                 yield chunk
 
@@ -175,15 +188,12 @@ def _start_grpc_stream(
                 getattr(e, "code", lambda: None)(),
             )
         except Exception as e:
-            logger.exception(
-                "gRPC stream unexpected error for session=%s: %s", session_id, e
-            )
+            logger.exception("gRPC stream unexpected error for session=%s: %s", session_id, e)
         finally:
             try:
                 channel.close()
             except Exception:
                 pass
-            # Sentinel to tell async loop we're done
             resp_q.put(None)
             logger.info("gRPC stream thread finished for session=%s", session_id)
 
@@ -200,30 +210,50 @@ async def ws_audio(
     websocket: WebSocket,
     session_id: str = Query(...),
     session_lang: str = Query(...),
-    x_tenant_id: str = Header(...),
+
+    # Browser-friendly auth + tenant
+    token: str | None = Query(None),
+    tenant_id: str | None = Query(None),
+    user_id: str | None = Query(None),
+
+    # Non-browser clients may still send headers (optional!)
+    x_tenant_id: str | None = Header(None),
     x_user_id: str | None = Header(None),
 ):
+    # 1) Authenticate BEFORE accept (reject handshake cleanly if needed)
+    user: Optional[OIDCUser] = await _authenticate_before_accept(websocket, token_q=token)
+
+    # 2) Resolve tenant/user identifiers
+    resolved_tenant_id = tenant_id or x_tenant_id or _extract_tenant_from_claims(user)
+    resolved_user_id = user_id or x_user_id
+
+    # Decide whether we require tenant at all
+    # For MVP, we *allow* WS streaming without tenant, but we skip persistence.
+    if AUTH_REQUIRED and not resolved_tenant_id:
+        # If auth is mandatory, tenant should usually be present too.
+        # Rejecting now avoids "works but no persistence" surprises.
+        logger.info("WS rejected: authenticated but missing tenant_id")
+        raise HTTPException(status_code=403, detail="Missing tenant_id")
+
+    # 3) Accept only after we’re satisfied
     await websocket.accept()
 
-    # Authenticate (or not, depending on AUTH_REQUIRED)
-    try:
-        user: Optional[OIDCUser] = await _authenticate_ws(websocket)
-    except WebSocketDisconnect:
-        # Already closed in _authenticate_ws
-        return
-
-    # Persist the session in the database
-    try:
-        session_data = start_session_db(x_tenant_id=x_tenant_id, x_user_id=x_user_id)
-        logger.info(
-            "Session persisted: session_id=%s session_key=%s",
-            session_data["session_id"],
-            session_data["session_key"],
-        )
-    except Exception as e:
-        logger.error("Failed to persist session: %s", e)
-        # Continue with the session even if persistence fails
-        # (this allows the session to work even if DB is down)
+    # 4) Persist session (best-effort; does not kill WS if DB down)
+    if resolved_tenant_id:
+        try:
+            session_data = start_session_db(
+                x_tenant_id=resolved_tenant_id,
+                x_user_id=resolved_user_id,
+            )
+            logger.info(
+                "Session persisted: session_id=%s session_key=%s",
+                session_data["session_id"],
+                session_data["session_key"],
+            )
+        except Exception as e:
+            logger.error("Failed to persist session: %s", e)
+    else:
+        logger.warning("Skipping session persistence: tenant_id not provided/resolved")
 
     session_seq.setdefault(session_id, 0)
 
@@ -236,19 +266,18 @@ async def ws_audio(
     grpc_thread = _start_grpc_stream(session_id, session_lang, req_q, resp_q)
 
     logger.info(
-        "WS connected: session=%s lang=%s user=%s",
+        "WS connected: session=%s lang=%s user=%s tenant=%s",
         session_id,
         session_lang,
         getattr(user, "preferred_username", None),
+        resolved_tenant_id,
     )
 
     async def recv_audio_loop():
-        """Receive audio frames, put them on Kafka + gRPC request queue."""
         try:
             while True:
                 data = await websocket.receive()
 
-                # Explicitly handle disconnect frame to avoid RuntimeError on next receive()
                 if data.get("type") == "websocket.disconnect":
                     logger.info(
                         "WS disconnect frame received (recv loop): session=%s code=%s",
@@ -258,7 +287,6 @@ async def ws_audio(
                     break
 
                 if "bytes" not in data or data["bytes"] is None:
-                    # ignore non-binary frames for now
                     continue
 
                 pcm16 = data["bytes"]
@@ -273,14 +301,10 @@ async def ws_audio(
                         pcm16_bytes=pcm16,
                         sample_rate=settings.sample_rate,
                     )
-                    # poll occasionally for delivery callbacks
                     if session_seq[session_id] % 10 == 0:
                         producer.poll(0)
                 except Exception as e:
-                    # Just log for now; do not kill the WS session
-                    logger.error(
-                        "KAFKA produce failed (session=%s): %s", session_id, e
-                    )
+                    logger.error("KAFKA produce failed (session=%s): %s", session_id, e)
 
                 # 2) Forward to gRPC realtime ASR
                 chunk_msg = stream_pb2.AudioChunk(
@@ -293,32 +317,24 @@ async def ws_audio(
                 try:
                     req_q.put_nowait(chunk_msg)
                 except queue.Full:
-                    # with unbounded Queue this shouldn't happen, but log just in case
-                    logger.warning(
-                        "gRPC request queue is full (session=%s), dropping frame",
-                        session_id,
-                    )
+                    logger.warning("gRPC request queue full (session=%s), dropping frame", session_id)
 
         except WebSocketDisconnect:
             logger.info("WS disconnected (recv loop): session=%s", session_id)
         except Exception as e:
             logger.exception("[WS recv] error (session=%s): %s", session_id, e)
         finally:
-            # signal gRPC thread to close request iterator
             try:
                 req_q.put_nowait(None)
             except Exception:
                 pass
 
     async def send_asr_loop():
-        """Read AsrEvent from gRPC response queue and push via WS."""
         try:
             while True:
                 ev = await asyncio.to_thread(resp_q.get)
                 if ev is None:
-                    logger.info(
-                        "gRPC stream closed (send_asr_loop) for session=%s", session_id
-                    )
+                    logger.info("gRPC stream closed (send_asr_loop) for session=%s", session_id)
                     break
 
                 payload = {
@@ -338,18 +354,15 @@ async def ws_audio(
             logger.exception("[WS asr] error (session=%s)", session_id)
 
     async def send_refined_loop():
-        """Forward refined WhisperX events for this session via the same WS."""
         try:
             while True:
                 ev = await refined_queue.get()
-                # ev is already a dict prepared by RefinedBus
                 await websocket.send_text(json.dumps(ev, ensure_ascii=False))
         except WebSocketDisconnect:
             logger.info("WS disconnected (refined loop): session=%s", session_id)
         except Exception:
             logger.exception("[WS refined] error (session=%s)", session_id)
 
-    # Run all three coroutines until one finishes / fails
     recv_task = asyncio.create_task(recv_audio_loop())
     asr_task = asyncio.create_task(send_asr_loop())
     refined_task = asyncio.create_task(send_refined_loop())
@@ -364,13 +377,11 @@ async def ws_audio(
     finally:
         refined_bus.unregister(session_id)
 
-        # close gRPC request side if not already
         try:
             req_q.put_nowait(None)
         except Exception:
             pass
 
-        # give the gRPC thread a moment to finish
         try:
             grpc_thread.join(timeout=1.0)
         except Exception:

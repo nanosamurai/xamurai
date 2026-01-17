@@ -11,7 +11,7 @@
 <script>
 const KEYCLOAK_ISSUER = "https://auth.nanosamur.ai/realms/nanosamurai";
 const CLIENT_ID = "bff-web";
-const REDIRECT_URI = "http://localhost:8000/ui/callback.html";
+const REDIRECT_URI = `${location.origin}/ui/callback.html`;
 
 function qs(name){ return new URLSearchParams(location.search).get(name); }
 
