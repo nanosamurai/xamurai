@@ -8,6 +8,8 @@ from confluent_kafka import Consumer, Producer, KafkaException
 
 import stream_pb2
 from whisperx_worker.whisperx_worker import run_whisperx
+from drsynth_common.db import fetch_one, exec1
+import uuid
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +127,60 @@ def _save_transcript_json(transcript: stream_pb2.SessionTranscript) -> Optional[
     logger.info("Saved JSON transcript to %s", json_path)
     return json_path
 
+def get_session_row(session_key: str):
+    return fetch_one(
+        "SELECT id, tenant_id, user_id FROM sessions WHERE session_key=%s",
+        (session_key,),
+    )
+
+def persist_final(session_key: str, rf: stream_pb2.RecordingFinished, full_text: str, segments_json: list[dict]):
+    row = get_session_row(session_key)
+    if not row:
+        # create stub session if needed (keeps pipeline resilient)
+        sess_id = uuid.uuid4()
+        exec1(
+            """
+            INSERT INTO sessions (id, tenant_id, user_id, session_key, status)
+            VALUES (%s, %s, NULL, %s, 'active')
+            ON CONFLICT (session_key) DO NOTHING
+            """,
+            (sess_id, rf.tenant_id, session_key),
+        )
+        row = get_session_row(session_key)
+
+    session_id, tenant_id, user_id = row
+
+    recording_id = uuid.uuid4()
+    exec1(
+        """
+        INSERT INTO recordings (id, session_id, recording_url, duration_s, sample_rate, lang)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (recording_id, session_id, rf.recording_url, rf.duration_s, rf.sample_rate, rf.lang),
+    )
+
+    transcript_id = uuid.uuid4()
+    exec1(
+        """
+        INSERT INTO session_transcripts
+            (id, session_id, recording_id, tenant_id, user_id, full_text, lang, duration_s, segments)
+        VALUES
+            (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT (session_id) DO UPDATE SET
+            recording_id = EXCLUDED.recording_id,
+            full_text = EXCLUDED.full_text,
+            lang = EXCLUDED.lang,
+            duration_s = EXCLUDED.duration_s,
+            segments = EXCLUDED.segments,
+            created_at = now()
+        """,
+        (transcript_id, session_id, recording_id, tenant_id, user_id, full_text, rf.lang, rf.duration_s, json.dumps(segments_json)),
+    )
+
+    exec1(
+        "UPDATE sessions SET status='finished', ended_at=now() WHERE id=%s",
+        (session_id,),
+    )
 
 # --------------------------------------------------------------------------- #
 # Main loop

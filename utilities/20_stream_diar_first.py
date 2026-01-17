@@ -40,12 +40,12 @@ WINDOW_SEC = 5.0              # diarization/ASR window size
 OVERLAP_SEC = 0.5             # overlap between windows
 HOP_SEC = WINDOW_SEC - OVERLAP_SEC
 
-LANG = "en"                   # "cs", "en", or None
+LANG = "de"                   # "cs", "en", or None
 
 FINALIZE_MIN_DUR_SEC = 0.25   # ignore tiny segments
 
 # Capture mode: "loopback", "mic", or "both"
-CAPTURE_MODE = "both"
+CAPTURE_MODE = "loopback"
 
 # Mic device selection (None = default). Use sd.query_devices() if needed.
 MIC_DEVICE_INDEX = None
@@ -61,7 +61,7 @@ VAD_MIN_SILENCE_MS = 250
 
 # Speaker enrollment
 USE_SPEAKER_ENROLLMENT = True
-ENROLL_DIR = "enrolled_speakers"
+ENROLL_DIR = "../enrolled_speakers"
 ENROLL_SIM_THRESHOLD = 0.35 #0.5
 
 # Debug toggles

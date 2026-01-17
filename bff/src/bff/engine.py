@@ -94,7 +94,7 @@ class RealtimeEngine:
         self._vad_model = None
         self._get_speech_timestamps = None
 
-        # Enrollment globals (shared within this engine)
+        # Enrollment globals (drsynth_common within this engine)
         self._embedding_infer: Optional[EmbeddingInference] = None
         self._enrolled_speakers: Dict[str, np.ndarray] = {}
 

@@ -9,6 +9,12 @@ import stream_pb2
 import stream_pb2_grpc
 from rtservice.engine import RealtimeEngine
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
 logger = logging.getLogger(__name__)
 
 class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
