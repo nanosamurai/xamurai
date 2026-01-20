@@ -24,8 +24,11 @@ This repo is a Python monorepo with multiple packages (BFF + realtime service + 
 * `recordings.finished`
   Emitted by `recorder_worker` when a session becomes idle/ends and WAV is finalized.
 
-* `transcripts.full`
+* `transcripts.final`
   Emitted by `finalizer_worker` as the canonical finished transcript event (`SessionTranscript`).
+
+  In addition to Kafka emission, `finalizer_worker` also persists the finalized transcript
+  into Postgres (`sessions`, `recordings`, `session_transcripts`).
 
 ### Processing pipeline
 
@@ -42,7 +45,13 @@ This repo is a Python monorepo with multiple packages (BFF + realtime service + 
 
 4. **recorder_worker** consumes `audio.raw`, writes the full session WAV, and after idle timeout emits `RecordingFinished` to `recordings.finished`.
 
-5. **finalizer_worker** consumes `recordings.finished`, runs full-session WhisperX (+ optional alignment) on the finalized WAV, stores a JSON transcript artifact, and emits a `SessionTranscript` to `transcripts.final`.
+5. **finalizer_worker** consumes `recordings.finished`, runs full-session WhisperX (+ optional alignment) on the finalized WAV, stores a JSON transcript artifact, emits a `SessionTranscript` to `transcripts.final`, **and persists the result to Postgres**.
+
+   Persistence details:
+   * Ensures a `sessions` row exists for the session key (creates a stub if missing)
+   * Inserts a `recordings` row (recording_url, duration, sample rate, lang)
+   * Upserts `session_transcripts` (full_text + segments JSON)
+   * Marks the session `status='finished'` and sets `ended_at`
 
 
 ---
@@ -201,8 +210,12 @@ Depends on implementation, but typically:
 ### finalizer_worker
 
 * Consumes: `KAFKA_TOPIC_RECORDING_FINISHED`
-* Produces: `transcripts.final` (`SessionTranscript`)
+* Produces: `transcripts.final` (`SessionTranscript`) via `KAFKA_TOPIC_TRANSCRIPTS_FINAL`
 * `TRANSCRIPTS_DIR` (local JSON artifacts dir)
+* `DATABASE_URL` (required if you want final transcript persistence enabled)
+
+Notes:
+* DB schema expects `tenant_id` to be a UUID. For resilience in dev/test, the finalizer falls back to the zero UUID when tenant_id is missing/invalid.
 
 ### Postgres
 
@@ -344,5 +357,7 @@ Key test data:
 
 * Persist session lifecycle (created at start, updated on end) into Postgres.
 * Keep Postgres as source-of-truth, optionally index transcripts into OpenSearch later for search.
+
+(Implemented) `finalizer_worker` now persists the finalized transcript into Postgres on session finalization.
 * Build DB-backed session APIs in BFF (list sessions, session detail, transcript detail).
 * Add diarization/speaker model later (speakers table already anticipated).

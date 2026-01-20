@@ -218,7 +218,20 @@ def run_whisperx(
 
     _init_whisperx(lang_hint=lang)
 
-    audio = whisperx.load_audio(wav_path)
+    # whisperx.load_audio() shells out to ffmpeg; on some Windows setups ffmpeg
+    # is not available on PATH. For our pipeline, inputs are already WAV, so we
+    # can fall back to soundfile without losing functionality.
+    try:
+        audio = whisperx.load_audio(wav_path)
+    except FileNotFoundError:
+        import soundfile as sf
+
+        logger.warning(
+            "ffmpeg not found while loading %s; falling back to soundfile WAV loader",
+            wav_path,
+        )
+        audio, _sr = sf.read(wav_path, dtype="float32")
+
     logger.info(
         "WhisperX: transcribing %s (lang=%s, use_alignment=%s)",
         wav_path, lang or "auto", use_alignment
