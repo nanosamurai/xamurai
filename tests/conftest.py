@@ -1,6 +1,7 @@
 # tests/conftest.py
 import os
 import time
+import socket
 
 import pytest
 from testcontainers.core.container import DockerContainer
@@ -93,17 +94,22 @@ def _ensure_topics(bootstrap: str, topics: list[str], num_partitions: int = 1) -
 
 @pytest.fixture(scope="session")
 def kafka_bootstrap():
-    """
-    Start Apache Kafka (KRaft) using apache/kafka:latest via a generic container.
+    """Start Apache Kafka (KRaft) using apache/kafka:latest via a generic container.
 
-    Reuses a minimal single-broker KRaft config similar to what you'd have in docker-compose.
+    Important on dev machines: port 9092 is often already occupied by a local Kafka.
+    We pick a free host port *up front* and configure Kafka to advertise that same
+    port, otherwise Kafka clients may be redirected to localhost:9092 (metadata)
+    which can accidentally target a locally running Kafka.
     """
 
-    # Adjust env vars to match your docker-compose.yml!
+    # Pick a free host port for the PLAINTEXT listener and use it consistently.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        host_port = s.getsockname()[1]
+
     container = (
         DockerContainer(KAFKA_IMAGE)
-        .with_bind_ports(9092, 9092)
-        .with_bind_ports(9093, 9093)
+        .with_bind_ports(9092, host_port)
         .with_env("KAFKA_NODE_ID", "1")
         .with_env("KAFKA_PROCESS_ROLES", "broker,controller")
         .with_env(
@@ -112,14 +118,14 @@ def kafka_bootstrap():
         )
         .with_env(
             "KAFKA_ADVERTISED_LISTENERS",
-            # from the host we'll connect via localhost + mapped port
-            "PLAINTEXT://localhost:9092",
+            f"PLAINTEXT://localhost:{host_port}",
         )
         .with_env("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER")
         .with_env(
             "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
             "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
         )
+        # Controller communication is internal to the container
         .with_env("KAFKA_CONTROLLER_QUORUM_VOTERS", "1@localhost:9093")
         .with_env("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1")
         .with_env("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
@@ -128,8 +134,8 @@ def kafka_bootstrap():
     )
 
     with container as kafka:
-        # Optionally wait for a log line that indicates Kafka is ready.
-        # You may need to tweak the pattern after seeing actual logs.
+        bootstrap = f"localhost:{host_port}"
+
         try:
             wait_for_logs(
                 kafka,
@@ -137,8 +143,7 @@ def kafka_bootstrap():
                 timeout=120,
                 interval=2,
             )
-        except Exception as e:
-            # Dump logs for debugging if something goes wrong
+        except Exception:
             stdout, stderr = kafka.get_logs()
             print("=== Kafka STDOUT ===")
             print(stdout.decode("utf-8", errors="ignore"))
@@ -146,7 +151,6 @@ def kafka_bootstrap():
             print(stderr.decode("utf-8", errors="ignore"))
             raise
 
-        bootstrap = "localhost:9092"
         print(f"[tests] Kafka bootstrap: {bootstrap}")
 
         _ensure_topics(bootstrap, TOPICS)
@@ -164,12 +168,17 @@ def kafka_bootstrap_existing():
 
 @pytest.fixture(scope="session")
 def postgres_container():
-    """Start a PostgreSQL container with the drsynth database and run migrations."""
+    """Start a PostgreSQL container with the drsynth database and run migrations.
+
+    Similar to Kafka, dev machines often have Postgres already running on 5432.
+    Bind container port 5432 to a random free host port and expose it via
+    DATABASE_URL/SQLALCHEMY_DATABASE_URL.
+    """
 
     logger.info("Starting PostgreSQL container...")
     container = (
         DockerContainer("postgres:18.1-alpine")
-        .with_bind_ports(5432, 5432)
+        .with_bind_ports(5432, 0)
         .with_env("POSTGRES_USER", "drsynth")
         .with_env("POSTGRES_PASSWORD", "drsynth")
         .with_env("POSTGRES_DB", "drsynth")
@@ -196,11 +205,13 @@ def postgres_container():
             logger.error(stderr.decode("utf-8", errors="ignore"))
             raise
 
+        mapped_port = postgres.get_exposed_port(5432)
+
         # Set environment variables for database connections
         # Use SQLALCHEMY_DATABASE_URL for Alembic/SQLAlchemy
         # Use DATABASE_URL for psycopg/psycopg_pool
-        SQLALCHEMY_DATABASE_URL = "postgresql+psycopg://drsynth:drsynth@localhost:5432/drsynth"
-        DATABASE_URL = "postgresql://drsynth:drsynth@localhost:5432/drsynth"
+        SQLALCHEMY_DATABASE_URL = f"postgresql+psycopg://drsynth:drsynth@localhost:{mapped_port}/drsynth"
+        DATABASE_URL = f"postgresql://drsynth:drsynth@localhost:{mapped_port}/drsynth"
         os.environ["SQLALCHEMY_DATABASE_URL"] = SQLALCHEMY_DATABASE_URL
 
         # Run alembic migrations using Alembic API
@@ -223,15 +234,18 @@ def postgres_container():
             logger.error(traceback.format_exc())
             raise
 
-        # Create a test tenant for integration tests
+        # Create a test tenant for integration tests (idempotent)
         logger.info("Creating test tenant...")
         from drsynth_common.db import exec1
         try:
             exec1(
-                "INSERT INTO tenants (id, name) VALUES (%s, %s)",
+                """
+                INSERT INTO tenants (id, name) VALUES (%s, %s)
+                ON CONFLICT (id) DO NOTHING
+                """,
                 ("00000000-0000-0000-0000-000000000000", "Test Tenant")
             )
-            logger.info("Test tenant created successfully")
+            logger.info("Test tenant ensured")
         except Exception as e:
             logger.error(f"Failed to create test tenant: {e}")
             import traceback
@@ -248,7 +262,7 @@ def postgres_container():
 def db_engine(postgres_container):
     """Create a SQLAlchemy engine connected to the PostgreSQL container."""
     engine = create_engine(
-        "postgresql+psycopg://drsynth:drsynth@localhost:5432/drsynth",
+        os.environ["SQLALCHEMY_DATABASE_URL"],
         pool_pre_ping=True,
         pool_recycle=3600,
     )

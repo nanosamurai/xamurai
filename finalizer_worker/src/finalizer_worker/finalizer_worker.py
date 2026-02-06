@@ -2,14 +2,14 @@
 import json
 import logging
 import os
+import uuid
 from typing import Optional, List, Tuple
 
 from confluent_kafka import Consumer, Producer, KafkaException
 
 import stream_pb2
-from whisperx_worker.whisperx_worker import run_whisperx
 from drsynth_common.db import fetch_one, exec1
-import uuid
+from whisperx_worker.whisperx_worker import run_whisperx
 
 
 # --------------------------------------------------------------------------- #
@@ -133,7 +133,28 @@ def get_session_row(session_key: str):
         (session_key,),
     )
 
-def persist_final(session_key: str, rf: stream_pb2.RecordingFinished, full_text: str, segments_json: list[dict]):
+
+def _normalize_tenant_id(value: str | None) -> str:
+    """Return a UUID string suitable for DB inserts.
+
+    Our DB schema expects UUIDs, but Kafka messages sometimes contain arbitrary
+    strings (e.g. "default", "tenant-1") in tests/dev. We fall back to the
+    zero UUID to keep the pipeline resilient.
+    """
+    if not value:
+        return "00000000-0000-0000-0000-000000000000"
+    try:
+        return str(uuid.UUID(str(value)))
+    except Exception:
+        return "00000000-0000-0000-0000-000000000000"
+
+
+def persist_final(
+    session_key: str,
+    rf: stream_pb2.RecordingFinished,
+    full_text: str,
+    segments_json: list[dict],
+):
     row = get_session_row(session_key)
     if not row:
         # create stub session if needed (keeps pipeline resilient)
@@ -144,7 +165,7 @@ def persist_final(session_key: str, rf: stream_pb2.RecordingFinished, full_text:
             VALUES (%s, %s, NULL, %s, 'active')
             ON CONFLICT (session_key) DO NOTHING
             """,
-            (sess_id, rf.tenant_id, session_key),
+            (sess_id, _normalize_tenant_id(rf.tenant_id), session_key),
         )
         row = get_session_row(session_key)
 
@@ -254,7 +275,30 @@ def main():
             # 1) Persist JSON next to WAV
             _ = _save_transcript_json(transcript)
 
-            # 2) Publish to Kafka for downstream consumers
+            # 2) Persist to Postgres
+            try:
+                segments_json = [
+                    {
+                        "start_s": float(seg.start_s),
+                        "end_s": float(seg.end_s),
+                        "text": seg.text,
+                        "speaker": seg.speaker,
+                    }
+                    for seg in transcript.segments
+                ]
+                persist_final(
+                    session_key=rf.session_id,
+                    rf=rf,
+                    full_text=full_text,
+                    segments_json=segments_json,
+                )
+                logger.info("Persisted final transcript to DB for session=%s", rf.session_id)
+            except Exception:
+                logger.exception(
+                    "Failed to persist final transcript to DB for session=%s", rf.session_id
+                )
+
+            # 3) Publish to Kafka for downstream consumers
             producer.produce(
                 topic=TOPIC_TRANSCRIPTS_FINAL,
                 key=rf.session_id.encode("utf-8"),

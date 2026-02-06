@@ -17,7 +17,11 @@ SR = 16000
 
 @pytest.mark.timeout(900)  # allow for WhisperX model load
 @pytest.mark.integration
-def test_finalizer_worker_writes_json_and_emits_event(tmp_path: Path, kafka_bootstrap: str):
+def test_finalizer_worker_writes_json_emits_event_and_persists_to_db(
+    tmp_path: Path,
+    kafka_bootstrap: str,
+    postgres_container,
+):
     """
     Integration test for finalizer_worker with real WhisperX:
 
@@ -58,8 +62,8 @@ def test_finalizer_worker_writes_json_and_emits_event(tmp_path: Path, kafka_boot
 
     os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap
     os.environ["KAFKA_TOPIC_RECORDING_FINISHED"] = topic_recording_finished
-    # Must match finalizer_worker.TOPIC_FULL_TRANSCRIPTS
-    os.environ["KAFKA_TOPIC_FULL_TRANSCRIPTS"] = topic_session_transcripts
+    # Must match finalizer_worker.TOPIC_TRANSCRIPTS_FINAL
+    os.environ["KAFKA_TOPIC_TRANSCRIPTS_FINAL"] = topic_session_transcripts
     os.environ["TRANSCRIPTS_DIR"] = str(tmp_path)
 
     # -------------------- 2) Use real test_cs.wav ---------------------------- #
@@ -99,13 +103,14 @@ def test_finalizer_worker_writes_json_and_emits_event(tmp_path: Path, kafka_boot
 
     # -------------------- 5) Produce RecordingFinished event ----------------- #
     # Duration/sample_rate here are metadata; WhisperX will load the WAV by path.
+    # Use the same tenant UUID created in tests/conftest.py
     event = stream_pb2.RecordingFinished(
         session_id=session_id,
         recording_url=recording_url,
         duration_s=20.0,          # match your test_cs.wav length if you like
         sample_rate=SR,           # nominal; WhisperX will resample as needed
         lang="cs",
-        tenant_id="tenant-1",
+        tenant_id="00000000-0000-0000-0000-000000000000",
         created_at_ns=time.time_ns(),
     )
 
@@ -173,3 +178,31 @@ def test_finalizer_worker_writes_json_and_emits_event(tmp_path: Path, kafka_boot
     assert ft.session_id == session_id
     assert ft.recording_url == recording_url
     assert len(ft.segments) > 0
+
+    # -------------------- 8) Verify persistence in Postgres ----------------- #
+    from drsynth_common.db import fetch_one
+
+    # session stub should exist and be marked finished
+    sess = fetch_one(
+        "SELECT session_key, status FROM sessions WHERE session_key=%s",
+        (session_id,),
+    )
+    assert sess is not None
+    assert sess[0] == session_id
+    assert sess[1] == "finished"
+
+    # transcript should exist
+    tr = fetch_one(
+        """
+        SELECT st.full_text, st.segments, r.recording_url
+        FROM session_transcripts st
+        JOIN sessions s ON s.id = st.session_id
+        LEFT JOIN recordings r ON r.id = st.recording_id
+        WHERE s.session_key=%s
+        """,
+        (session_id,),
+    )
+    assert tr is not None
+    assert isinstance(tr[0], str)
+    assert tr[0]  # non-empty
+    assert tr[2] == recording_url
