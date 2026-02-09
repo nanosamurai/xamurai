@@ -10,7 +10,13 @@ import numpy as np
 import pytest
 from confluent_kafka import Producer, Consumer
 
-import stream_pb2  # adjust import if your proto package is named differently
+from conftest import _ensure_topics
+
+import importlib.util
+
+from proto_gen import stream_pb2
+
+_HAS_WHISPERX = importlib.util.find_spec("whisperx") is not None
 
 SR = 16000  # must match whisperx_worker.SR
 
@@ -39,6 +45,7 @@ def _make_consumer(bootstrap: str, group_id: str) -> Consumer:
 
 @pytest.mark.timeout(900)           # WhisperX model load can be sloooow on first run
 @pytest.mark.integration
+@pytest.mark.skipif(not _HAS_WHISPERX, reason="whisperx not installed in this env")
 def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
     """
     True integration test:
@@ -56,6 +63,9 @@ def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
     # ------------------------------------------------------------------ #
     topic_audio = "audio.raw.test"
     topic_refined = "transcripts.refined.test"
+
+    # Ensure topics exist (Kafka in tests may have auto-create disabled)
+    _ensure_topics(kafka_bootstrap, [topic_audio, topic_refined])
 
     os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap
     os.environ["KAFKA_TOPIC_AUDIO"] = topic_audio

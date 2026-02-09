@@ -4,7 +4,7 @@ Speach-to-text and speaker diarization service that provides both real-time tran
 
 Streaming audio → real-time transcript updates → session recording → session finalization (full-session transcript + optional alignment) → persistence (Postgres) + API (BFF).
 
-This repo is a Python monorepo with multiple packages (BFF + realtime service + workers) and a shared library (`drsynth_common`). The system is Kafka-centric for dataflow between services, while realtime client interaction is done via gRPC (`RealtimeASR` - via BFF) and/or WebSockets (UI -> BFF).
+This repo is a Python monorepo with multiple packages (realtime service + workers) and a shared library (`drsynth_common`). The system is Kafka-centric for dataflow between services, while realtime client interaction is done via gRPC (`RealtimeASR`).
 
 ---
 
@@ -27,8 +27,8 @@ This repo is a Python monorepo with multiple packages (BFF + realtime service + 
 * `transcripts.final`
   Emitted by `finalizer_worker` as the canonical finished transcript event (`SessionTranscript`).
 
-  In addition to Kafka emission, `finalizer_worker` also persists the finalized transcript
-  into Postgres (`sessions`, `recordings`, `session_transcripts`).
+  Persisted to Postgres by **samuraipersistor** (separate service) into
+  `sessions`, `recordings`, and `session_transcripts`.
 
 ### Processing pipeline
 
@@ -45,21 +45,17 @@ This repo is a Python monorepo with multiple packages (BFF + realtime service + 
 
 4. **recorder_worker** consumes `audio.raw`, writes the full session WAV, and after idle timeout emits `RecordingFinished` to `recordings.finished`.
 
-5. **finalizer_worker** consumes `recordings.finished`, runs full-session WhisperX (+ optional alignment) on the finalized WAV, stores a JSON transcript artifact, emits a `SessionTranscript` to `transcripts.final`, **and persists the result to Postgres**.
+5. **finalizer_worker** consumes `recordings.finished`, runs full-session WhisperX (+ optional alignment) on the finalized WAV, stores a JSON transcript artifact, and emits a `SessionTranscript` to `transcripts.final`.
 
    Persistence details:
-   * Ensures a `sessions` row exists for the session key (creates a stub if missing)
-   * Inserts a `recordings` row (recording_url, duration, sample rate, lang)
-   * Upserts `session_transcripts` (full_text + segments JSON)
-   * Marks the session `status='finished'` and sets `ended_at`
+   * Postgres persistence is handled by the separate **samuraipersistor** service.
 
 
 ---
 
 ## Repo structure
 
-* `bff/`
-  FastAPI BFF (HTTP API for UI and session/transcript queries; also contains UI code atm.).
+* (moved) BFF/API lives in the **samuraibff** repo.
 
 * `rtservice/`
   Realtime (5 sec chunks) ingestion service (gRPC `RealtimeASR` ) - uses fast whisper and separate diarization.
@@ -76,8 +72,7 @@ This repo is a Python monorepo with multiple packages (BFF + realtime service + 
 * `shared/`
   Shared package: `drsynth_common` (IDs, DB helpers, Kafka helpers, config, shared utilities).
 
-* `migrations/`
-  Alembic environment + raw SQL migrations (`versions/` contains revisions; SQL lives alongside or under `sql/` depending on our layout choice).
+* (moved) DB migrations live in the **samuraipersistor** repo.
 
 * `tests/`
   Integration tests (Kafka via testcontainers) + test data.
@@ -113,6 +108,29 @@ We generally use one of these approaches:
 ## Local development
 
 ### Conda envs (current)
+
+Each subsystem has its own conda env. **To run the full test suite**, run the relevant tests
+in the matching env (don’t expect a single env to run everything).
+
+Test commands (Windows):
+
+* Recorder/Kafka integration (lightweight):
+  * `conda run -n drsynth-bff python -m pytest -q tests/test_recorder_worker_integration.py`
+
+* rtservice gRPC integration (heavy; requires `HF_TOKEN`):
+  * `conda run -n drsynth-rtservice python -m pytest -q tests/test_realtime_asr_grpc.py`
+
+* WhisperX worker tests (GPU/heavy):
+  * `conda run -n drsynth-whisperx python -m pytest -q tests/test_whisperx_worker_unit.py tests/test_whisperx_worker_integration.py`
+
+* Finalizer worker integration (GPU/heavy):
+  * Prefer running it in `drsynth-whisperx` (known-good Torch/WhisperX stack):
+    * `conda run -n drsynth-whisperx python -m pytest -q tests/test_finalizer_worker_integration.py`
+
+Notes:
+* Kafka integration tests use **Testcontainers Kafka** by default. To run against a real Kafka,
+  set `KAFKA_BOOTSTRAP=localhost:9092`.
+* `HF_TOKEN` must be visible in the conda env for `drsynth-rtservice` tests.
 
 * `drsynth`
 
@@ -284,24 +302,9 @@ Run:
 
 ---
 
-## DB migrations (raw SQL with Alembic)
+## DB migrations
 
-We use Alembic for version tracking and ordering, but write schema changes as raw SQL (`*.up.sql` / `*.down.sql`). No ORM models are required.
-
-### Required packages
-
-* `pip install alembic sqlalchemy psycopg`
-
-### Running migrations
-
-PowerShell:
-
-* `$env:DATABASE_URL = "postgresql+psycopg://drsynth:drsynth@localhost:5432/drsynth"`
-* `alembic upgrade head`
-
-### Notes on idempotency
-
-Migrations are intended to run once in order. We generally avoid `IF NOT EXISTS` unless there is a specific operational reason; Alembic guarantees each revision applies only once.
+DB migrations are managed in the **samuraipersistor** repo (Migratus + raw SQL).
 
 ---
 

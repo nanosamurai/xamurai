@@ -7,8 +7,7 @@ from typing import Optional, List, Tuple
 
 from confluent_kafka import Consumer, Producer, KafkaException
 
-import stream_pb2
-from drsynth_common.db import fetch_one, exec1
+from proto_gen import stream_pb2
 from whisperx_worker.whisperx_worker import run_whisperx
 
 
@@ -127,81 +126,6 @@ def _save_transcript_json(transcript: stream_pb2.SessionTranscript) -> Optional[
     logger.info("Saved JSON transcript to %s", json_path)
     return json_path
 
-def get_session_row(session_key: str):
-    return fetch_one(
-        "SELECT id, tenant_id, user_id FROM sessions WHERE session_key=%s",
-        (session_key,),
-    )
-
-
-def _normalize_tenant_id(value: str | None) -> str:
-    """Return a UUID string suitable for DB inserts.
-
-    Our DB schema expects UUIDs, but Kafka messages sometimes contain arbitrary
-    strings (e.g. "default", "tenant-1") in tests/dev. We fall back to the
-    zero UUID to keep the pipeline resilient.
-    """
-    if not value:
-        return "00000000-0000-0000-0000-000000000000"
-    try:
-        return str(uuid.UUID(str(value)))
-    except Exception:
-        return "00000000-0000-0000-0000-000000000000"
-
-
-def persist_final(
-    session_key: str,
-    rf: stream_pb2.RecordingFinished,
-    full_text: str,
-    segments_json: list[dict],
-):
-    row = get_session_row(session_key)
-    if not row:
-        # create stub session if needed (keeps pipeline resilient)
-        sess_id = uuid.uuid4()
-        exec1(
-            """
-            INSERT INTO sessions (id, tenant_id, user_id, session_key, status)
-            VALUES (%s, %s, NULL, %s, 'active')
-            ON CONFLICT (session_key) DO NOTHING
-            """,
-            (sess_id, _normalize_tenant_id(rf.tenant_id), session_key),
-        )
-        row = get_session_row(session_key)
-
-    session_id, tenant_id, user_id = row
-
-    recording_id = uuid.uuid4()
-    exec1(
-        """
-        INSERT INTO recordings (id, session_id, recording_url, duration_s, sample_rate, lang)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        """,
-        (recording_id, session_id, rf.recording_url, rf.duration_s, rf.sample_rate, rf.lang),
-    )
-
-    transcript_id = uuid.uuid4()
-    exec1(
-        """
-        INSERT INTO session_transcripts
-            (id, session_id, recording_id, tenant_id, user_id, full_text, lang, duration_s, segments)
-        VALUES
-            (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-        ON CONFLICT (session_id) DO UPDATE SET
-            recording_id = EXCLUDED.recording_id,
-            full_text = EXCLUDED.full_text,
-            lang = EXCLUDED.lang,
-            duration_s = EXCLUDED.duration_s,
-            segments = EXCLUDED.segments,
-            created_at = now()
-        """,
-        (transcript_id, session_id, recording_id, tenant_id, user_id, full_text, rf.lang, rf.duration_s, json.dumps(segments_json)),
-    )
-
-    exec1(
-        "UPDATE sessions SET status='finished', ended_at=now() WHERE id=%s",
-        (session_id,),
-    )
 
 # --------------------------------------------------------------------------- #
 # Main loop
@@ -275,30 +199,7 @@ def main():
             # 1) Persist JSON next to WAV
             _ = _save_transcript_json(transcript)
 
-            # 2) Persist to Postgres
-            try:
-                segments_json = [
-                    {
-                        "start_s": float(seg.start_s),
-                        "end_s": float(seg.end_s),
-                        "text": seg.text,
-                        "speaker": seg.speaker,
-                    }
-                    for seg in transcript.segments
-                ]
-                persist_final(
-                    session_key=rf.session_id,
-                    rf=rf,
-                    full_text=full_text,
-                    segments_json=segments_json,
-                )
-                logger.info("Persisted final transcript to DB for session=%s", rf.session_id)
-            except Exception:
-                logger.exception(
-                    "Failed to persist final transcript to DB for session=%s", rf.session_id
-                )
-
-            # 3) Publish to Kafka for downstream consumers
+            # 2) Publish to Kafka for downstream consumers (persistence handled by samuraipersistor)
             producer.produce(
                 topic=TOPIC_TRANSCRIPTS_FINAL,
                 key=rf.session_id.encode("utf-8"),

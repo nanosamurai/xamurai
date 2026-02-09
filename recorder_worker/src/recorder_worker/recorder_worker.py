@@ -9,7 +9,7 @@ from typing import Dict, Optional, Protocol
 import numpy as np
 from confluent_kafka import Consumer, Producer, KafkaException
 
-import stream_pb2
+from proto_gen import stream_pb2
 
 
 # --------------------------------------------------------------------------- #

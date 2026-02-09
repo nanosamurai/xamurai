@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
+"""Utility script to print RefinedEvent messages.
+
+This is not a pytest test module.
+"""
+
+__test__ = False
+
 import os
 import sys
 from confluent_kafka import Consumer, KafkaException
 
-import stream_pb2  # generated from proto/stream.proto
+from proto_gen import stream_pb2  # generated from proto/stream.proto
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 TOPIC_REFINED = os.getenv("KAFKA_TOPIC_REFINED", "transcripts.refined")

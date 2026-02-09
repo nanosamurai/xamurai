@@ -8,7 +8,9 @@ from typing import List
 
 import numpy as np
 import pytest
-from confluent_kafka import Producer
+from confluent_kafka import Producer, Consumer
+
+from conftest import _ensure_topics
 
 from proto_gen import stream_pb2  # or from proto import stream_pb2 if that's your layout
 
@@ -28,7 +30,7 @@ def _make_producer(bootstrap: str) -> Producer:
 
 @pytest.mark.timeout(300)
 @pytest.mark.integration
-def test_recorder_worker_records_wav(kafka_bootstrap: str):
+def test_recorder_worker_records_wav_and_emits_finished(kafka_bootstrap: str):
     """
     End-to-end-ish test for recorder_worker:
 
@@ -41,9 +43,11 @@ def test_recorder_worker_records_wav(kafka_bootstrap: str):
 
     # --------------------- 1) Configure env & paths --------------------- #
     topic_audio = "audio.raw.test"
+    topic_finished = "recordings.finished.test"
 
     os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap
     os.environ["KAFKA_TOPIC_AUDIO"] = topic_audio
+    os.environ["KAFKA_TOPIC_RECORDING_FINISHED"] = topic_finished
 
     # Force local backend (your worker already logs "backend=local")
     os.environ["RECORDER_STORAGE_BACKEND"] = "fs"
@@ -62,7 +66,10 @@ def test_recorder_worker_records_wav(kafka_bootstrap: str):
         except OSError:
             pass
 
-    # --------------------- 2) Import & start worker ---------------------- #
+    # --------------------- 2) Ensure topics exist ------------------------- #
+    _ensure_topics(kafka_bootstrap, [topic_audio, topic_finished])
+
+    # --------------------- 3) Import & start worker ---------------------- #
     import importlib
     from recorder_worker import recorder_worker  # type: ignore
 
@@ -99,7 +106,7 @@ def test_recorder_worker_records_wav(kafka_bootstrap: str):
     )
     producer.flush(10_000)
 
-    # --------------------- 4) Wait for recorder & assert ----------------- #
+    # --------------------- 4) Wait for recorder & assert WAV -------------- #
     deadline = time.time() + 20.0
 
     wav_files: List[Path] = []
@@ -113,3 +120,39 @@ def test_recorder_worker_records_wav(kafka_bootstrap: str):
 
     out_path = wav_files[0]
     assert out_path.stat().st_size > 0, "Recorded WAV file is empty"
+
+    # --------------------- 5) Assert RecordingFinished event -------------- #
+    consumer = Consumer(
+        {
+            "bootstrap.servers": kafka_bootstrap,
+            "group.id": "test-recorder-finished-consumer",
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": True,
+        }
+    )
+    consumer.subscribe([topic_finished])
+
+    finished: stream_pb2.RecordingFinished | None = None
+    deadline2 = time.time() + 30.0
+
+    try:
+        while time.time() < deadline2:
+            msg = consumer.poll(2.0)
+            if msg is None:
+                continue
+            if msg.error():
+                continue
+            ev = stream_pb2.RecordingFinished()
+            ev.ParseFromString(msg.value())
+            if ev.session_id != session_id:
+                continue
+            finished = ev
+            break
+    finally:
+        consumer.close()
+
+    assert finished is not None, "Did not receive RecordingFinished for this session"
+    assert finished.session_id == session_id
+    assert finished.recording_url.startswith("file://")
+    assert finished.sample_rate == SR
+    assert finished.duration_s > 0.0

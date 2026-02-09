@@ -5,22 +5,49 @@ import time
 from pathlib import Path
 from typing import List
 
-import numpy as np
-import pytest
-from confluent_kafka.admin import AdminClient, NewTopic
+import importlib.util
 
-import stream_pb2
-from conftest import _make_producer, _make_consumer  # adjust if needed
+import pytest
+from confluent_kafka import Consumer, Producer
+
+from conftest import _ensure_topics
+
+from proto_gen import stream_pb2
 
 SR = 16000
+
+_HAS_WHISPERX = importlib.util.find_spec("whisperx") is not None
+
+
+def _make_producer(bootstrap: str) -> Producer:
+    return Producer(
+        {
+            "bootstrap.servers": bootstrap,
+            "client.id": "test-finalizer-producer",
+            "compression.type": "zstd",
+            "linger.ms": 5,
+            "batch.size": 128_000,
+        }
+    )
+
+
+def _make_consumer(bootstrap: str, group_id: str) -> Consumer:
+    return Consumer(
+        {
+            "bootstrap.servers": bootstrap,
+            "group.id": group_id,
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": True,
+        }
+    )
 
 
 @pytest.mark.timeout(900)  # allow for WhisperX model load
 @pytest.mark.integration
-def test_finalizer_worker_writes_json_emits_event_and_persists_to_db(
+@pytest.mark.skipif(not _HAS_WHISPERX, reason="whisperx not installed in this env")
+def test_finalizer_worker_writes_json_and_emits_event(
     tmp_path: Path,
     kafka_bootstrap: str,
-    postgres_container,
 ):
     """
     Integration test for finalizer_worker with real WhisperX:
@@ -30,41 +57,25 @@ def test_finalizer_worker_writes_json_emits_event_and_persists_to_db(
     - Produces one RecordingFinished event pointing to a local WAV file
       (tests/data/test_cs.wav copied into tmp_path).
     - Asserts:
-        - JSON transcript file is written to TRANSCRIPTS_DIR.
-        - A SessionTranscript event appears on transcripts.final.
+        - JSON transcript file is written next to the WAV (file:// case).
+        - A SessionTranscript event appears on Kafka.
+
+    Note: Postgres persistence is handled by `samuraipersistor` and is
+    intentionally NOT tested here.
     """
 
     # -------------------- 1) Topics and env configuration -------------------- #
     topic_recording_finished = "recordings.finished.test"
     topic_session_transcripts = "transcripts.final.test"
 
-    admin = AdminClient({"bootstrap.servers": kafka_bootstrap})
-    existing = admin.list_topics(timeout=10).topics.keys()
-
-    new_topics: List[NewTopic] = []
-    for t in [topic_recording_finished, topic_session_transcripts]:
-        if t not in existing:
-            new_topics.append(
-                NewTopic(
-                    topic=t,
-                    num_partitions=1,
-                    replication_factor=1,
-                )
-            )
-    if new_topics:
-        fs = admin.create_topics(new_topics)
-        for t, f in fs.items():
-            try:
-                f.result()
-            except Exception as e:
-                # topic may already exist due to race; not fatal in tests
-                print(f"[tests] create_topics warning for {t}: {e}")
+    _ensure_topics(kafka_bootstrap, [topic_recording_finished, topic_session_transcripts])
 
     os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap
     os.environ["KAFKA_TOPIC_RECORDING_FINISHED"] = topic_recording_finished
     # Must match finalizer_worker.TOPIC_TRANSCRIPTS_FINAL
     os.environ["KAFKA_TOPIC_TRANSCRIPTS_FINAL"] = topic_session_transcripts
-    os.environ["TRANSCRIPTS_DIR"] = str(tmp_path)
+    # finalizer saves JSON next to the WAV; we copy the WAV under tmp_path so artifacts
+    # stay within tmp_path.
 
     # -------------------- 2) Use real test_cs.wav ---------------------------- #
     session_id = "finalizer-integration-1"
@@ -178,31 +189,3 @@ def test_finalizer_worker_writes_json_emits_event_and_persists_to_db(
     assert ft.session_id == session_id
     assert ft.recording_url == recording_url
     assert len(ft.segments) > 0
-
-    # -------------------- 8) Verify persistence in Postgres ----------------- #
-    from drsynth_common.db import fetch_one
-
-    # session stub should exist and be marked finished
-    sess = fetch_one(
-        "SELECT session_key, status FROM sessions WHERE session_key=%s",
-        (session_id,),
-    )
-    assert sess is not None
-    assert sess[0] == session_id
-    assert sess[1] == "finished"
-
-    # transcript should exist
-    tr = fetch_one(
-        """
-        SELECT st.full_text, st.segments, r.recording_url
-        FROM session_transcripts st
-        JOIN sessions s ON s.id = st.session_id
-        LEFT JOIN recordings r ON r.id = st.recording_id
-        WHERE s.session_key=%s
-        """,
-        (session_id,),
-    )
-    assert tr is not None
-    assert isinstance(tr[0], str)
-    assert tr[0]  # non-empty
-    assert tr[2] == recording_url

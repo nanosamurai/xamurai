@@ -5,6 +5,15 @@ from typing import Any, Dict, List
 import numpy as np
 import pytest
 
+# Unit tests can run without whisperx installed.
+import importlib.util
+
+if importlib.util.find_spec("whisperx") is None:
+    pytest.skip(
+        "whisperx not installed in this env; skipping whisperx worker unit tests",
+        allow_module_level=True,
+    )
+
 from whisperx_worker import whisperx_worker
 
 

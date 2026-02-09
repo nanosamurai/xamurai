@@ -12,8 +12,9 @@ from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline, Model
 from pyannote.audio import Inference as EmbeddingInference
 
-from bff.settings import settings
-import stream_pb2
+# NOTE: the Python BFF package has been removed from this repo.
+# rtservice should not depend on bff settings; keep SR fixed at 16k for now.
+from proto_gen import stream_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +73,8 @@ class RealtimeEngine:
     """
 
     def __init__(self) -> None:
-        if settings.sample_rate != SR:
-            raise RuntimeError(f"Engine assumes {SR} Hz, got {settings.sample_rate}")
+        # Previously this validated SR against bff.settings; with BFF removed,
+        # we keep the engine SR fixed.
 
         self.sr = SR
         self.default_lang = DEFAULT_LANG
