@@ -9,7 +9,8 @@ import importlib.util
 
 import pytest
 from confluent_kafka import Consumer, Producer
-from confluent_kafka.admin import AdminClient, NewTopic
+
+from conftest import _ensure_topics
 
 from proto_gen import stream_pb2
 
@@ -67,27 +68,7 @@ def test_finalizer_worker_writes_json_and_emits_event(
     topic_recording_finished = "recordings.finished.test"
     topic_session_transcripts = "transcripts.final.test"
 
-    admin = AdminClient({"bootstrap.servers": kafka_bootstrap})
-    existing = admin.list_topics(timeout=10).topics.keys()
-
-    new_topics: List[NewTopic] = []
-    for t in [topic_recording_finished, topic_session_transcripts]:
-        if t not in existing:
-            new_topics.append(
-                NewTopic(
-                    topic=t,
-                    num_partitions=1,
-                    replication_factor=1,
-                )
-            )
-    if new_topics:
-        fs = admin.create_topics(new_topics)
-        for t, f in fs.items():
-            try:
-                f.result()
-            except Exception as e:
-                # topic may already exist due to race; not fatal in tests
-                print(f"[tests] create_topics warning for {t}: {e}")
+    _ensure_topics(kafka_bootstrap, [topic_recording_finished, topic_session_transcripts])
 
     os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap
     os.environ["KAFKA_TOPIC_RECORDING_FINISHED"] = topic_recording_finished

@@ -9,7 +9,8 @@ from typing import List
 import numpy as np
 import pytest
 from confluent_kafka import Producer, Consumer
-from confluent_kafka.admin import AdminClient, NewTopic
+
+from conftest import _ensure_topics
 
 import importlib.util
 
@@ -64,19 +65,7 @@ def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
     topic_refined = "transcripts.refined.test"
 
     # Ensure topics exist (Kafka in tests may have auto-create disabled)
-    admin = AdminClient({"bootstrap.servers": kafka_bootstrap})
-    existing = admin.list_topics(timeout=10).topics.keys()
-    new_topics = []
-    for t in [topic_audio, topic_refined]:
-        if t not in existing:
-            new_topics.append(NewTopic(t, num_partitions=1, replication_factor=1))
-    if new_topics:
-        fs = admin.create_topics(new_topics)
-        for t, f in fs.items():
-            try:
-                f.result(10)
-            except Exception:
-                pass
+    _ensure_topics(kafka_bootstrap, [topic_audio, topic_refined])
 
     os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap
     os.environ["KAFKA_TOPIC_AUDIO"] = topic_audio

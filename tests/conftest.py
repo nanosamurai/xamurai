@@ -31,6 +31,36 @@ def _normalize_bootstrap(value: str) -> str:
     return re.sub(r"^[A-Z]+://", "", value)
 
 
+def _ensure_topics(kafka_bootstrap: str, topics: list[str]) -> None:
+    """Ensure Kafka topics exist.
+
+    Test brokers may have auto-create disabled, so tests must create topics explicitly.
+    This helper is intentionally lightweight and best-effort.
+    """
+
+    from confluent_kafka.admin import AdminClient, NewTopic
+
+    admin = AdminClient({"bootstrap.servers": kafka_bootstrap})
+    existing = admin.list_topics(timeout=10).topics.keys()
+
+    new_topics = [
+        NewTopic(t, num_partitions=1, replication_factor=1)
+        for t in topics
+        if t not in existing
+    ]
+
+    if not new_topics:
+        return
+
+    fs = admin.create_topics(new_topics)
+    for _t, f in fs.items():
+        try:
+            f.result(10)
+        except Exception:
+            # Topic may already exist due to races; not fatal.
+            pass
+
+
 @pytest.fixture(scope="session")
 def kafka_bootstrap() -> str:
     """Kafka bootstrap address for integration tests.
