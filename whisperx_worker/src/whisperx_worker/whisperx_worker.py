@@ -8,7 +8,7 @@ import numpy as np
 import soundfile as sf
 from confluent_kafka import Consumer, Producer, KafkaException
 
-import stream_pb2
+from proto_gen import stream_pb2
 
 import torch
 import whisperx

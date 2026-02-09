@@ -1,18 +1,32 @@
 import logging
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Iterable, List
+
+import importlib.util
 
 import grpc
 import numpy as np
 import pytest
 import soundfile as sf
 
-import stream_pb2
-import stream_pb2_grpc
+from proto_gen import stream_pb2
+from proto_gen import stream_pb2_grpc
 
 from rtservice.server import create_realtime_asr_server
+
+# This module requires heavy deps (torch/pyannote/faster-whisper) and HF_TOKEN.
+_HAS_TORCH = importlib.util.find_spec("torch") is not None
+_HAS_PYANNOTE = importlib.util.find_spec("pyannote") is not None
+_HAS_FASTER_WHISPER = importlib.util.find_spec("faster_whisper") is not None
+_HAS_HF_TOKEN = bool(os.getenv("HF_TOKEN"))
+
+pytestmark = pytest.mark.skipif(
+    not (_HAS_TORCH and _HAS_PYANNOTE and _HAS_FASTER_WHISPER and _HAS_HF_TOKEN),
+    reason="rtservice integration test requires torch + pyannote + faster-whisper + HF_TOKEN",
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(

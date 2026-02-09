@@ -7,7 +7,7 @@ from typing import Optional, List, Tuple
 
 from confluent_kafka import Consumer, Producer, KafkaException
 
-import stream_pb2
+from proto_gen import stream_pb2
 from whisperx_worker.whisperx_worker import run_whisperx
 
 

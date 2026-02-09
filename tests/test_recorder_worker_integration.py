@@ -9,6 +9,7 @@ from typing import List
 import numpy as np
 import pytest
 from confluent_kafka import Producer
+from confluent_kafka.admin import AdminClient, NewTopic
 
 from proto_gen import stream_pb2  # or from proto import stream_pb2 if that's your layout
 
@@ -62,7 +63,20 @@ def test_recorder_worker_records_wav(kafka_bootstrap: str):
         except OSError:
             pass
 
-    # --------------------- 2) Import & start worker ---------------------- #
+    # --------------------- 2) Ensure topic exists ------------------------- #
+    admin = AdminClient({"bootstrap.servers": kafka_bootstrap})
+    existing = admin.list_topics(timeout=10).topics.keys()
+    if topic_audio not in existing:
+        fs = admin.create_topics(
+            [NewTopic(topic_audio, num_partitions=1, replication_factor=1)]
+        )
+        # Best-effort wait
+        try:
+            fs[topic_audio].result(10)
+        except Exception:
+            pass
+
+    # --------------------- 3) Import & start worker ---------------------- #
     import importlib
     from recorder_worker import recorder_worker  # type: ignore
 
