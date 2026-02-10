@@ -1,10 +1,12 @@
 # drsynth
 
-Speach-to-text and speaker diarization service that provides both real-time transcription as well as near-real-time refinement.
+Speach-to-text and speaker diarization service that provides both real-time transcription as well as near-real-time refinement. It also persists the recording session and performs a final transcript when the session finishes.
 
-This repo contains services that respond via gRPC and/or consume/produce on dedicated Kafka topics. Persistence is handled by a separate service (**samuraipersistor**), which consumes from all relevant Kafka topics (`audio.raw`, `transcripts.refined`, `transcripts.final`, `recordings.finished`) and stores the data in Postgres.
+Streaming audio → real-time transcript updates → session recording → session finalization (full-session transcript + optional alignment).
 
-The architecture is designed to support multiple layers of "refinement" workers (such as `whisperx_worker`) that might refine different windows of the audio (e.g., 60secs, 300secs) using different models (WhisperX, Voxstral, etc.)).
+This repo contains services that respond via gRPC and/or consume/produce on dedicated Kafka topics. Database persistence is handled by a separate service (**samuraipersistor**), which consumes from all relevant Kafka topics (`transcripts.refined`, `transcripts.final`) and stores the data in Postgres.
+
+The architecture is planned to support multiple layers of "refinement" workers (such as `whisperx_worker`) that might refine different windows of the audio (e.g., 60secs, 300secs) using different models (WhisperX, Voxstral, etc.)).
 
 This repo is a Python monorepo with multiple packages (realtime service + workers) and a shared library (`drsynth_common`). The system is Kafka-centric for dataflow between services, while realtime client interaction is done via gRPC (`RealtimeASR`).
 
@@ -32,7 +34,7 @@ This repo is a Python monorepo with multiple packages (realtime service + worker
   Persisted to Postgres by **samuraipersistor** (separate service) into
   `sessions`, `recordings`, and `session_transcripts`.
 
-  Note: **samuraipersistor** consumes from both `transcripts.refined` and `transcripts.final` topics to provide comprehensive persistence.
+  Note: **samuraipersistor** consumes from both `transcripts.refined` and `transcripts.final` topics to provide DB persistence.
 
 ### Processing pipeline
 
@@ -230,15 +232,7 @@ Depends on implementation, but typically:
 * Produces: `transcripts.final` (`SessionTranscript`) via `KAFKA_TOPIC_TRANSCRIPTS_FINAL`
 * `TRANSCRIPTS_DIR` (local JSON artifacts dir)
 
-Note: This service does not handle persistence directly. Persistence is handled by the separate **samuraipersistor** service which consumes from Kafka topics.
 
-### Postgres (for samuraipersistor service)
-
-* `DATABASE_URL`
-  Example:
-  * `postgresql+psycopg://drsynth:drsynth@localhost:5432/drsynth`
-
----
 
 ## Dependencies
 
@@ -267,7 +261,7 @@ Note: This service does not handle persistence directly. Persistence is handled 
 
 ---
 
-## Postgres (local via Docker Compose)
+## Postgres (local via Docker Compose) - !!! has been moved to the **samuraipersistor** repo !!!
 
 Example `docker-compose.postgres.yml`:
 
