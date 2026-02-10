@@ -2,7 +2,11 @@
 
 Speach-to-text and speaker diarization service that provides both real-time transcription as well as near-real-time refinement. It also persists the recording session and performs a final transcript when the session finishes.
 
-Streaming audio → real-time transcript updates → session recording → session finalization (full-session transcript + optional alignment) → persistence (Postgres) + API (BFF).
+Streaming audio → real-time transcript updates → session recording → session finalization (full-session transcript + optional alignment).
+
+This repo contains services that respond via gRPC and/or consume/produce on dedicated Kafka topics. Database persistence is handled by a separate service (**samuraipersistor**), which consumes from all relevant Kafka topics (`transcripts.refined`, `transcripts.final`) and stores the data in Postgres.
+
+The architecture is planned to support multiple layers of "refinement" workers (such as `whisperx_worker`) that might refine different windows of the audio (e.g., 60secs, 300secs) using different models (WhisperX, Voxstral, etc.)).
 
 This repo is a Python monorepo with multiple packages (realtime service + workers) and a shared library (`drsynth_common`). The system is Kafka-centric for dataflow between services, while realtime client interaction is done via gRPC (`RealtimeASR`).
 
@@ -30,6 +34,8 @@ This repo is a Python monorepo with multiple packages (realtime service + worker
   Persisted to Postgres by **samuraipersistor** (separate service) into
   `sessions`, `recordings`, and `session_transcripts`.
 
+  Note: **samuraipersistor** consumes from both `transcripts.refined` and `transcripts.final` topics to provide DB persistence.
+
 ### Processing pipeline
 
 1. **BFF** serves UI/API needs (sessions list/detail, transcript retrieval, future auth/tenant/user logic).
@@ -46,10 +52,6 @@ This repo is a Python monorepo with multiple packages (realtime service + worker
 4. **recorder_worker** consumes `audio.raw`, writes the full session WAV, and after idle timeout emits `RecordingFinished` to `recordings.finished`.
 
 5. **finalizer_worker** consumes `recordings.finished`, runs full-session WhisperX (+ optional alignment) on the finalized WAV, stores a JSON transcript artifact, and emits a `SessionTranscript` to `transcripts.final`.
-
-   Persistence details:
-   * Postgres persistence is handled by the separate **samuraipersistor** service.
-
 
 ---
 
@@ -102,7 +104,6 @@ We generally use one of these approaches:
 
 * `python -m grpc_tools.protoc -I ../proto --python_out=. --grpc_python_out=. ../proto/stream.proto`
 
-
 ---
 
 ## Local development
@@ -110,7 +111,7 @@ We generally use one of these approaches:
 ### Conda envs (current)
 
 Each subsystem has its own conda env. **To run the full test suite**, run the relevant tests
-in the matching env (don’t expect a single env to run everything).
+in the matching env (don't expect a single env to run everything).
 
 Test commands (Windows):
 
@@ -164,7 +165,7 @@ Notes:
   * Kafka + WAV writing + optional S3
   * used for running `recorder_worker`
 
-Consolidation suggestion: `drsynth-whisperx` and `drsynth-finalizer` can usually be merged into one “GPU/heavy” env because both import Torch/WhisperX.
+Consolidation suggestion: `drsynth-whisperx` and `drsynth-finalizer` can usually be merged into one "GPU/heavy" env because both import Torch/WhisperX.
 
 ### Editable installs (recommended)
 
@@ -177,7 +178,7 @@ From repo root, installing packages editable avoids most `PYTHONPATH` issues:
 * `pip install -e recorder_worker`
 * `pip install -e finalizer_worker`
 
-### Windows + `PYTHONPATH` (if we don’t use editable installs)
+### Windows + `PYTHONPATH` (if we don't use editable installs)
 
 PowerShell example:
 
@@ -230,19 +231,8 @@ Depends on implementation, but typically:
 * Consumes: `KAFKA_TOPIC_RECORDING_FINISHED`
 * Produces: `transcripts.final` (`SessionTranscript`) via `KAFKA_TOPIC_TRANSCRIPTS_FINAL`
 * `TRANSCRIPTS_DIR` (local JSON artifacts dir)
-* `DATABASE_URL` (required if you want final transcript persistence enabled)
 
-Notes:
-* DB schema expects `tenant_id` to be a UUID. For resilience in dev/test, the finalizer falls back to the zero UUID when tenant_id is missing/invalid.
 
-### Postgres
-
-* `DATABASE_URL`
-  Example:
-
-  * `postgresql+psycopg://drsynth:drsynth@localhost:5432/drsynth`
-
----
 
 ## Dependencies
 
@@ -271,7 +261,7 @@ Notes:
 
 ---
 
-## Postgres (local via Docker Compose)
+## Postgres (local via Docker Compose) - !!! has been moved to the **samuraipersistor** repo !!!
 
 Example `docker-compose.postgres.yml`:
 
@@ -350,7 +340,7 @@ Key test data:
 ## Known gotchas
 
 * Topic creation timing: we should not rely on Kafka auto-create in tests; topics should be created in fixtures.
-* Windows + Torch DLL issues: Torch import can fail if envs diverge. `drsynth-whisperx` is the “known-good” heavy env.
+* Windows + Torch DLL issues: Torch import can fail if envs diverge. `drsynth-whisperx` is the "known-good" heavy env.
 * `PYTHONPATH` vs editable installs: editable installs (`pip install -e`) are the cleanest way to avoid module import issues (including protobuf modules).
 * Cline has issues with running tests - it has to use correct conda env: for instance for running bff-related tests it has to run: `conda activate drsynth-bff && "C:\Users\miros\miniconda3\envs\drsynth-bff\python.exe" -m pytest tests/test_bff_session_persistence.py -v`
 
@@ -358,9 +348,5 @@ Key test data:
 
 ## Suggested next steps
 
-* Persist session lifecycle (created at start, updated on end) into Postgres.
-* Keep Postgres as source-of-truth, optionally index transcripts into OpenSearch later for search.
-
-(Implemented) `finalizer_worker` now persists the finalized transcript into Postgres on session finalization.
 * Build DB-backed session APIs in BFF (list sessions, session detail, transcript detail).
 * Add diarization/speaker model later (speakers table already anticipated).
