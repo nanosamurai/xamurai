@@ -29,10 +29,10 @@ RUN python -m venv /opt/venv \
 # Install deps. Torch wheels are CUDA-enabled when available.
 # NOTE: if CUDA wheels for py3.13 are unavailable, this layer will fail.
 # 1) Install torch from the PyTorch CUDA index
+# Keep torch pinned to reduce resolver conflicts across services.
 RUN pip install \
-      "torch==2.9.0+cu128" \
-      "torchaudio==2.9.0+cu128" \
-      "torchvision==0.24.0+cu128" \
+      "torch==2.8.0+cu128" \
+      "torchaudio==2.8.0+cu128" \
       --index-url https://download.pytorch.org/whl/cu128
 
 # 2) Install the rest from PyPI

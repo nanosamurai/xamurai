@@ -26,10 +26,10 @@ RUN python -m venv /opt/venv \
 
 # finalizer imports run_whisperx from whisperx_worker, so we install whisperx deps too.
 # 1) Torch from the PyTorch CUDA index
+# WhisperX pins torch~=2.8.0, so we align with that.
 RUN pip install \
-      "torch==2.9.0+cu128" \
-      "torchaudio==2.9.0+cu128" \
-      "torchvision==0.24.0+cu128" \
+      "torch==2.8.0+cu128" \
+      "torchaudio==2.8.0+cu128" \
       --index-url https://download.pytorch.org/whl/cu128
 
 # 2) Rest from PyPI

@@ -150,6 +150,8 @@ docker build -t drsynth-recorder-worker:dev -f recorder_worker/Dockerfile .
 docker build -t drsynth-finalizer-worker:dev -f finalizer_worker/Dockerfile .
 ```
 
+Note: WhisperX pins `torch~=2.8.0`, so the Dockerfiles align Torch/Torchaudio to `2.8.0+cu128` to avoid resolver downgrades/conflicts.
+
 ### Run locally with docker compose
 
 Prereqs:
