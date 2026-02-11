@@ -1,0 +1,72 @@
+[0.03 - 5.26] SPEAKER_01: Grüezi Frau Kunz, was führt Sie zu uns?
+[5.28 - 10.71] SPEAKER_00: Grüezi Herr Baran, ich habe Bauchschmerzen.
+[10.77 - 13.77] SPEAKER_01: Und seit haben Sie die Bauchschmerzen Frau Kunz?
+[13.81 - 16.80] SPEAKER_01: Und wo denn genau?
+[16.88 - 23.45] SPEAKER_00: Ungefähr schon seit zwei Wochen und es wird immer schlimmer und es ist mir ein bisschen schlecht.
+[23.47 - 25.31] SPEAKER_00: Ich musste auch zweimal erbrechen.
+[26.88 - 30.78] SPEAKER_00: Und die Schmerzen sind überall im Bauch.
+[30.82 - 32.79] SPEAKER_00: Ganz, ganz, ganz schlimm.
+[32.85 - 36.95] SPEAKER_01: Okay.
+[36.97 - 38.87] SPEAKER_01: Und der Stuhlgang ist normal.
+[38.93 - 44.70] SPEAKER_01: Haben Sie jeden Tag Stuhlgang oder haben Sie Durchfall oder Verstopfung, Frau Kunz?
+[44.72 - 47.65] SPEAKER_01: Und wenn Sie erbrechen, wie sieht das aus?
+[48.21 - 49.11] SPEAKER_00: Mit dem Stuhl.
+[49.80 - 52.48] SPEAKER_00: Ja, ist auch nicht so gut.
+[52.54 - 55.64] SPEAKER_00: In der letzten Zeit bin der Herr verstopft.
+[55.66 - 62.31] SPEAKER_00: Aber ich habe so einen Pulver und mit dem geht das gut.
+[62.33 - 68.50] SPEAKER_00: Und das, was ich erbrochen habe, war normal gelb.
+[68.54 - 71.86] SPEAKER_00: Wie normal, wenn man erbricht.
+[71.88 - 74.18] SPEAKER_01: Okay, und wie heisst der Pulver, Frau Kunz?
+[74.20 - 76.97] SPEAKER_00: Es heisst, denke ich, etwas mit M...
+[78.45 - 80.83] SPEAKER_00: Ja, das ist genau das.
+[80.85 - 84.88] SPEAKER_00: Ja, schmeckt ganz grusig.
+[84.89 - 91.88] SPEAKER_01: Und haben Sie auch Fieber gehabt oder so Schüttelfrost in der Nacht und haben Sie abgenommen in der letzten Zeit?
+[91.90 - 93.38] SPEAKER_00: Ja, schön wäre es.
+[93.40 - 99.73] SPEAKER_00: Ich habe eher zugenommen und esse sehr viel sonst.
+[99.79 - 103.49] SPEAKER_00: Und Fieber habe ich keins gehabt.
+[103.51 - 105.69] SPEAKER_01: Okay, Frau Kunz, darf ich den Bauch schnell anschauen?
+[106.73 - 106.95] SPEAKER_00: Ja, sicher.
+[108.45 - 110.26] SPEAKER_00: Ich ziehe mich schnell aus.
+[110.28 - 111.68] SPEAKER_00: Nein, Moment mal.
+[111.70 - 113.16] SPEAKER_01: Ja, ja, locker.
+[113.18 - 113.86] SPEAKER_01: Kein Stress.
+[116.08 - 118.13] SPEAKER_01: Wollen Sie sich mal da hinlegen?
+[118.15 - 120.31] SPEAKER_00: Ja, sicher.
+[120.33 - 122.27] SPEAKER_01: Okay.
+[122.29 - 128.18] SPEAKER_01: Also, ich höre schnell ab.
+[128.20 - 128.26] SPEAKER_01: Ja.
+[128.28 - 131.83] SPEAKER_01: Die Darmgeräusche sind in Ordnung.
+[131.87 - 137.16] SPEAKER_01: Und wenn ich mal da drücke, tut es irgendwo weh, Frau Kunz?
+[137.18 - 137.51] SPEAKER_00: Ja, ein bisschen.
+[139.81 - 143.53] SPEAKER_01: Gut, das sieht gut aus.
+[144.15 - 147.94] SPEAKER_01: Kein Loslassschmerz.
+[147.98 - 150.94] SPEAKER_01: Murphy Sign ist unauffällig.
+[150.96 - 155.27] SPEAKER_01: Keine Klopftolenz über die Nieren.
+[155.31 - 157.93] SPEAKER_01: Ich messe noch schnell die Temperatur.
+[157.95 - 162.38] SPEAKER_01: 37,1, das ist okay.
+[162.42 - 167.47] SPEAKER_01: Frau Kunz, ich denke, wir machen jetzt noch eine Blutentnahme.
+[168.51 - 174.30] SPEAKER_01: Das Bauchlabor und dann besprechen wir noch die Resultate und besprechen wir weiter.
+[174.32 - 177.93] SPEAKER_00: Das klingt ganz gut, ja vielen Dank.
+[177.94 - 183.71] SPEAKER_01: Also ich begleite Sie noch an Empfang.
+[183.73 - 183.97] SPEAKER_01: Okay, gerne.
+[183.99 - 187.38] SPEAKER_01: Also, wir haben die Resultate, Frau Kunz.
+[187.42 - 190.24] SPEAKER_01: Das Bauchlabor ist komplett unauffällig.
+[190.26 - 196.93] SPEAKER_01: Mit der Gallenblase alles in Ordnung, mit Leber ebenfalls, Nierenwerte sind auch gut, Bauchspeicheldrüse auch in Ordnung.
+[198.18 - 201.40] SPEAKER_01: Aber wir haben festgestellt, dass Sie schwanger sind.
+[201.72 - 202.94] SPEAKER_00: Oh, ich schwanger?
+[202.96 - 205.27] SPEAKER_00: Ah, das ist ja toll, mit 70.
+[205.31 - 209.15] SPEAKER_01: Ja, das ist schon eine Seltenheit, muss man sagen.
+[209.17 - 211.37] SPEAKER_01: Und wissen Sie, wer der Glückliche ist?
+[211.39 - 213.30] SPEAKER_00: Ja, das ist der Fritz.
+[213.32 - 217.24] SPEAKER_01: Der muss sich sicher freuen, dass er jetzt Papi wird.
+[217.26 - 221.79] SPEAKER_00: Ja, leider ist er verstorben vor zwei Wochen.
+[221.81 - 224.79] SPEAKER_01: Oje, das tut mir leid, Frau Kunz.
+[224.81 - 227.27] SPEAKER_01: Also, wissen Sie was, am besten machen wir das so.
+[228.13 - 238.83] SPEAKER_01: Ich werde sie in das Spital Wetzikon überweisen, auf die Gynäkologie, dass man sie richtig untersucht und dass alles gut kommt.
+[238.85 - 240.19] SPEAKER_01: Sie sollten ein Angebot bekommen.
+[240.37 - 242.95] SPEAKER_01: Ich schreibe nun einen Bericht.
+[242.97 - 245.82] SPEAKER_00: Das ist sehr lieb, Herr Doktor.
+[245.84 - 249.00] SPEAKER_00: Dann sehen wir uns vielleicht nach der Geburt.
+[249.02 - 251.59] SPEAKER_01: Ja, sehr gerne, Frau Kunz.
+[251.60 - 252.57] SPEAKER_01: Alles Gute.
+[252.59 - 253.97] SPEAKER_00: Alles Gute, Herr Doktor.
