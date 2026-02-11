@@ -1,0 +1,85 @@
+infra:
+  kafkaBootstrapServers: "host.minikube.internal:39092"
+  postgresJdbcUrl: "jdbc:postgresql://host.minikube.internal:5432/drsynth"
+  postgresUser: "drsynth"
+  postgresPassword: "drsynth"
+
+images:
+  pullPolicy: IfNotPresent
+
+  samuraibff:
+    repository: "samuraibff"
+    tag: "local"
+
+  samuraipersistor:
+    repository: "samuraipersistor"
+    tag: "local"
+
+  rtservice:
+    repository: "drsynth-rtservice"
+    tag: "dev"
+
+  whisperxWorker:
+    repository: "drsynth-whisperx-worker"
+    tag: "dev"
+
+  recorderWorker:
+    repository: "drsynth-recorder-worker"
+    tag: "dev"
+
+  finalizerWorker:
+    repository: "drsynth-finalizer-worker"
+    tag: "dev"
+
+bff:
+  replicas: 1
+  service:
+    type: NodePort
+    port: 8000
+    nodePort: 30080
+
+  originUri: "http://localhost:8000"
+
+  auth:
+    required: false
+    issuer: "http://keycloak.localtest.me:8081/realms/drsynth"
+
+persistor:
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8010
+
+rtservice:
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 50052
+
+  # HF token is required for pyannote downloads.
+  hfToken: ""
+
+  gpu:
+    enabled: false
+    count: 1
+
+whisperxWorker:
+  replicas: 1
+  gpu:
+    enabled: true
+    count: 1
+
+recorderWorker:
+  replicas: 1
+
+finalizerWorker:
+  replicas: 1
+  gpu:
+    enabled: true
+    count: 1
+
+recordings:
+  # In Kubernetes, recorder + finalizer must share the same storage.
+  # For local minikube we use a simple hostPath. For real clusters, switch to a PVC.
+  hostPath: "/data/drsynth-recordings"
+  mountPath: "/data/recordings"

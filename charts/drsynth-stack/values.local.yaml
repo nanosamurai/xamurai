@@ -1,0 +1,19 @@
+# Local overrides intended for minikube.
+#
+# Notes:
+# - If you use Docker Desktop for infra (compose), keep these pointing to host.minikube.internal.
+# - If you run infra inside minikube instead, change these to service DNS names.
+
+infra:
+  kafkaBootstrapServers: "host.minikube.internal:39092"
+  postgresJdbcUrl: "jdbc:postgresql://host.minikube.internal:5432/drsynth"
+
+rtservice:
+  # Required: set this before installing the chart.
+  hfToken: "${HF_TOKEN}"
+
+  gpu:
+    enabled: true
+
+recordings:
+  hostPath: "/data/drsynth-recordings"

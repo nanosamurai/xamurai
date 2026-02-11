@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "drsynth-stack.fullname" . }}-rtservice
+  labels:
+    {{- include "drsynth-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rtservice
+spec:
+  replicas: {{ .Values.rtservice.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: rtservice
+  template:
+    metadata:
+      labels:
+        {{- include "drsynth-stack.labels" . | nindent 8 }}
+        app.kubernetes.io/component: rtservice
+    spec:
+      containers:
+        - name: rtservice
+          image: "{{ .Values.images.rtservice.repository }}:{{ .Values.images.rtservice.tag }}"
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: 50052
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: {{ .Values.infra.kafkaBootstrapServers | quote }}
+            - name: KAFKA_TOPIC_AUDIO
+              value: "audio.raw"
+            - name: RT_GRPC_PORT
+              value: "50052"
+            - name: ENROLL_DIR
+              value: "/app/enrolled_speakers"
+            - name: FW_LANG_DEFAULT
+              value: ""
+
+            {{- if .Values.rtservice.hfToken }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "drsynth-stack.fullname" . }}-secrets
+                  key: HF_TOKEN
+            {{- end }}
+
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          {{- if and .Values.rtservice.gpu.enabled (gt (int .Values.rtservice.gpu.count) 0) }}
+          resources:
+            limits:
+              nvidia.com/gpu: {{ .Values.rtservice.gpu.count }}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "drsynth-stack.fullname" . }}-rtservice
+  labels:
+    {{- include "drsynth-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rtservice
+spec:
+  type: {{ .Values.rtservice.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: rtservice
+  ports:
+    - name: grpc
+      port: {{ .Values.rtservice.service.port }}
+      targetPort: grpc
