@@ -152,27 +152,77 @@ docker build -t drsynth-finalizer-worker:dev -f finalizer_worker/Dockerfile .
 
 Note: WhisperX pins `torch~=2.8.0`, so the Dockerfiles align Torch/Torchaudio to `2.8.0+cu128` to avoid resolver downgrades/conflicts.
 
-### Run locally with docker compose
+### Run locally with docker compose (full stack)
 
 Prereqs:
 - Docker installed
-- `HF_TOKEN` exported in your environment (needed by `rtservice` / pyannote)
+- `HF_TOKEN` exported in your environment (needed by **rtservice** / pyannote)
+- Repos checked out side-by-side (defaults can be overridden in `.env`):
+  - `C:/Users/miros/PycharmProjects/drsynth`
+  - `C:/Users/miros/IdeaProjects/samuraibff`
+  - `C:/Users/miros/IdeaProjects/samuraipersistor`
 
 ```bash
 # Linux/macOS
-export HF_TOKEN=... 
+export HF_TOKEN=...
 
 # Windows PowerShell
 # $env:HF_TOKEN = "..."
 
+# from repo root
+copy .env.example .env
+# edit .env and set HF_TOKEN
+
 docker compose up --build
 ```
 
-The compose file starts:
-- Kafka broker
-- Postgres (currently unused by this repo directly; persistence is handled by samuraipersistor)
-- rtservice gRPC server on `localhost:50052`
-- whisperx_worker, recorder_worker, finalizer_worker
+The compose file now starts the **full local system**, including cross-repo services:
+- **Kafka** (`broker`)
+  - host tools: `localhost:9092`
+  - containers: `broker:29092`
+  - minikube pods: `host.minikube.internal:39092`
+- **Postgres** (`postgres`) on `localhost:5432`
+- **Schema init + seed** (one-shot helpers):
+  - `db_migrate` (applies SQL migrations)
+  - `db_seed` (inserts the dev tenant/user needed by unauth local BFF)
+- **drsynth services**:
+  - `rtservice` gRPC on `localhost:50052`
+  - `whisperx_worker`, `recorder_worker`, `finalizer_worker`
+- **App layer**:
+  - `samuraibff` UI/API on `localhost:8000`
+  - `samuraipersistor` on `127.0.0.1:8010`
+
+#### Why the helper services exist (and what they do)
+
+**1) `kafka_init`**
+- **Problem:** relying on Kafka topic auto-creation causes flaky bring-up and inconsistent topic configs.
+- **What it does:** waits for Kafka to respond, then creates required topics idempotently (`--if-not-exists`).
+- **Why it matters long-term:** the same “explicit init” concept maps cleanly to k8s Jobs/Helm hooks later.
+
+**2) `db_migrate`**
+- **Problem:** the BFF and persistor assume the DB schema exists; without migrations the stack boots but fails at runtime.
+- **What it does:** applies vendored SQL migrations (from `samuraipersistor`) using `psql`.
+  - It is **idempotent**: if the schema already exists it exits 0.
+- **Why we use `psql` instead of Migratus here:** Migratus can batch multi-statement SQL files and fail with
+  `Too many update results were returned` in containerized runs.
+
+**3) `db_seed`**
+- **Problem:** in unauth local mode, the BFF expects a “dev tenant” row to exist; otherwise session creation fails on FK constraints.
+- **What it does:** inserts a known tenant/user (see `docker/postgres/seed.sql`).
+  - It is **idempotent**: if tenant `00000000-0000-0000-0000-000000000000` exists it exits 0.
+
+#### Slow startup notes (especially without GPU)
+The first startup of these services can be slow because they download and initialize ML models:
+- `rtservice` (Faster-Whisper + Pyannote diarization + optional VAD/enrollment)
+- `whisperx_worker` (WhisperX stack)
+- `finalizer_worker` (full-session WhisperX)
+
+On CPU-only machines (or when CUDA isn’t available), initialization and inference can be **unbearably slow**.
+For local “it feels like prod” dev, prefer running them with GPU where possible.
+
+Compose mounts a persistent HuggingFace cache volume (`drsynth_hf_cache`) to avoid re-downloading models on restarts.
+
+Also: until `rtservice` finishes initialization, BFF `/ready` may return `503` with `grpc.up?=false`.
 
 ---
 
