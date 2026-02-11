@@ -25,7 +25,7 @@ GROUP_ID = os.getenv("KAFKA_GROUP_ID_RECORDER", "recorder-worker")
 
 # Where to store recordings locally (if backend=local)
 # In containers/k8s, mount a volume to /data/recordings and set RECORDING_DIR accordingly.
-RECORDING_DIR = os.getenv("RECORDING_DIR", "/data/recordings")
+RECORDING_DIR = os.getenv("RECORDING_DIR", "recordings")
 
 # Storage backend: "local" or "s3"
 RECORDING_STORAGE_BACKEND = os.getenv("RECORDING_STORAGE_BACKEND", "local").lower()

@@ -211,7 +211,7 @@ The compose file starts:
 Storage:
 
 * `RECORDING_STORAGE_BACKEND` (`local` | `s3`, default: `local`)
-* `RECORDING_DIR` (default: `/data/recordings` in containers)
+* `RECORDING_DIR` (default in code: `recordings`; in containers set it to `/data/recordings`)
 
 S3 (used when `RECORDING_STORAGE_BACKEND=s3`):
 
