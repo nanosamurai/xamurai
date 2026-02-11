@@ -10,9 +10,23 @@ from confluent_kafka import Consumer, Producer, KafkaException
 
 from proto_gen import stream_pb2
 
-import torch
-import whisperx
 import time
+
+import torch
+
+# PyTorch 2.6+ defaults to "weights_only=True" for torch.load() in some call paths.
+# WhisperX (via pyannote) loads Lightning checkpoints that contain OmegaConf objects,
+# which must be allowlisted as safe globals.
+try:
+    from omegaconf import DictConfig, ListConfig
+
+    torch.serialization.add_safe_globals([DictConfig, ListConfig])
+except Exception:
+    # Best-effort: if omegaconf isn't present or torch doesn't expose this API,
+    # we still want the worker to try to start.
+    pass
+
+import whisperx
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 TOPIC_AUDIO = os.getenv("KAFKA_TOPIC_AUDIO", "audio.raw")
