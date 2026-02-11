@@ -56,7 +56,9 @@ What this starts:
 
 Open:
 - BFF/UI: http://localhost:8000
-- Persistor health: http://localhost:8010/health
+- Persistor health: http://127.0.0.1:8010/health
+
+> Note: on Windows, `localhost` may resolve to IPv6 first (`::1`), and persistor binds IPv4 (`0.0.0.0`).
 
 ### 1.3 Auth notes (Keycloak)
 
@@ -78,6 +80,14 @@ set SAMURAIBFF_AUTH_ISSUER=https://<your-issuer>/realms/<realm>
 ### 1.4 Common checks
 
 Kafka topics were created by `kafka_init`.
+
+On first run, **rtservice may take several minutes** to download Whisper + Pyannote models.
+During that time, BFF `/ready` may return 503 with `grpc.up?=false`.
+Check:
+
+```bash
+docker compose logs -f rtservice
+```
 
 Check service logs:
 ```bash

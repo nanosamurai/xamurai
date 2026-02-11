@@ -158,6 +158,9 @@ services:
       # Optional
       ENROLL_DIR: /app/enrolled_speakers
       FW_LANG_DEFAULT: ""
+    # Persist HF caches so the *first* startup is slow, subsequent restarts are fast.
+    volumes:
+      - drsynth_hf_cache:/root/.cache/huggingface
     ports:
       - 50052:50052
     depends_on:
@@ -178,6 +181,8 @@ services:
       WHISPERX_SLICE_SECONDS: "60.0"
       WHISPERX_IDLE_SECONDS: "30.0"
       WHISPERX_COMPUTE_TYPE: ""
+    volumes:
+      - drsynth_hf_cache:/root/.cache/huggingface
     depends_on:
       kafka_init:
         condition: service_completed_successfully
@@ -225,6 +230,7 @@ services:
       RECORDINGS_DIR: /data/recordings
     volumes:
       - drsynth_recordings:/data/recordings
+      - drsynth_hf_cache:/root/.cache/huggingface
     depends_on:
       kafka_init:
         condition: service_completed_successfully
@@ -308,6 +314,7 @@ services:
 volumes:
   drsynth_pgdata:
   drsynth_recordings:
+  drsynth_hf_cache:
 
 # Within the Kafka image, for testing create following topics:
 #/ $ cd /opt/kafka/bin/
