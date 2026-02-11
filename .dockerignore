@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.so
+*.egg-info/
+.eggs/
+
+# Venvs
+.venv/
+venv/
+
+# Conda
+.conda/
+
+# PyCharm/IDE
+.idea/
+
+# Git
+.git/
+
+# Local artifacts / recordings
+recordings/
+tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests (not needed in runtime images)
+.pytest_cache/
+
+# Large samples (keep enrolled_speakers/*.wav for rtservice speaker enrollment)
+utilities/*.wav
+utilities/*.mp4
+utilities/*.json
+*.mp4
+*.json

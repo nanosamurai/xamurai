@@ -18,6 +18,7 @@ services:
     ports:
       - 9092:9092
       - 9093:9093
+
   postgres:
     image: postgres:18.1-alpine
     container_name: drsynth-postgres
@@ -35,10 +36,96 @@ services:
       interval: 10s
       timeout: 30s
       retries: 5
+
+  # --------- drsynth services (built from this monorepo) ---------
+
+  rtservice:
+    build:
+      context: .
+      dockerfile: rtservice/Dockerfile
+    container_name: drsynth-rtservice
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP: broker:9092
+      KAFKA_TOPIC_AUDIO: audio.raw
+      RT_GRPC_PORT: 50052
+      # Required: provide via environment or .env file
+      HF_TOKEN: ${HF_TOKEN:?set HF_TOKEN in your environment}
+      # Optional
+      ENROLL_DIR: /app/enrolled_speakers
+      FW_LANG_DEFAULT: ""
+    ports:
+      - 50052:50052
+    depends_on:
+      - broker
+
+  whisperx_worker:
+    build:
+      context: .
+      dockerfile: whisperx_worker/Dockerfile
+    container_name: drsynth-whisperx-worker
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP: broker:9092
+      KAFKA_TOPIC_AUDIO: audio.raw
+      KAFKA_TOPIC_REFINED: transcripts.refined
+      KAFKA_GROUP_ID: whisperx-async
+      WHISPERX_SLICE_SECONDS: "60.0"
+      WHISPERX_IDLE_SECONDS: "30.0"
+      WHISPERX_COMPUTE_TYPE: ""
+    depends_on:
+      - broker
+
+  recorder_worker:
+    build:
+      context: .
+      dockerfile: recorder_worker/Dockerfile
+    container_name: drsynth-recorder-worker
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP: broker:9092
+      KAFKA_TOPIC_AUDIO: audio.raw
+      KAFKA_TOPIC_RECORDING_FINISHED: recordings.finished
+      KAFKA_GROUP_ID_RECORDER: recorder-worker
+      RECORDER_IDLE_SECONDS: "30.0"
+      RECORDING_STORAGE_BACKEND: local
+      RECORDING_DIR: /data/recordings
+      # S3 vars (only used if RECORDING_STORAGE_BACKEND=s3)
+      S3_ENDPOINT: ""
+      S3_BUCKET: ""
+      S3_REGION: ""
+      S3_ACCESS_KEY: ""
+      S3_SECRET_KEY: ""
+      S3_FORCE_PATH_STYLE: "true"
+      S3_PREFIX: ""
+    volumes:
+      - drsynth_recordings:/data/recordings
+    depends_on:
+      - broker
+
+  finalizer_worker:
+    build:
+      context: .
+      dockerfile: finalizer_worker/Dockerfile
+    container_name: drsynth-finalizer-worker
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP: broker:9092
+      KAFKA_TOPIC_RECORDING_FINISHED: recordings.finished
+      KAFKA_TOPIC_TRANSCRIPTS_FINAL: transcripts.final
+      KAFKA_GROUP_ID_FINALIZER: finalizer-worker
+      # Uses file:// URLs so it needs the same volume as recorder_worker
+      RECORDINGS_DIR: /data/recordings
+    volumes:
+      - drsynth_recordings:/data/recordings
+    depends_on:
+      - broker
+
 volumes:
   drsynth_pgdata:
+  drsynth_recordings:
 
-#within the Kafka image, for testing create following topics:
+# Within the Kafka image, for testing create following topics:
 #/ $ cd /opt/kafka/bin/
 #/opt/kafka/bin $ ./kafka-topics.sh --bootstrap-server localhost:9092 --create --topic audio.raw
 #/opt/kafka/bin $ ./kafka-topics.sh --bootstrap-server localhost:9092 --create --topic transcripts.refined

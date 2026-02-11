@@ -24,14 +24,27 @@ TOPIC_RECORDING_FINISHED = os.getenv(
 GROUP_ID = os.getenv("KAFKA_GROUP_ID_RECORDER", "recorder-worker")
 
 # Where to store recordings locally (if backend=local)
+# In containers/k8s, mount a volume to /data/recordings and set RECORDING_DIR accordingly.
 RECORDING_DIR = os.getenv("RECORDING_DIR", "recordings")
 
 # Storage backend: "local" or "s3"
 RECORDING_STORAGE_BACKEND = os.getenv("RECORDING_STORAGE_BACKEND", "local").lower()
 
 # S3 config (if backend=s3)
-RECORDING_S3_BUCKET = os.getenv("RECORDING_S3_BUCKET", "")
-RECORDING_S3_PREFIX = os.getenv("RECORDING_S3_PREFIX", "")  # e.g. "prod/"
+# Standardized env vars (works with AWS S3 and S3-compatible storage like Ceph/MinIO)
+S3_ENDPOINT = os.getenv("S3_ENDPOINT", "").strip()  # optional
+S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
+S3_REGION = os.getenv("S3_REGION", "").strip()  # optional for some providers
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "").strip()
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "").strip()
+S3_FORCE_PATH_STYLE = os.getenv("S3_FORCE_PATH_STYLE", "true").strip().lower() in ("1", "true", "yes", "y")
+
+# Optional prefix (not in the standardized list, but useful for multi-env layouts)
+S3_PREFIX = os.getenv("S3_PREFIX", os.getenv("RECORDING_S3_PREFIX", "")).strip()  # e.g. "prod/"
+
+# Backwards-compat: if someone still uses RECORDING_S3_BUCKET
+if not S3_BUCKET:
+    S3_BUCKET = os.getenv("RECORDING_S3_BUCKET", "").strip()
 
 # Idle timeout (seconds) after which we consider the session finished
 SESSION_IDLE_SEC = float(os.getenv("RECORDER_IDLE_SECONDS", "30.0"))
@@ -146,14 +159,34 @@ class S3FileWriter:
 
     def close_and_get_url(self) -> str:
         import boto3
+        from botocore.config import Config
 
         try:
             self._wave.close()
         except Exception:
             logger.exception("Error closing temp WAV %s", self._tmp_path)
 
-        s3 = boto3.client("s3")
-        logger.info("Uploading recording to s3://%s/%s", self._bucket, self._key)
+        # Credentials:
+        # - If S3_ACCESS_KEY / S3_SECRET_KEY are set, use them.
+        # - Otherwise, fall back to boto3's default credential chain (IRSA / Pod Identity / env / instance role).
+        session_kwargs = {}
+        if S3_REGION:
+            session_kwargs["region_name"] = S3_REGION
+
+        if S3_ACCESS_KEY and S3_SECRET_KEY:
+            session_kwargs["aws_access_key_id"] = S3_ACCESS_KEY
+            session_kwargs["aws_secret_access_key"] = S3_SECRET_KEY
+
+        addressing_style = "path" if S3_FORCE_PATH_STYLE else "virtual"
+        cfg = Config(s3={"addressing_style": addressing_style})
+
+        client_kwargs = {"config": cfg}
+        if S3_ENDPOINT:
+            client_kwargs["endpoint_url"] = S3_ENDPOINT
+
+        s3 = boto3.client("s3", **session_kwargs, **client_kwargs)
+        logger.info("Uploading recording to s3://%s/%s (endpoint=%s, path_style=%s)",
+                    self._bucket, self._key, S3_ENDPOINT or "aws", addressing_style)
         s3.upload_file(self._tmp_path, self._bucket, self._key)
 
         try:
@@ -201,19 +234,22 @@ def make_writer_for_session(session_id: str,
         # Build an S3 key like: <prefix>/<tenant>/<YYYY>/<MM>/<DD>/<session>/audio.wav
         from datetime import datetime, timezone
 
+        if not S3_BUCKET:
+            raise RuntimeError("S3_BUCKET not configured for S3 backend")
+
         now = datetime.now(timezone.utc)
         y = now.year
         m = now.month
         d = now.day
 
         tenant = tenant_id or "default"
-        prefix = RECORDING_S3_PREFIX.strip("/")
+        prefix = S3_PREFIX.strip("/")
         base = f"{prefix}/{tenant}/{y:04d}/{m:02d}/{d:02d}/{session_id}".strip("/")
 
         key = f"{base}/audio.wav"
         logger.info("Using S3 backend for session %s → s3://%s/%s",
-                    session_id, RECORDING_S3_BUCKET, key)
-        return S3FileWriter(RECORDING_S3_BUCKET, key, sample_rate)
+                    session_id, S3_BUCKET, key)
+        return S3FileWriter(S3_BUCKET, key, sample_rate)
 
     # Default: local
     os.makedirs(RECORDING_DIR, exist_ok=True)
@@ -264,9 +300,9 @@ def main():
         "Starting recorder_worker with backend=%s", RECORDING_STORAGE_BACKEND
     )
 
-    if RECORDING_STORAGE_BACKEND == "s3" and not RECORDING_S3_BUCKET:
+    if RECORDING_STORAGE_BACKEND == "s3" and not S3_BUCKET:
         raise RuntimeError(
-            "RECORDING_STORAGE_BACKEND=s3 but RECORDING_S3_BUCKET is not set"
+            "RECORDING_STORAGE_BACKEND=s3 but S3_BUCKET is not set"
         )
 
     consumer = make_consumer()

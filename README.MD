@@ -83,7 +83,7 @@ This repo is a Python monorepo with multiple packages (realtime service + worker
   Local scripts / WIP helpers (run under the `drsynth` env).
 
 * `enrolled_speaklers/`
-  Speakers' voice samples for diarization - currently is used only by rtservice, to be further standardized in DB (per tenant/user) and used by also the other workers..
+  Speakers' voice samples for diarization - currently is used only by rtservice, to be further standardized in DB (per tenant/user) and used by also the other workers.
 
 ---
 
@@ -106,7 +106,7 @@ We generally use one of these approaches:
 
 ---
 
-## Local development
+## Local development (conda)
 
 ### Conda envs (current)
 
@@ -133,62 +133,46 @@ Notes:
   set `KAFKA_BOOTSTRAP=localhost:9092`.
 * `HF_TOKEN` must be visible in the conda env for `drsynth-rtservice` tests.
 
-* `drsynth`
+---
 
-  * shared package work (`drsynth_common`)
-  * protobuf generation
-  * running utilities/WIP scripts in `./utilities`
-  * general tooling
+## Docker (k8s-friendly)
 
-* `drsynth-bff`
+This repo is intended to run on Kubernetes. Each service has its own **Dockerfile** (built with **venv + pip**, independent from the conda setups).
 
-  * FastAPI / Uvicorn
-  * BFF runtime deps
+### Build images
 
-* `drsynth-rtservice`
+From repo root:
 
-  * gRPC server + realtime streaming deps
-  * Kafka client deps
+```bash
+docker build -t drsynth-rtservice:dev -f rtservice/Dockerfile .
+docker build -t drsynth-whisperx-worker:dev -f whisperx_worker/Dockerfile .
+docker build -t drsynth-recorder-worker:dev -f recorder_worker/Dockerfile .
+docker build -t drsynth-finalizer-worker:dev -f finalizer_worker/Dockerfile .
+```
 
-* `drsynth-whisperx`
+Note: WhisperX pins `torch~=2.8.0`, so the Dockerfiles align Torch/Torchaudio to `2.8.0+cu128` to avoid resolver downgrades/conflicts.
 
-  * WhisperX + Torch + heavy GPU/audio stack
-  * used for running `whisperx_worker`
+### Run locally with docker compose
 
-* `drsynth-finalizer`
+Prereqs:
+- Docker installed
+- `HF_TOKEN` exported in your environment (needed by `rtservice` / pyannote)
 
-  * currently identical to `drsynth-whisperx` (candidate to consolidate)
-  * used for running `finalizer_worker`
+```bash
+# Linux/macOS
+export HF_TOKEN=... 
 
-* `drsynth-recorder`
+# Windows PowerShell
+# $env:HF_TOKEN = "..."
 
-  * Kafka + WAV writing + optional S3
-  * used for running `recorder_worker`
+docker compose up --build
+```
 
-Consolidation suggestion: `drsynth-whisperx` and `drsynth-finalizer` can usually be merged into one "GPU/heavy" env because both import Torch/WhisperX.
-
-### Editable installs (recommended)
-
-From repo root, installing packages editable avoids most `PYTHONPATH` issues:
-
-* `pip install -e shared`
-* `pip install -e bff`
-* `pip install -e rtservice`
-* `pip install -e whisperx_worker`
-* `pip install -e recorder_worker`
-* `pip install -e finalizer_worker`
-
-### Windows + `PYTHONPATH` (if we don't use editable installs)
-
-PowerShell example:
-
-* `$env:PYTHONPATH = ".;shared\src;rtservice\src;bff\src"`
-
-If we want `PYTHONPATH` persistent per conda env:
-
-* `conda env config vars set PYTHONPATH=".;shared\src;rtservice\src;bff\src;recorder_worker\src;finalizer_worker\src;whisperx_worker\src"`
-* `conda deactivate`
-* `conda activate <env>`
+The compose file starts:
+- Kafka broker
+- Postgres (currently unused by this repo directly; persistence is handled by samuraipersistor)
+- rtservice gRPC server on `localhost:50052`
+- whisperx_worker, recorder_worker, finalizer_worker
 
 ---
 
@@ -196,130 +180,84 @@ If we want `PYTHONPATH` persistent per conda env:
 
 ### Kafka (shared across services)
 
-* `KAFKA_BOOTSTRAP` (default: `localhost:9092`)
+* `KAFKA_BOOTSTRAP` (default in code: `localhost:9092`; in compose: `broker:9092`)
 * `KAFKA_TOPIC_AUDIO` (default: `audio.raw`)
 
 ### rtservice
 
-Depends on implementation, but typically:
-
-* `KAFKA_BOOTSTRAP`
-* `KAFKA_TOPIC_AUDIO`
-* `KAFKA_TOPIC_REFINED` (if rtservice streams partial transcript updates back to clients)
-* Service bind config (host/port)
+* `RT_GRPC_PORT` (default: `50052`)
+* `HF_TOKEN` (**required**) – used to download pyannote models
+* `FW_LANG_DEFAULT` (optional) – default ISO language code
+* `ENROLL_DIR` (default: `enrolled_speakers`) – directory with speaker enrollment WAVs
 
 ### whisperx_worker
 
+* `KAFKA_BOOTSTRAP`
+* `KAFKA_TOPIC_AUDIO` (default: `audio.raw`)
 * `KAFKA_TOPIC_REFINED` (default: `transcripts.refined`)
+* `KAFKA_GROUP_ID` (default: `whisperx-async`)
 * `WHISPERX_SLICE_SECONDS` (default: `60.0`)
-* `WHISPERX_COMPUTE_TYPE` (optional override)
-* CUDA if available, else CPU
+* `WHISPERX_IDLE_SECONDS` (default: `30.0`)
+* `WHISPERX_COMPUTE_TYPE` (optional)
 
 ### recorder_worker
 
+* `KAFKA_BOOTSTRAP`
+* `KAFKA_TOPIC_AUDIO` (default: `audio.raw`)
 * `KAFKA_TOPIC_RECORDING_FINISHED` (default: `recordings.finished`)
-* `RECORDING_STORAGE_BACKEND` (`local` | `s3`)
-* `RECORDING_DIR` (default: `recordings`)
+* `KAFKA_GROUP_ID_RECORDER` (default: `recorder-worker`)
 * `RECORDER_IDLE_SECONDS` (default: `30.0`)
-* S3 settings (if backend is `s3`):
 
-  * `RECORDING_S3_BUCKET`
-  * `RECORDING_S3_PREFIX`
+Storage:
+
+* `RECORDING_STORAGE_BACKEND` (`local` | `s3`, default: `local`)
+* `RECORDING_DIR` (default in code: `recordings`; in containers set it to `/data/recordings`)
+
+S3 (used when `RECORDING_STORAGE_BACKEND=s3`):
+
+* `S3_ENDPOINT` (optional; empty means AWS S3)
+* `S3_BUCKET` (**required**)
+* `S3_REGION` (optional)
+* `S3_ACCESS_KEY` / `S3_SECRET_KEY` (optional)
+  * If these are **not** set, boto3 falls back to its default credential chain (e.g. IRSA/Pod Identity/instance role)
+* `S3_FORCE_PATH_STYLE` (default: `true`) – helps compatibility with S3-like storage (Ceph/MinIO)
+* `S3_PREFIX` (optional) – key prefix for uploaded recordings
 
 ### finalizer_worker
 
-* Consumes: `KAFKA_TOPIC_RECORDING_FINISHED`
-* Produces: `transcripts.final` (`SessionTranscript`) via `KAFKA_TOPIC_TRANSCRIPTS_FINAL`
-* `TRANSCRIPTS_DIR` (local JSON artifacts dir)
+* `KAFKA_BOOTSTRAP`
+* `KAFKA_TOPIC_RECORDING_FINISHED` (default: `recordings.finished`)
+* `KAFKA_TOPIC_TRANSCRIPTS_FINAL` (default: `transcripts.final`)
+* `KAFKA_GROUP_ID_FINALIZER` (default: `finalizer-worker`)
 
-
-
-## Dependencies
-
-### Core runtime deps (typical)
-
-* `confluent-kafka`
-* `protobuf`
-* `numpy`
-* `fastapi`, `uvicorn` (BFF)
-* gRPC stack for rtservice:
-
-  * `grpcio`, `grpcio-tools`
-  * `protobuf` pinned consistently
-
-### WhisperX stack (heavy)
-
-* `torch`
-* `whisperx`
-* and transitive deps (pyannote, etc.)
-
-### Testing
-
-* `pytest`
-* `testcontainers`
-* `pytest-timeout` (optional; we use the mark)
+Important:
+- finalizer currently supports only `file://` recording URLs
+- therefore it needs access to the **same recordings volume** as `recorder_worker`
 
 ---
 
-## Postgres (local via Docker Compose) - !!! has been moved to the **samuraipersistor** repo !!!
+## Kubernetes notes
 
-Example `docker-compose.postgres.yml`:
+### Volumes
 
-services:
+If you use `RECORDING_STORAGE_BACKEND=local`, both `recorder_worker` and `finalizer_worker` must mount the same PVC at the same path (recommended: `/data/recordings`).
 
-* postgres:
+### GPU scheduling
 
-  * image: `postgres:16`
-  * env:
+`rtservice`, `whisperx_worker`, and `finalizer_worker` are designed to use CUDA if available.
 
-    * `POSTGRES_DB=drsynth`
-    * `POSTGRES_USER=drsynth`
-    * `POSTGRES_PASSWORD=drsynth`
-  * ports:
+In Kubernetes, schedule them on GPU nodes (example):
 
-    * `5432:5432`
-  * volume:
+```yaml
+resources:
+  limits:
+    nvidia.com/gpu: 1
+```
 
-    * `drsynth_pg:/var/lib/postgresql/data`
+### Health checks
 
-volumes:
-
-* `drsynth_pg`
-
-Run:
-
-* `docker compose -f docker-compose.postgres.yml up -d`
-
----
-
-## DB migrations
-
-DB migrations are managed in the **samuraipersistor** repo (Migratus + raw SQL).
-
----
-
-## Running services
-
-### rtservice (gRPC RealtimeASR)
-
-Entrypoint depends on our `rtservice` implementation, common patterns:
-
-* `python -m rtservice.server`
-  or
-* `python rtservice/src/rtservice/server.py`
-
-### BFF
-
-PowerShell:
-
-* `$env:PYTHONPATH=".;shared\src;bff\src"`
-* `uvicorn bff.app:app --host 0.0.0.0 --port 8000`
-
-### Workers
-
-* `python -m whisperx_worker.whisperx_worker`
-* `python -m recorder_worker.recorder_worker`
-* `python -m finalizer_worker.finalizer_worker`
+- `rtservice` is gRPC-only; use a `tcpSocket` probe on port `50052` (or your `RT_GRPC_PORT`).
+- workers are long-running Kafka consumers; liveness is typically based on the process staying up.
 
 ---
 

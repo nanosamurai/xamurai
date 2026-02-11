@@ -151,3 +151,7 @@ Desktop.ini
 
 # Audio recording temp files (from your scripts)
 sample.wav
+
+# Local data / outputs
+recordings/
+tmp/

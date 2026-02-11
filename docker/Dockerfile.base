@@ -1,0 +1,42 @@
+# Shared base image for drsynth services
+# - python:3.13-slim
+# - creates venv at /opt/venv
+# - installs common system deps (ffmpeg, libsndfile)
+#
+# Note: Service-specific Dockerfiles should extend this and install pip deps.
+
+FROM python:3.13-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+# System deps:
+# - ffmpeg: whisperx.load_audio uses ffmpeg (code has fallback but keep it)
+# - libsndfile1: required by soundfile
+# - libgomp1: common OpenMP runtime needed by numpy/scipy/torch
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libsndfile1 \
+        libgomp1 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create venv + base pip tooling
+RUN python -m venv /opt/venv \
+    && pip install --upgrade pip setuptools wheel
+
+# Create non-root user for k8s best practice
+RUN useradd -m -u 10001 appuser
+
+# Default to non-root. Individual Dockerfiles can switch back if needed.
+USER 10001
+
+# Default command is overridden by service images
+CMD ["python", "-c", "print('drsynth base image')"]
