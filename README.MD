@@ -152,7 +152,15 @@ docker build -t drsynth-finalizer-worker:dev -f finalizer_worker/Dockerfile .
 
 Note: WhisperX pins `torch~=2.8.0`, so the Dockerfiles align Torch/Torchaudio to `2.8.0+cu128` to avoid resolver downgrades/conflicts.
 
-### Run locally with docker compose (full stack)
+### Run locally (recommended entrypoints)
+
+For day-to-day development, use the runbooks in `docs/`:
+
+- **Full local stack (all Docker Compose):** `docs/local-stack.md`
+- **Compose infra + Minikube apps:** `docs/minikube-setup.md`
+- **Long-term Kubernetes plan:** `docs/k8s-roadmap.md`
+
+The short version (Mode A / full compose):
 
 Prereqs:
 - Docker installed
@@ -178,8 +186,8 @@ docker compose up --build
 
 The compose file now starts the **full local system**, including cross-repo services:
 - **Kafka** (`broker`)
-  - host tools: `localhost:9092`
   - containers: `broker:29092`
+  - host tools: `localhost:9092`
   - minikube pods: `host.minikube.internal:39092`
 - **Postgres** (`postgres`) on `localhost:5432`
 - **Schema init + seed** (one-shot helpers):
@@ -223,6 +231,8 @@ For local “it feels like prod” dev, prefer running them with GPU where possi
 Compose mounts a persistent HuggingFace cache volume (`drsynth_hf_cache`) to avoid re-downloading models on restarts.
 
 Also: until `rtservice` finishes initialization, BFF `/ready` may return `503` with `grpc.up?=false`.
+
+For more details and troubleshooting tips (Kafka ports, ffmpeg/torio warnings, etc.) see `docs/local-stack.md`.
 
 ---
 
