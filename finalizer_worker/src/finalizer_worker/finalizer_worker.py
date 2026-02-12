@@ -24,6 +24,13 @@ TOPIC_TRANSCRIPTS_FINAL = os.getenv(
 )
 GROUP_ID = os.getenv("KAFKA_GROUP_ID_FINALIZER", "finalizer-worker")
 
+# Finalizer can do *very* long work per message (full session + alignment model downloads),
+# so the default Kafka client max.poll.interval.ms (5 minutes) is too low.
+# If exceeded, the consumer leaves the group mid-processing.
+MAX_POLL_INTERVAL_MS = int(
+    os.getenv("FINALIZER_MAX_POLL_INTERVAL_MS", os.getenv("KAFKA_MAX_POLL_INTERVAL_MS", "1800000"))
+)
+
 
 # --------------------------------------------------------------------------- #
 # Logging
@@ -49,6 +56,9 @@ def make_consumer() -> Consumer:
             "group.id": GROUP_ID,
             "enable.auto.commit": False,
             "auto.offset.reset": "earliest",
+            # Must be higher than worst-case processing time for a single RecordingFinished
+            # message (including first-run model downloads).
+            "max.poll.interval.ms": MAX_POLL_INTERVAL_MS,
             "max.partition.fetch.bytes": 10_000_000,
             "fetch.wait.max.ms": 50,
         }
