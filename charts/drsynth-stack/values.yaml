@@ -42,7 +42,7 @@ bff:
 
   auth:
     required: false
-    issuer: "https://auth.nanosamur.ai/realms/drsynth"
+    issuer: "https://auth.nanosamur.ai/realms/nanosamurai"
 
 persistor:
   replicas: 1

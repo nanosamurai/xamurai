@@ -262,7 +262,7 @@ services:
       SAMURAIBFF_AUTH_REQUIRED: ${SAMURAIBFF_AUTH_REQUIRED:-false}
       # Default to the shared dev Keycloak running in ECS.
       # Override in your environment/.env if needed.
-      SAMURAIBFF_AUTH_ISSUER: ${SAMURAIBFF_AUTH_ISSUER:-https://auth.nanosamur.ai/realms/drsynth}
+      SAMURAIBFF_AUTH_ISSUER: ${SAMURAIBFF_AUTH_ISSUER:-https://auth.nanosamur.ai/realms/nanosamurai}
       SAMURAIBFF_AUTH_AUDIENCE: bff-web
       SAMURAIBFF_AUTH_CLIENT_ID: bff-web
 
