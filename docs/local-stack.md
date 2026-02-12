@@ -81,6 +81,12 @@ set SAMURAIBFF_AUTH_ISSUER=https://<your-issuer>/realms/<realm>
 
 Kafka topics were created by `kafka_init`.
 
+If a worker logs `Failed to resolve 'broker:29092'`, it usually means the Kafka broker container is not running on the compose network. Start it:
+
+```bash
+docker compose up -d broker kafka_init
+```
+
 On first run, **rtservice may take several minutes** to download Whisper + Pyannote models.
 During that time, BFF `/ready` may return 503 with `grpc.up?=false`.
 Check:
