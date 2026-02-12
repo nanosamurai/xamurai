@@ -158,3 +158,9 @@ tmp/
 
 # Local speaker enrollment samples (should not be committed)
 enrolled_speakers/
+
+# Utilities outputs / fixtures (keep only Python scripts tracked)
+utilities/*.wav
+utilities/*.json
+utilities/*.txt
+utilities/*.srt
