@@ -155,3 +155,6 @@ sample.wav
 # Local data / outputs
 recordings/
 tmp/
+
+# Local speaker enrollment samples (should not be committed)
+enrolled_speakers/
