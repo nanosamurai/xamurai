@@ -122,6 +122,7 @@ celeryd.pid
 # Environments
 .env
 .env.*
+!.env.example
 
 # Spyder project settings
 .spyderproject

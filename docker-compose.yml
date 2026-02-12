@@ -260,7 +260,9 @@ services:
       # Auth disabled by default for local stack testing.
       # If you want auth locally, point issuer to your Keycloak dev profile.
       SAMURAIBFF_AUTH_REQUIRED: ${SAMURAIBFF_AUTH_REQUIRED:-false}
-      SAMURAIBFF_AUTH_ISSUER: ${SAMURAIBFF_AUTH_ISSUER:-http://localhost:8081/realms/drsynth}
+      # Default to the shared dev Keycloak running in ECS.
+      # Override in your environment/.env if needed.
+      SAMURAIBFF_AUTH_ISSUER: ${SAMURAIBFF_AUTH_ISSUER:-https://auth.nanosamur.ai/realms/drsynth}
       SAMURAIBFF_AUTH_AUDIENCE: bff-web
       SAMURAIBFF_AUTH_CLIENT_ID: bff-web
 

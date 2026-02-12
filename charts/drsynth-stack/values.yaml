@@ -42,7 +42,7 @@ bff:
 
   auth:
     required: false
-    issuer: "http://keycloak.localtest.me:8081/realms/drsynth"
+    issuer: "https://auth.nanosamur.ai/realms/drsynth"
 
 persistor:
   replicas: 1
