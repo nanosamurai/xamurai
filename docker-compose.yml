@@ -155,12 +155,14 @@ services:
       RT_GRPC_PORT: 50052
       # Required: provide via environment or .env file
       HF_TOKEN: ${HF_TOKEN:?set HF_TOKEN in your environment}
+      # HuggingFace cache location (container runs as non-root user)
+      HF_HOME: /data/hf_cache
       # Optional
       ENROLL_DIR: /app/enrolled_speakers
       FW_LANG_DEFAULT: ""
     # Persist HF caches so the *first* startup is slow, subsequent restarts are fast.
     volumes:
-      - drsynth_hf_cache:/root/.cache/huggingface
+      - drsynth_hf_cache:/data/hf_cache
     ports:
       - 50052:50052
     depends_on:
@@ -178,11 +180,13 @@ services:
       KAFKA_TOPIC_AUDIO: audio.raw
       KAFKA_TOPIC_REFINED: transcripts.refined
       KAFKA_GROUP_ID: whisperx-async
+      # HuggingFace cache location (container runs as non-root user)
+      HF_HOME: /data/hf_cache
       WHISPERX_SLICE_SECONDS: "60.0"
       WHISPERX_IDLE_SECONDS: "30.0"
       WHISPERX_COMPUTE_TYPE: ""
     volumes:
-      - drsynth_hf_cache:/root/.cache/huggingface
+      - drsynth_hf_cache:/data/hf_cache
     depends_on:
       kafka_init:
         condition: service_completed_successfully
@@ -226,11 +230,15 @@ services:
       KAFKA_TOPIC_RECORDING_FINISHED: recordings.finished
       KAFKA_TOPIC_TRANSCRIPTS_FINAL: transcripts.final
       KAFKA_GROUP_ID_FINALIZER: finalizer-worker
+      # HuggingFace cache location (container runs as non-root user)
+      HF_HOME: /data/hf_cache
       # Uses file:// URLs so it needs the same volume as recorder_worker
       RECORDINGS_DIR: /data/recordings
+      # Allow long processing time per message (full session + model downloads)
+      FINALIZER_MAX_POLL_INTERVAL_MS: "3600000"
     volumes:
       - drsynth_recordings:/data/recordings
-      - drsynth_hf_cache:/root/.cache/huggingface
+      - drsynth_hf_cache:/data/hf_cache
     depends_on:
       kafka_init:
         condition: service_completed_successfully
