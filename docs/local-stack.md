@@ -119,6 +119,17 @@ This runs **Kafka + Postgres** in Docker Compose and deploys app services to min
 docker compose up -d broker kafka_init postgres persistor_migrate db_seed
 ```
 
+#### Kafka ports and why we expose two of them
+
+Kafka in this stack is reachable from three “worlds”, each needing a different advertised address:
+
+- **Other Docker containers** (compose network): `broker:29092`
+- **Host machine tools** (Windows/macOS/Linux): `localhost:9092`
+- **Minikube pods**: `host.minikube.internal:39092`
+
+We keep `39092` specifically for minikube because Kafka’s advertised listeners must be different for
+host vs. pod networking. Trying to reuse `localhost:9092` inside pods will fail.
+
 If you also want local Keycloak, run it outside this compose (or re-add it as a compose profile later).
 
 Infra endpoints (as seen from minikube pods):
@@ -226,6 +237,16 @@ Suggested phases:
 ---
 
 ## Troubleshooting
+
+### WhisperX worker prints FFmpeg / libavutil warnings
+You may see warnings like missing `libavutil.so.58` or torio failing to load FFmpeg extensions.
+
+- The **ffmpeg binary is installed** in the container and WhisperX can still operate.
+- These warnings are coming from TorchAudio/TorIO optional FFmpeg extensions looking for different
+  `libavutil.so.*` versions than what the base image ships.
+
+If everything else works, treat these as noisy but non-fatal. If we need to eliminate them long-term,
+we can either pin to a base image with matching FFmpeg runtime libs or disable the torio extension path.
 
 ### Kafka clients in containers fail with `localhost:9092`
 Use `docker-compose.yml` (it fixes advertised listeners) and ensure containers use `broker:29092`.
