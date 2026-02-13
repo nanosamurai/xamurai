@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "drsynth-stack.fullname" . }}-persistor
+  labels:
+    {{- include "drsynth-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: persistor
+spec:
+  replicas: {{ .Values.persistor.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: persistor
+  template:
+    metadata:
+      labels:
+        {{- include "drsynth-stack.labels" . | nindent 8 }}
+        app.kubernetes.io/component: persistor
+    spec:
+      containers:
+        - name: samuraipersistor
+          image: "{{ .Values.images.samuraipersistor.repository }}:{{ .Values.images.samuraipersistor.tag }}"
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8010
+          env:
+            - name: SP_HTTP_HOST
+              value: "0.0.0.0"
+            - name: SP_HTTP_PORT
+              value: "8010"
+
+            - name: SP_DB_JDBC_URL
+              value: {{ .Values.infra.postgresJdbcUrl | quote }}
+            - name: SP_DB_USERNAME
+              value: {{ .Values.infra.postgresUser | quote }}
+            - name: SP_DB_PASSWORD
+              value: {{ .Values.infra.postgresPassword | quote }}
+
+            - name: SP_KAFKA_BOOTSTRAP_SERVERS
+              value: {{ .Values.infra.kafkaBootstrapServers | quote }}
+            - name: SP_KAFKA_TOPIC_REFINED
+              value: "transcripts.refined"
+            - name: SP_KAFKA_TOPIC_FINAL
+              value: "transcripts.final"
+            - name: SP_KAFKA_TOPIC_DLQ
+              value: "transcripts.persistor.dlq"
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "drsynth-stack.fullname" . }}-persistor
+  labels:
+    {{- include "drsynth-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: persistor
+spec:
+  type: {{ .Values.persistor.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: persistor
+  ports:
+    - name: http
+      port: {{ .Values.persistor.service.port }}
+      targetPort: http

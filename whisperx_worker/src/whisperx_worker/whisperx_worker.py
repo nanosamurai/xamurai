@@ -10,9 +10,73 @@ from confluent_kafka import Consumer, Producer, KafkaException
 
 from proto_gen import stream_pb2
 
-import torch
-import whisperx
 import time
+
+import torch
+
+# -------------------- PyTorch checkpoint loading compatibility --------------------
+#
+# Recent PyTorch versions (2.6+) introduced safer defaults for torch.load() that can
+# break loading some third-party checkpoints (including WhisperX -> pyannote VAD).
+#
+# In our dev stack we trust the upstream model checkpoints (HF/pyannote), so we:
+# 1) allowlist OmegaConf classes for weights_only=True code paths
+# 2) also monkeypatch torch.load to default to weights_only=False (more robust)
+#
+# NOTE: weights_only=False can load arbitrary pickled code. Do not use this with
+# untrusted checkpoints.
+
+try:
+    from omegaconf import DictConfig, ListConfig
+    from omegaconf.base import ContainerMetadata
+
+    # Nodes show up in some serialized OmegaConf objects.
+    try:
+        from omegaconf.nodes import (
+            AnyNode,
+            BooleanNode,
+            BytesNode,
+            EnumNode,
+            FloatNode,
+            IntegerNode,
+            PathNode,
+            StringNode,
+        )
+    except Exception:
+        AnyNode = BooleanNode = BytesNode = EnumNode = FloatNode = IntegerNode = PathNode = StringNode = None
+
+    safe = [
+        DictConfig,
+        ListConfig,
+        ContainerMetadata,
+        AnyNode,
+        BooleanNode,
+        BytesNode,
+        EnumNode,
+        FloatNode,
+        IntegerNode,
+        PathNode,
+        StringNode,
+    ]
+    torch.serialization.add_safe_globals([c for c in safe if c is not None])
+except Exception:
+    pass
+
+try:
+    _orig_torch_load = torch.load
+
+    def _torch_load_weights_only_false_default(*args, **kwargs):
+        # Force weights_only=False even if a caller explicitly passes True.
+        # This is required for some Lightning/pyannote checkpoints containing
+        # objects outside the default safe allowlist.
+        kwargs["weights_only"] = False
+        return _orig_torch_load(*args, **kwargs)
+
+    torch.load = _torch_load_weights_only_false_default
+except Exception:
+    pass
+
+import whisperx
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 TOPIC_AUDIO = os.getenv("KAFKA_TOPIC_AUDIO", "audio.raw")

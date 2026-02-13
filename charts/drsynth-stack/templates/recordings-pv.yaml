@@ -1,0 +1,32 @@
+{{- if .Values.recordings.hostPath }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "drsynth-stack.fullname" . }}-recordings-pv
+  labels:
+    {{- include "drsynth-stack.labels" . | nindent 4 }}
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: {{ .Values.recordings.hostPath | quote }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "drsynth-stack.fullname" . }}-recordings-pvc
+  labels:
+    {{- include "drsynth-stack.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  volumeName: {{ include "drsynth-stack.fullname" . }}-recordings-pv
+  storageClassName: ""
+{{- end }}

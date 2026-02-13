@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "drsynth-stack.fullname" . }}-recorder-worker
+  labels:
+    {{- include "drsynth-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: recorder-worker
+spec:
+  replicas: {{ .Values.recorderWorker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: recorder-worker
+  template:
+    metadata:
+      labels:
+        {{- include "drsynth-stack.labels" . | nindent 8 }}
+        app.kubernetes.io/component: recorder-worker
+    spec:
+      containers:
+        - name: recorder-worker
+          image: "{{ .Values.images.recorderWorker.repository }}:{{ .Values.images.recorderWorker.tag }}"
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: {{ .Values.infra.kafkaBootstrapServers | quote }}
+            - name: KAFKA_TOPIC_AUDIO
+              value: "audio.raw"
+            - name: KAFKA_TOPIC_RECORDING_FINISHED
+              value: "recordings.finished"
+            - name: KAFKA_GROUP_ID_RECORDER
+              value: "recorder-worker"
+            - name: RECORDER_IDLE_SECONDS
+              value: "30.0"
+            - name: RECORDING_STORAGE_BACKEND
+              value: "local"
+            - name: RECORDING_DIR
+              value: {{ .Values.recordings.mountPath | quote }}
+
+          volumeMounts:
+            - name: recordings
+              mountPath: {{ .Values.recordings.mountPath | quote }}
+      volumes:
+        - name: recordings
+          persistentVolumeClaim:
+            name: {{ include "drsynth-stack.fullname" . }}-recordings-pvc

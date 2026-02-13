@@ -45,6 +45,7 @@ COPY . /app
 
 RUN useradd -m -u 10001 appuser \
     && mkdir -p /data/recordings \
+    && mkdir -p /data/hf_cache \
     && chown -R 10001:10001 /app /data
 USER 10001
 

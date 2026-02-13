@@ -122,6 +122,7 @@ celeryd.pid
 # Environments
 .env
 .env.*
+!.env.example
 
 # Spyder project settings
 .spyderproject
@@ -155,3 +156,12 @@ sample.wav
 # Local data / outputs
 recordings/
 tmp/
+
+# Local speaker enrollment samples (should not be committed)
+enrolled_speakers/
+
+# Utilities outputs / fixtures (keep only Python scripts tracked)
+utilities/*.wav
+utilities/*.json
+utilities/*.txt
+utilities/*.srt
