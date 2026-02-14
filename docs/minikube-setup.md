@@ -166,6 +166,30 @@ Access BFF (NodePort default):
 
 ---
 
+## 6) Stop / cleanup (important on laptops)
+
+If you used **minikube in WSL2**, stop it when you’re done so it doesn’t keep consuming CPU/RAM:
+
+```bash
+minikube stop
+```
+
+To completely remove the cluster and free disk:
+
+```bash
+minikube delete
+```
+
+Quick status check:
+
+```bash
+minikube status
+```
+
+> Docker Desktop Kubernetes does not have a separate VM you need to stop; it’s part of Docker Desktop.
+
+---
+
 ## 7) Debugging cheatsheet
 
 - Pods:
