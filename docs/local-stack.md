@@ -3,7 +3,7 @@
 This document describes two supported local workflows:
 
 1) **All Docker Compose** (fastest end-to-end)
-2) **Docker Compose infra + Minikube apps** (k8s-realistic; supports GPU scheduling)
+2) **Docker Compose infra + Kubernetes apps** (k8s-realistic; CPU-first locally)
 
 > Repo layout assumption on your machine (defaults used in `.env.example`):
 > - `C:/Users/miros/PycharmProjects/drsynth`
@@ -109,7 +109,7 @@ curl -X POST http://localhost:8000/api/sessions
 
 ## 2) Mode B — Docker Compose infra + Minikube apps
 
-This runs **Kafka + Postgres** in Docker Compose and deploys app services to minikube using the Helm chart in `charts/drsynth-stack`.
+This runs **Kafka + Postgres** in Docker Compose and deploys app services to local Kubernetes using the Helm chart in `charts/nanosamurai-stack`.
 
 > Keycloak is expected to be reachable externally (your ECS dev profile is fine). Compose does not start it by default.
 
@@ -179,16 +179,16 @@ Then run `docker build ...` and images will already be present in minikube.
 
 ### 2.3 Create the recordings host path in minikube
 
-The chart uses a simple hostPath PV by default (`/data/drsynth-recordings`). Create it:
+The chart uses a simple hostPath PV by default (`/data/nanosamurai-recordings`). Create it:
 
 ```bash
-minikube ssh -- "sudo mkdir -p /data/drsynth-recordings && sudo chmod -R 777 /data/drsynth-recordings"
+minikube ssh -- "sudo mkdir -p /data/nanosamurai-recordings && sudo chmod -R 777 /data/nanosamurai-recordings"
 ```
 
 ### 2.4 Install the chart
 
 ```bash
-helm upgrade --install drsynth ./charts/drsynth-stack -f ./charts/drsynth-stack/values.local.yaml \
+helm upgrade --install nanosamurai ./charts/nanosamurai-stack -f ./charts/nanosamurai-stack/values.local.minikube.yaml \
   --set rtservice.hfToken="$HF_TOKEN"
 ```
 

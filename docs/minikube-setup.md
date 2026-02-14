@@ -1,9 +1,17 @@
- Local Minikube setup (drsynth stack)
+Local Kubernetes setup (nanosamurai)
 
 This doc focuses on running **app services in Kubernetes** while keeping **infra in Docker Compose**.
 
-- Infra (Docker Compose): **Kafka + Postgres** (optionally Keycloak)
-- Apps (Minikube): `samuraibff`, `samuraipersistor`, `rtservice`, `whisperx_worker`, `recorder_worker`, `finalizer_worker`
+It supports two local Kubernetes variants:
+- **Docker Desktop Kubernetes (recommended)**
+- **Minikube (WSL2/Linux)**
+
+Infra (Docker Compose): **Kafka + Postgres** (optionally Keycloak)
+Apps (Kubernetes): `samuraibff`, `samuraipersistor`, `rtservice`, `whisperx_worker`, `recorder_worker`, `finalizer_worker`
+
+> GPU note (WSL2): NVIDIA `nvidia.com/gpu` resource advertisement via the k8s device-plugin is currently unreliable on WSL2.
+> The chart defaults to CPU-first (no `nvidia.com/gpu` limits). You can still run GPU-enabled containers on some setups,
+> but don’t rely on Kubernetes GPU scheduling locally.
 
 This mirrors production topology more closely than “all-compose”, while staying lightweight for dev.
 
@@ -34,56 +42,46 @@ docker compose up -d broker kafka_init postgres db_migrate db_seed
 
 Infra endpoints:
 - Postgres (from host): `localhost:5432`
-- Postgres (from minikube pods): `host.minikube.internal:5432`
+- Postgres (from pods):
+  - Docker Desktop k8s: `host.docker.internal:5432`
+  - minikube: `host.minikube.internal:5432`
 
 - Kafka (from host tools): `localhost:9092`
 - Kafka (from docker containers): `broker:29092`
-- Kafka (from minikube pods): `host.minikube.internal:39092`
+- Kafka (from pods):
+  - Docker Desktop k8s: `host.docker.internal:39092`
+  - minikube: `host.minikube.internal:39092`
 
 Why two Kafka ports? See `docs/local-stack.md`.
 
 ---
 
-## 2) Start Minikube
+## 2) Choose your local Kubernetes
 
-### 2.1 CPU-only
+### Option A (recommended): Docker Desktop Kubernetes
+
+1) Enable Kubernetes in Docker Desktop settings.
+2) Switch your kubectl context:
+
+```bash
+kubectl config use-context docker-desktop
+```
+
+### Option B: Minikube (WSL2/Linux)
 
 ```bash
 minikube start --driver=docker
 ```
 
-### 2.2 GPU-enabled (recommended for rtservice/whisperx/finalizer)
-
-```bash
-minikube start --driver=docker --gpus=all
-```
-
-> GPU scheduling also requires the NVIDIA k8s device plugin (next section).
+> We intentionally do **CPU-first** local k8s. See GPU note at the top.
 
 ---
 
-## 3) Install NVIDIA device plugin (GPU only)
-
-Inside the cluster, install NVIDIA device plugin so pods can request `nvidia.com/gpu`:
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.16.2/nvidia-device-plugin.yml
-```
-
-Verify:
-
-```bash
-kubectl -n kube-system get ds | grep nvidia
-kubectl describe node | findstr /i nvidia
-```
-
----
-
-## 4) Make images available to Minikube
+## 3) Make images available to Kubernetes
 
 You have two supported approaches.
 
-### Option A: build on host Docker + load into Minikube (simple)
+### Option A: build on host Docker + load into cluster (simple)
 
 Build images:
 
@@ -99,18 +97,22 @@ docker build -t drsynth-finalizer-worker:dev -f finalizer_worker/Dockerfile .
 # samuraipersistor: docker build -t samuraipersistor:local .
 ```
 
-Load into minikube:
+Load into cluster:
 
 ```bash
+# Minikube only:
 minikube image load drsynth-rtservice:dev
 minikube image load drsynth-whisperx-worker:dev
 minikube image load drsynth-recorder-worker:dev
 minikube image load drsynth-finalizer-worker:dev
 minikube image load samuraibff:local
 minikube image load samuraipersistor:local
+
+# Docker Desktop Kubernetes:
+# (Images are already in the Docker Desktop engine; no extra load step needed.)
 ```
 
-### Option B: build directly into Minikube Docker daemon
+### Option B: build directly into minikube Docker daemon (minikube only)
 
 ```bash
 minikube -p minikube docker-env
@@ -120,23 +122,35 @@ minikube -p minikube docker-env
 
 ---
 
-## 5) Persistent recordings directory (hostPath PV)
+## 4) Recordings storage
 
-The Helm chart uses a hostPath PV by default.
-
-Create the directory on the minikube VM:
+### Minikube
+If you use the hostPath mode, create the directory on the minikube VM:
 
 ```bash
-minikube ssh -- "sudo mkdir -p /data/drsynth-recordings && sudo chmod -R 777 /data/drsynth-recordings"
+minikube ssh -- "sudo mkdir -p /data/nanosamurai-recordings && sudo chmod -R 777 /data/nanosamurai-recordings"
 ```
+
+### Docker Desktop Kubernetes
+Prefer the default PVC mode (chart default). No manual directory creation needed.
 
 ---
 
-## 6) Install the Helm chart
+## 5) Install the Helm chart
+
+### Docker Desktop Kubernetes
 
 ```bash
-helm upgrade --install drsynth ./charts/drsynth-stack \
-  -f ./charts/drsynth-stack/values.local.yaml \
+helm upgrade --install nanosamurai ./charts/nanosamurai-stack \
+  -f ./charts/nanosamurai-stack/values.local.docker-desktop.yaml \
+  --set rtservice.hfToken="$HF_TOKEN"
+```
+
+### Minikube
+
+```bash
+helm upgrade --install nanosamurai ./charts/nanosamurai-stack \
+  -f ./charts/nanosamurai-stack/values.local.minikube.yaml \
   --set rtservice.hfToken="$HF_TOKEN"
 ```
 
@@ -144,11 +158,11 @@ Check:
 
 ```bash
 kubectl get pods
-kubectl logs -f deploy/drsynth-samuraibff
+kubectl logs -f deploy/nanosamurai-samuraibff
 ```
 
 Access BFF (NodePort default):
-- http://localhost:30080
+- http://localhost:30080 (default NodePort)
 
 ---
 
@@ -161,15 +175,15 @@ Access BFF (NodePort default):
 
 - Logs:
   ```bash
-  kubectl logs -f deploy/drsynth-whisperx-worker
+  kubectl logs -f deploy/nanosamurai-whisperx-worker
   ```
 
 - Exec:
   ```bash
-  kubectl exec -it deploy/drsynth-whisperx-worker -- sh
+  kubectl exec -it deploy/nanosamurai-whisperx-worker -- sh
   ```
 
 - Verify pods can reach Kafka:
   ```bash
-  kubectl exec -it deploy/drsynth-whisperx-worker -- sh -lc "getent hosts host.minikube.internal"
+  kubectl exec -it deploy/nanosamurai-whisperx-worker -- sh -lc "getent hosts host.minikube.internal"
   ```

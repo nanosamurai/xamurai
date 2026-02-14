@@ -1,0 +1,30 @@
+# Local overrides for Docker Desktop Kubernetes (Windows)
+#
+# Assumptions:
+# - Infra (Kafka/Postgres/Keycloak) is running via docker compose on the host.
+# - Kubernetes pods can reach the host via host.docker.internal.
+
+infra:
+  kafkaBootstrapServers: "host.docker.internal:39092"
+  postgresJdbcUrl: "jdbc:postgresql://host.docker.internal:5432/drsynth"
+
+recordings:
+  hostPath: ""
+  pvc:
+    enabled: true
+
+rtservice:
+  # Required: set this before installing the chart.
+  # Example: helm ... --set rtservice.hfToken="$HF_TOKEN"
+  hfToken: ""
+
+  gpu:
+    enabled: false
+
+whisperxWorker:
+  gpu:
+    enabled: false
+
+finalizerWorker:
+  gpu:
+    enabled: false

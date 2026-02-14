@@ -1,6 +1,6 @@
-# Kubernetes deployment roadmap (drsynth stack)
+# Kubernetes deployment roadmap (nanosamurai)
 
-This is a living design doc for the long-term Kubernetes deployment of the drsynth stack.
+This is a living design doc for the long-term Kubernetes deployment of the nanosamurai stack.
 It’s intended to guide local minikube development, staging, and production.
 
 **Services**
@@ -48,7 +48,7 @@ Split packaging into two deployable units:
    - Postgres (or managed RDS)
    - Keycloak (optional)
 
-2) **Apps chart** (already started as `charts/drsynth-stack`)
+2) **Apps chart** (in this repo as `charts/nanosamurai-stack`)
    - Deployments for bff/persistor/rtservice/workers
    - ConfigMaps and Secrets
    - Services + Ingress
