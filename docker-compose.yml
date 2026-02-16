@@ -7,17 +7,22 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
 
-      # Three client listeners:
+      # Four client listeners:
       # - INTERNAL: for other containers on the compose network
       # - EXTERNAL: for tools on your host machine (localhost)
       # - MINIKUBE: for pods in minikube talking to Docker-hosted Kafka
+      # - DOCKERDESKTOP: for pods in Docker Desktop Kubernetes talking to Docker-hosted Kafka
       #
-      # MINIKUBE listener advertises host.minikube.internal which resolves *inside* minikube.
-      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,MINIKUBE://0.0.0.0:39092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://broker:29092,EXTERNAL://localhost:9092,MINIKUBE://host.minikube.internal:39092
+      # NOTE:
+      # Kafka returns broker addresses based on the listener the client connects to.
+      # If Docker Desktop k8s connects via the MINIKUBE listener, it will get back
+      # host.minikube.internal in metadata (unresolvable in Docker Desktop) -> consumers fail.
+      # Therefore we expose a dedicated listener that advertises host.docker.internal.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,MINIKUBE://0.0.0.0:39092,DOCKERDESKTOP://0.0.0.0:49092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://broker:29092,EXTERNAL://localhost:9092,MINIKUBE://host.minikube.internal:39092,DOCKERDESKTOP://host.docker.internal:49092
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,MINIKUBE:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,MINIKUBE:PLAINTEXT,DOCKERDESKTOP:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:9093
 
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -29,6 +34,7 @@ services:
     ports:
       - 9092:9092
       - 39092:39092
+      - 49092:49092
 
   # -------------------- Postgres --------------------
   postgres:
