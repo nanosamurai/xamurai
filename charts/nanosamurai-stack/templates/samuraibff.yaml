@@ -57,13 +57,13 @@ spec:
 
           readinessProbe:
             httpGet:
-              path: /ready
+              path: {{ .Values.bff.probes.readinessPath | default "/ready" | quote }}
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /health
+              path: {{ .Values.bff.probes.livenessPath | default "/health" | quote }}
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10

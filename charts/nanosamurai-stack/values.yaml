@@ -54,6 +54,10 @@ bff:
     port: 8000
     nodePort: 30080
 
+  probes:
+    readinessPath: "/ready"
+    livenessPath: "/health"
+
   originUri: "http://localhost:8000"
 
   auth:
@@ -72,6 +76,10 @@ persistor:
   service:
     type: ClusterIP
     port: 8010
+
+  probes:
+    readinessPath: "/ready"
+    livenessPath: "/health"
 
 rtservice:
   enabled: true
