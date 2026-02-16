@@ -121,20 +121,25 @@ docker compose up -d broker kafka_init postgres persistor_migrate db_seed
 
 #### Kafka ports and why we expose two of them
 
-Kafka in this stack is reachable from three “worlds”, each needing a different advertised address:
+Kafka in this stack is reachable from four “worlds”, each needing a different advertised address:
 
 - **Other Docker containers** (compose network): `broker:29092`
 - **Host machine tools** (Windows/macOS/Linux): `localhost:9092`
 - **Minikube pods**: `host.minikube.internal:39092`
+- **Docker Desktop Kubernetes pods**: `host.docker.internal:49092`
 
 We keep `39092` specifically for minikube because Kafka’s advertised listeners must be different for
 host vs. pod networking. Trying to reuse `localhost:9092` inside pods will fail.
 
 If you also want local Keycloak, run it outside this compose (or re-add it as a compose profile later).
 
-Infra endpoints (as seen from minikube pods):
-- Kafka: `host.minikube.internal:39092`
-- Postgres: `host.minikube.internal:5432`
+Infra endpoints (as seen from pods):
+- Minikube:
+  - Kafka: `host.minikube.internal:39092`
+  - Postgres: `host.minikube.internal:5432`
+- Docker Desktop Kubernetes:
+  - Kafka: `host.docker.internal:49092`
+  - Postgres: `host.docker.internal:5432`
 
 > We expose Kafka on `39092` specifically so that **minikube pods** can reach it,
 > while still keeping `localhost:9092` working for host tools.
@@ -192,8 +197,20 @@ helm upgrade --install nanosamurai ./charts/nanosamurai-stack -f ./charts/nanosa
   --set rtservice.hfToken="$HF_TOKEN"
 ```
 
-Access BFF:
-- NodePort default: http://localhost:30080
+Access BFF (recommended on Windows Docker Desktop):
+
+Port-forward (preferred):
+```bash
+kubectl port-forward svc/nanosamurai-stack-bff 8000:8000
+```
+Then open:
+- http://localhost:8000
+
+NodePort (optional):
+- http://localhost:30080
+
+> Keycloak note: your Keycloak client redirect URIs must match whichever host+port you use.
+> Allow `http://localhost:8000/*` for port-forward and/or `http://localhost:30080/*` for NodePort.
 
 ### 2.5 GPU notes
 
