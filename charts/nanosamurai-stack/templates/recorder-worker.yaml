@@ -44,5 +44,5 @@ spec:
       volumes:
         - name: recordings
           persistentVolumeClaim:
-            name: {{ include "nanosamurai-stack.fullname" . }}-recordings-pvc
+            claimName: {{ include "nanosamurai-stack.fullname" . }}-recordings-pvc
 {{- end }}

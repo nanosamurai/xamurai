@@ -45,4 +45,4 @@ spec:
       volumes:
         - name: recordings
           persistentVolumeClaim:
-            name: {{ include "drsynth-stack.fullname" . }}-recordings-pvc
+            claimName: {{ include "drsynth-stack.fullname" . }}-recordings-pvc
