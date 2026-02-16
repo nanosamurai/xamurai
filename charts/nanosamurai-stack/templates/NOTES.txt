@@ -4,10 +4,14 @@ BFF (samuraibff)
   Service: {{ include "nanosamurai-stack.fullname" . }}-bff
   Type: {{ .Values.bff.service.type }}
 
+# Recommended (works reliably on Windows + Docker Desktop):
+#   kubectl port-forward svc/{{ include "nanosamurai-stack.fullname" . }}-bff 8000:8000
+# Then open:
+#   http://localhost:8000
+
 {{- if eq .Values.bff.service.type "NodePort" }}
-  URL: http://localhost:{{ .Values.bff.service.nodePort }}
-{{- else }}
-  Use `kubectl port-forward svc/{{ include "nanosamurai-stack.fullname" . }}-bff 8000:8000`
+
+  NodePort URL (optional): http://localhost:{{ .Values.bff.service.nodePort }}
 {{- end }}
 
 Persistor
