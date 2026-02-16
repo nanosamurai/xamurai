@@ -5,8 +5,25 @@
 # - Kubernetes pods can reach the host via host.docker.internal.
 
 infra:
-  kafkaBootstrapServers: "host.docker.internal:39092"
+  # IMPORTANT: must match Kafka advertised listener for Docker Desktop Kubernetes.
+  kafkaBootstrapServers: "host.docker.internal:49092"
   postgresJdbcUrl: "jdbc:postgresql://host.docker.internal:5432/drsynth"
+
+# Images must exist in the Docker Desktop engine (no registry pull). These tags
+# match the repo's suggested local build commands.
+images:
+  rtservice:
+    repository: "drsynth-rtservice"
+    tag: "local"
+  whisperxWorker:
+    repository: "drsynth-whisperx-worker"
+    tag: "local-v2"
+  recorderWorker:
+    repository: "drsynth-recorder-worker"
+    tag: "local"
+  finalizerWorker:
+    repository: "drsynth-finalizer-worker"
+    tag: "local"
 
 recordings:
   hostPath: ""
@@ -20,6 +37,21 @@ rtservice:
 
   gpu:
     enabled: false
+
+# Override probe paths for local convenience.
+#
+# NOTE: /ready currently returns 503 for local k8s because it depends on rtservice
+# readiness, which may take a long time (model warmup). Using /health makes pods
+# become Ready earlier so Helm --wait and Services work.
+#
+# Keep /ready for prod/staging.
+bff:
+  probes:
+    readinessPath: "/health"
+
+persistor:
+  probes:
+    readinessPath: "/health"
 
 whisperxWorker:
   gpu:
