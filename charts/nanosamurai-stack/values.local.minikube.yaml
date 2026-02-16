@@ -1,0 +1,29 @@
+# Local overrides for Minikube (WSL2 or Linux)
+#
+# Assumptions:
+# - Infra (Kafka/Postgres/Keycloak) is running via docker compose on the host.
+# - Minikube pods can reach the host via host.minikube.internal.
+
+infra:
+  kafkaBootstrapServers: "host.minikube.internal:39092"
+  postgresJdbcUrl: "jdbc:postgresql://host.minikube.internal:5432/drsynth"
+
+recordings:
+  # For minikube we can use a simple hostPath PV.
+  hostPath: "/data/nanosamurai-recordings"
+  pvc:
+    enabled: false
+
+rtservice:
+  hfToken: ""
+
+  gpu:
+    enabled: false
+
+whisperxWorker:
+  gpu:
+    enabled: false
+
+finalizerWorker:
+  gpu:
+    enabled: false

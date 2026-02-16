@@ -165,3 +165,6 @@ utilities/*.wav
 utilities/*.json
 utilities/*.txt
 utilities/*.srt
+
+# Local Helm render artifacts
+_helm_render_*.yaml

@@ -1,0 +1,90 @@
+{{- if .Values.bff.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nanosamurai-stack.fullname" . }}-bff
+  labels:
+    {{- include "nanosamurai-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bff
+spec:
+  replicas: {{ .Values.bff.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: bff
+  template:
+    metadata:
+      labels:
+        {{- include "nanosamurai-stack.labels" . | nindent 8 }}
+        app.kubernetes.io/component: bff
+    spec:
+      containers:
+        - name: samuraibff
+          image: "{{ .Values.images.samuraibff.repository }}:{{ .Values.images.samuraibff.tag }}"
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: SAMURAIBFF_HTTP_HOST
+              value: "0.0.0.0"
+            - name: SAMURAIBFF_HTTP_PORT
+              value: "8000"
+
+            - name: SAMURAIBFF_DB_JDBC_URL
+              value: {{ .Values.infra.postgresJdbcUrl | quote }}
+            - name: SAMURAIBFF_DB_USERNAME
+              value: {{ .Values.infra.postgresUser | quote }}
+            - name: SAMURAIBFF_DB_PASSWORD
+              value: {{ .Values.infra.postgresPassword | quote }}
+
+            - name: SAMURAIBFF_KAFKA_BOOTSTRAP_SERVERS
+              value: {{ .Values.infra.kafkaBootstrapServers | quote }}
+            - name: SAMURAIBFF_GRPC_RTSERVICE_ADDR
+              value: {{ ternary (printf "%s-rtservice:50052" (include "nanosamurai-stack.fullname" .)) .Values.bff.rtservice.externalGrpcAddr .Values.bff.rtservice.inCluster | quote }}
+
+            - name: SAMURAIBFF_AUTH_REQUIRED
+              value: {{ ternary "true" "false" .Values.bff.auth.required | quote }}
+            - name: SAMURAIBFF_AUTH_ISSUER
+              value: {{ .Values.bff.auth.issuer | quote }}
+            - name: SAMURAIBFF_AUTH_AUDIENCE
+              value: "bff-web"
+            - name: SAMURAIBFF_AUTH_CLIENT_ID
+              value: "bff-web"
+
+            - name: SAMURAIBFF_ORIGIN_URI
+              value: {{ .Values.bff.originUri | quote }}
+
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.bff.probes.readinessPath | default "/ready" | quote }}
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.bff.probes.livenessPath | default "/health" | quote }}
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nanosamurai-stack.fullname" . }}-bff
+  labels:
+    {{- include "nanosamurai-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bff
+spec:
+  type: {{ .Values.bff.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: bff
+  ports:
+    - name: http
+      port: {{ .Values.bff.service.port }}
+      targetPort: http
+      {{- if eq .Values.bff.service.type "NodePort" }}
+      nodePort: {{ .Values.bff.service.nodePort }}
+      {{- end }}
+{{- end }}

@@ -1,9 +1,10 @@
+{{- if .Values.finalizerWorker.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "drsynth-stack.fullname" . }}-finalizer-worker
+  name: {{ include "nanosamurai-stack.fullname" . }}-finalizer-worker
   labels:
-    {{- include "drsynth-stack.labels" . | nindent 4 }}
+    {{- include "nanosamurai-stack.labels" . | nindent 4 }}
     app.kubernetes.io/component: finalizer-worker
 spec:
   replicas: {{ .Values.finalizerWorker.replicas }}
@@ -14,7 +15,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "drsynth-stack.labels" . | nindent 8 }}
+        {{- include "nanosamurai-stack.labels" . | nindent 8 }}
         app.kubernetes.io/component: finalizer-worker
     spec:
       containers:
@@ -45,4 +46,5 @@ spec:
       volumes:
         - name: recordings
           persistentVolumeClaim:
-            claimName: {{ include "drsynth-stack.fullname" . }}-recordings-pvc
+            claimName: {{ include "nanosamurai-stack.fullname" . }}-recordings-pvc
+{{- end }}

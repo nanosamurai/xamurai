@@ -1,0 +1,22 @@
+nanosamurai-stack has been deployed.
+
+BFF (samuraibff)
+  Service: {{ include "nanosamurai-stack.fullname" . }}-bff
+  Type: {{ .Values.bff.service.type }}
+
+# Recommended (works reliably on Windows + Docker Desktop):
+#   kubectl port-forward svc/{{ include "nanosamurai-stack.fullname" . }}-bff 8000:8000
+# Then open:
+#   http://localhost:8000
+
+{{- if eq .Values.bff.service.type "NodePort" }}
+
+  NodePort URL (optional): http://localhost:{{ .Values.bff.service.nodePort }}
+{{- end }}
+
+Persistor
+  Service: {{ include "nanosamurai-stack.fullname" . }}-persistor
+  Use `kubectl port-forward svc/{{ include "nanosamurai-stack.fullname" . }}-persistor 8010:8010` if you need it.
+
+rtservice (gRPC)
+  Service: {{ include "nanosamurai-stack.fullname" . }}-rtservice

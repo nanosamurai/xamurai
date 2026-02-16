@@ -1,9 +1,10 @@
+{{- if .Values.recorderWorker.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "drsynth-stack.fullname" . }}-recorder-worker
+  name: {{ include "nanosamurai-stack.fullname" . }}-recorder-worker
   labels:
-    {{- include "drsynth-stack.labels" . | nindent 4 }}
+    {{- include "nanosamurai-stack.labels" . | nindent 4 }}
     app.kubernetes.io/component: recorder-worker
 spec:
   replicas: {{ .Values.recorderWorker.replicas }}
@@ -14,7 +15,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "drsynth-stack.labels" . | nindent 8 }}
+        {{- include "nanosamurai-stack.labels" . | nindent 8 }}
         app.kubernetes.io/component: recorder-worker
     spec:
       containers:
@@ -43,4 +44,5 @@ spec:
       volumes:
         - name: recordings
           persistentVolumeClaim:
-            claimName: {{ include "drsynth-stack.fullname" . }}-recordings-pvc
+            claimName: {{ include "nanosamurai-stack.fullname" . }}-recordings-pvc
+{{- end }}

@@ -3,7 +3,7 @@
 This document describes two supported local workflows:
 
 1) **All Docker Compose** (fastest end-to-end)
-2) **Docker Compose infra + Minikube apps** (k8s-realistic; supports GPU scheduling)
+2) **Docker Compose infra + Kubernetes apps** (k8s-realistic; CPU-first locally)
 
 > Repo layout assumption on your machine (defaults used in `.env.example`):
 > - `C:/Users/miros/PycharmProjects/drsynth`
@@ -109,7 +109,7 @@ curl -X POST http://localhost:8000/api/sessions
 
 ## 2) Mode B — Docker Compose infra + Minikube apps
 
-This runs **Kafka + Postgres** in Docker Compose and deploys app services to minikube using the Helm chart in `charts/drsynth-stack`.
+This runs **Kafka + Postgres** in Docker Compose and deploys app services to local Kubernetes using the Helm chart in `charts/nanosamurai-stack`.
 
 > Keycloak is expected to be reachable externally (your ECS dev profile is fine). Compose does not start it by default.
 
@@ -121,20 +121,25 @@ docker compose up -d broker kafka_init postgres persistor_migrate db_seed
 
 #### Kafka ports and why we expose two of them
 
-Kafka in this stack is reachable from three “worlds”, each needing a different advertised address:
+Kafka in this stack is reachable from four “worlds”, each needing a different advertised address:
 
 - **Other Docker containers** (compose network): `broker:29092`
 - **Host machine tools** (Windows/macOS/Linux): `localhost:9092`
 - **Minikube pods**: `host.minikube.internal:39092`
+- **Docker Desktop Kubernetes pods**: `host.docker.internal:49092`
 
 We keep `39092` specifically for minikube because Kafka’s advertised listeners must be different for
 host vs. pod networking. Trying to reuse `localhost:9092` inside pods will fail.
 
 If you also want local Keycloak, run it outside this compose (or re-add it as a compose profile later).
 
-Infra endpoints (as seen from minikube pods):
-- Kafka: `host.minikube.internal:39092`
-- Postgres: `host.minikube.internal:5432`
+Infra endpoints (as seen from pods):
+- Minikube:
+  - Kafka: `host.minikube.internal:39092`
+  - Postgres: `host.minikube.internal:5432`
+- Docker Desktop Kubernetes:
+  - Kafka: `host.docker.internal:49092`
+  - Postgres: `host.docker.internal:5432`
 
 > We expose Kafka on `39092` specifically so that **minikube pods** can reach it,
 > while still keeping `localhost:9092` working for host tools.
@@ -179,21 +184,33 @@ Then run `docker build ...` and images will already be present in minikube.
 
 ### 2.3 Create the recordings host path in minikube
 
-The chart uses a simple hostPath PV by default (`/data/drsynth-recordings`). Create it:
+The chart uses a simple hostPath PV by default (`/data/nanosamurai-recordings`). Create it:
 
 ```bash
-minikube ssh -- "sudo mkdir -p /data/drsynth-recordings && sudo chmod -R 777 /data/drsynth-recordings"
+minikube ssh -- "sudo mkdir -p /data/nanosamurai-recordings && sudo chmod -R 777 /data/nanosamurai-recordings"
 ```
 
 ### 2.4 Install the chart
 
 ```bash
-helm upgrade --install drsynth ./charts/drsynth-stack -f ./charts/drsynth-stack/values.local.yaml \
+helm upgrade --install nanosamurai ./charts/nanosamurai-stack -f ./charts/nanosamurai-stack/values.local.minikube.yaml \
   --set rtservice.hfToken="$HF_TOKEN"
 ```
 
-Access BFF:
-- NodePort default: http://localhost:30080
+Access BFF (recommended on Windows Docker Desktop):
+
+Port-forward (preferred):
+```bash
+kubectl port-forward svc/nanosamurai-stack-bff 8000:8000
+```
+Then open:
+- http://localhost:8000
+
+NodePort (optional):
+- http://localhost:30080
+
+> Keycloak note: your Keycloak client redirect URIs must match whichever host+port you use.
+> Allow `http://localhost:8000/*` for port-forward and/or `http://localhost:30080/*` for NodePort.
 
 ### 2.5 GPU notes
 
