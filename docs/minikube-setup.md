@@ -49,7 +49,7 @@ Infra endpoints:
 - Kafka (from host tools): `localhost:9092`
 - Kafka (from docker containers): `broker:29092`
 - Kafka (from pods):
-  - Docker Desktop k8s: `host.docker.internal:39092`
+  - Docker Desktop k8s: `host.docker.internal:49092`
   - minikube: `host.minikube.internal:39092`
 
 Why two Kafka ports? See `docs/local-stack.md`.
@@ -141,9 +141,10 @@ Prefer the default PVC mode (chart default). No manual directory creation needed
 ### Docker Desktop Kubernetes
 
 ```bash
+# PowerShell note: use $env:HF_TOKEN (not $HF_TOKEN).
 helm upgrade --install nanosamurai ./charts/nanosamurai-stack \
   -f ./charts/nanosamurai-stack/values.local.docker-desktop.yaml \
-  --set rtservice.hfToken="$HF_TOKEN"
+  --set rtservice.hfToken="$env:HF_TOKEN"
 ```
 
 ### Minikube
@@ -161,8 +162,21 @@ kubectl get pods
 kubectl logs -f deploy/nanosamurai-samuraibff
 ```
 
-Access BFF (NodePort default):
+Access BFF (recommended for Docker Desktop on Windows):
+
+Port-forward (preferred):
+```bash
+kubectl port-forward svc/nanosamurai-stack-bff 8000:8000
+```
+Then open:
+- http://localhost:8000
+
+NodePort (optional):
 - http://localhost:30080 (default NodePort)
+
+> Keycloak note: redirects/callbacks are controlled by the client configuration (redirect URIs).
+> If you use NodePort, include `http://localhost:30080/*` in allowed redirect URIs.
+> If you use port-forward (8000), include `http://localhost:8000/*`.
 
 ---
 
