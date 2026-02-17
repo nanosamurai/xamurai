@@ -86,11 +86,11 @@ You have two supported approaches.
 Build images:
 
 ```bash
-# drsynth images
-docker build -t drsynth-rtservice:dev -f rtservice/Dockerfile .
-docker build -t drsynth-whisperx-worker:dev -f whisperx_worker/Dockerfile .
-docker build -t drsynth-recorder-worker:dev -f recorder_worker/Dockerfile .
-docker build -t drsynth-finalizer-worker:dev -f finalizer_worker/Dockerfile .
+# drsynth images (recommended local tag: :local)
+docker build -t drsynth-rtservice:local -f rtservice/Dockerfile .
+docker build -t drsynth-whisperx-worker:local -f whisperx_worker/Dockerfile .
+docker build -t drsynth-recorder-worker:local -f recorder_worker/Dockerfile .
+docker build -t drsynth-finalizer-worker:local -f finalizer_worker/Dockerfile .
 
 # other repos (run in their directories)
 # samuraibff: docker build -t samuraibff:local .
@@ -101,15 +101,21 @@ Load into cluster:
 
 ```bash
 # Minikube only:
-minikube image load drsynth-rtservice:dev
-minikube image load drsynth-whisperx-worker:dev
-minikube image load drsynth-recorder-worker:dev
-minikube image load drsynth-finalizer-worker:dev
+minikube image load drsynth-rtservice:local
+minikube image load drsynth-whisperx-worker:local
+minikube image load drsynth-recorder-worker:local
+minikube image load drsynth-finalizer-worker:local
 minikube image load samuraibff:local
 minikube image load samuraipersistor:local
 
 # Docker Desktop Kubernetes:
 # (Images are already in the Docker Desktop engine; no extra load step needed.)
+
+# IMPORTANT: If you rebuild an image but keep the same tag (e.g. :local),
+# Kubernetes will not automatically restart pods.
+# Force a restart to pick up rebuilt images:
+#   kubectl rollout restart deploy/nanosamurai-stack-finalizer-worker
+#   kubectl rollout restart deploy/nanosamurai-stack-whisperx-worker
 ```
 
 ### Option B: build directly into minikube Docker daemon (minikube only)
@@ -239,18 +245,26 @@ PASS if `audio.raw` contains an `AudioChunk` with the session_id.
 ```
 
 ### Tier 4 (optional): verify async pipeline signals
-PASS if we observe (at least one) downstream event for the session_id.
+PASS if we observe a selected downstream event for the session_id.
 
 ```bash
 .venv\\Scripts\\pip install -r utilities/k8s_local_smoke_test/requirements.kafka.txt
-.venv\\Scripts\\python utilities/k8s_local_smoke_test/tier4_async_pipeline.py --kafka-bootstrap localhost:9092 --timeout 120
+
+# Default (quick): verify recorder emits `recordings.finished`
+.venv\\Scripts\\python utilities/k8s_local_smoke_test/tier4_async_pipeline.py \
+  --kafka-bootstrap localhost:9092 --timeout 120 --signal recording-finished
+
+# Strict: verify finalizer successfully emits `transcripts.final`
+# (this will FAIL if finalizer is down/crashlooping)
+.venv\\Scripts\\python utilities/k8s_local_smoke_test/tier4_async_pipeline.py \
+  --kafka-bootstrap localhost:9092 --timeout 300 --signal final
 ```
 
 Notes:
 - On CPU-only machines, `rtservice` startup (model downloads) can be long and Tier 2 may fail until warm.
 - Recorder emits only after idle timeout (default `RECORDER_IDLE_SECONDS=30`).
 - WhisperX refined emits per-slice (default `WHISPERX_SLICE_SECONDS=60`).
-- Final transcript can be slow on CPU; treat Tier 4 as opt-in locally.
+- Final transcript can be slow on CPU; treat Tier 4 strict mode (`--signal final`) as opt-in locally.
 
 ## 8) Debugging cheatsheet
 

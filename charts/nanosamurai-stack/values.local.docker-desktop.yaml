@@ -17,7 +17,7 @@ images:
     tag: "local"
   whisperxWorker:
     repository: "drsynth-whisperx-worker"
-    tag: "local-v2"
+    tag: "local"
   recorderWorker:
     repository: "drsynth-recorder-worker"
     tag: "local"
