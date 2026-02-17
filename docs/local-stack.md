@@ -150,13 +150,13 @@ You have two common options:
 
 #### Option A (simple): build normally + `minikube image load`
 
-Build images on the host Docker engine:
+Build images on the host Docker engine (recommended local tag: `:local`):
 ```bash
 # drsynth images
-docker build -t drsynth-rtservice:dev -f rtservice/Dockerfile .
-docker build -t drsynth-whisperx-worker:dev -f whisperx_worker/Dockerfile .
-docker build -t drsynth-recorder-worker:dev -f recorder_worker/Dockerfile .
-docker build -t drsynth-finalizer-worker:dev -f finalizer_worker/Dockerfile .
+docker build -t drsynth-rtservice:local -f rtservice/Dockerfile .
+docker build -t drsynth-whisperx-worker:local -f whisperx_worker/Dockerfile .
+docker build -t drsynth-recorder-worker:local -f recorder_worker/Dockerfile .
+docker build -t drsynth-finalizer-worker:local -f finalizer_worker/Dockerfile .
 
 # in the other repos:
 # samuraibff: docker build -t samuraibff:local .
@@ -165,12 +165,19 @@ docker build -t drsynth-finalizer-worker:dev -f finalizer_worker/Dockerfile .
 
 Then load into minikube:
 ```bash
-minikube image load drsynth-rtservice:dev
-minikube image load drsynth-whisperx-worker:dev
-minikube image load drsynth-recorder-worker:dev
-minikube image load drsynth-finalizer-worker:dev
+minikube image load drsynth-rtservice:local
+minikube image load drsynth-whisperx-worker:local
+minikube image load drsynth-recorder-worker:local
+minikube image load drsynth-finalizer-worker:local
 minikube image load samuraibff:local
 minikube image load samuraipersistor:local
+```
+
+Note: if you rebuild an image but keep the same tag (e.g. `:local`), Kubernetes will not
+restart pods automatically. Force a restart to pick up rebuilt images:
+```bash
+kubectl rollout restart deploy/nanosamurai-stack-finalizer-worker
+kubectl rollout restart deploy/nanosamurai-stack-whisperx-worker
 ```
 
 #### Option B: build directly into minikube’s Docker daemon
