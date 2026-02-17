@@ -166,6 +166,8 @@ Access BFF (recommended for Docker Desktop on Windows):
 
 Port-forward (preferred):
 ```bash
+# If port 8000 is already used on your machine, you can choose a different local port:
+#   kubectl port-forward svc/nanosamurai-stack-bff 8001:8000
 kubectl port-forward svc/nanosamurai-stack-bff 8000:8000
 ```
 Then open:
@@ -204,7 +206,53 @@ minikube status
 
 ---
 
-## 7) Debugging cheatsheet
+## 7) Smoke tests (local k8s)
+
+These are tiered smoke tests. **Tier 1 and 2** are recommended for local dev.
+**Tier 3 and 4** are optional (Kafka verification and async pipeline signals).
+
+### Tier 1: BFF connectivity
+PASS if we can create a session and receive at least one JSON event on `/ws/events`.
+
+```bash
+kubectl port-forward svc/nanosamurai-stack-bff 8000:8000
+
+python -m venv .venv
+.venv\\Scripts\\pip install -r utilities/k8s_local_smoke_test/requirements.txt
+
+.venv\\Scripts\\python utilities/k8s_local_smoke_test/tier1_bff_connectivity.py
+```
+
+### Tier 2: realtime audio -> ASR event
+PASS if streaming PCM16 audio to `/ws/audio` results in at least one `type=asr` event on `/ws/events`.
+
+```bash
+.venv\\Scripts\\python utilities/k8s_local_smoke_test/tier2_realtime_asr.py --wav tests/data/test_cs.wav --lang cs
+```
+
+### Tier 3 (optional): verify BFF publishes AudioChunk to Kafka
+PASS if `audio.raw` contains an `AudioChunk` with the session_id.
+
+```bash
+.venv\\Scripts\\pip install -r utilities/k8s_local_smoke_test/requirements.kafka.txt
+.venv\\Scripts\\python utilities/k8s_local_smoke_test/tier3_kafka_audio_raw.py --kafka-bootstrap localhost:9092
+```
+
+### Tier 4 (optional): verify async pipeline signals
+PASS if we observe (at least one) downstream event for the session_id.
+
+```bash
+.venv\\Scripts\\pip install -r utilities/k8s_local_smoke_test/requirements.kafka.txt
+.venv\\Scripts\\python utilities/k8s_local_smoke_test/tier4_async_pipeline.py --kafka-bootstrap localhost:9092 --timeout 120
+```
+
+Notes:
+- On CPU-only machines, `rtservice` startup (model downloads) can be long and Tier 2 may fail until warm.
+- Recorder emits only after idle timeout (default `RECORDER_IDLE_SECONDS=30`).
+- WhisperX refined emits per-slice (default `WHISPERX_SLICE_SECONDS=60`).
+- Final transcript can be slow on CPU; treat Tier 4 as opt-in locally.
+
+## 8) Debugging cheatsheet
 
 - Pods:
   ```bash
