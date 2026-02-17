@@ -1,4 +1,14 @@
-"""Local Kubernetes smoke test (BFF WebSocket audio path).
+"""DEPRECATED: use tiered smoke tests in this directory.
+
+This script is kept for backward compatibility. Prefer:
+- tier1_bff_connectivity.py
+- tier2_realtime_asr.py
+- tier3_kafka_audio_raw.py (optional)
+- tier4_async_pipeline.py (optional)
+
+---
+
+Local Kubernetes smoke test (BFF WebSocket audio path).
 
 Goal
 ----
