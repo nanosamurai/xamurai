@@ -204,7 +204,31 @@ minikube status
 
 ---
 
-## 7) Debugging cheatsheet
+## 7) Smoke test (local k8s)
+
+This is a quick end-to-end smoke test that exercises the **BFF WebSocket audio ingestion path**
+and verifies we receive events back (without requiring browser login).
+
+1) Port-forward BFF:
+
+```bash
+kubectl port-forward svc/nanosamurai-stack-bff 8000:8000
+```
+
+2) Create a venv + install smoke test deps:
+
+```bash
+python -m venv .venv
+.venv\\Scripts\\pip install -r utilities/k8s_local_smoke_test/requirements.txt
+```
+
+3) Run the smoke test (streams a few seconds of test audio to `/ws/audio` and waits for events on `/ws/events`):
+
+```bash
+.venv\\Scripts\\python utilities/k8s_local_smoke_test/bff_ws_audio_smoke_test.py --wav tests/data/test_cs.wav
+```
+
+## 8) Debugging cheatsheet
 
 - Pods:
   ```bash
