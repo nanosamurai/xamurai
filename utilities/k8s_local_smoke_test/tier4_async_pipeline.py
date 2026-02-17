@@ -1,13 +1,12 @@
-"""Tier 4 (optional) smoke test: verify async pipeline signals via Kafka.
+"""Tier 4 (optional) smoke test: verify a selected async pipeline signal via Kafka.
 
-PASS criteria (configurable):
-- Observe at least one downstream event for the session_id, e.g.:
-  - recordings.finished (RecordingFinished)
-  - transcripts.refined (RefinedEvent)
-  - transcripts.final (SessionTranscript)
+PASS criteria:
+- Observe the selected downstream signal for the session_id.
 
-Default mode focuses on recordings.finished because it is the quickest bounded async signal
-(RECORDER_IDLE_SECONDS, default 30s).
+Signals:
+- recording-finished: recordings.finished (RecordingFinished)  [default; quick]
+- refined:           transcripts.refined (RefinedEvent)
+- final:             transcripts.final (SessionTranscript)     [strict; validates finalizer]
 
 Requires:
   pip install -r utilities/k8s_local_smoke_test/requirements.kafka.txt
@@ -17,7 +16,7 @@ Notes on time:
 - whisperx refined emits per slice (default 60s)
 - final transcript depends on full-session processing and can be slow on CPU.
 
-This test is therefore opt-in and has larger timeouts.
+Use `--signal final` when you specifically want the test to FAIL if finalizer is broken.
 """
 
 from __future__ import annotations
@@ -58,10 +57,30 @@ def main() -> int:
     ap.add_argument("--stream-seconds", type=float, default=2.0)
     ap.add_argument("--kafka-bootstrap", required=True)
     ap.add_argument("--timeout", type=float, default=90.0)
-    ap.add_argument("--check-recording-finished", action="store_true", default=True)
+
+    ap.add_argument(
+        "--signal",
+        choices=["recording-finished", "refined", "final"],
+        default="recording-finished",
+        help=(
+            "Which Kafka signal to validate for the session_id. "
+            "Use 'final' to fail when finalizer is down or crashing."
+        ),
+    )
+
+    # Backwards-compat (soft): old flags still override --signal when provided.
+    ap.add_argument("--check-recording-finished", action="store_true", default=False)
     ap.add_argument("--check-refined", action="store_true", default=False)
     ap.add_argument("--check-final", action="store_true", default=False)
+
     args = ap.parse_args()
+
+    if args.check_final:
+        args.signal = "final"
+    elif args.check_refined:
+        args.signal = "refined"
+    elif args.check_recording_finished:
+        args.signal = "recording-finished"
 
     base_url = args.base_url.rstrip("/")
     ws_base = _lib.http_to_ws(base_url)
@@ -71,16 +90,14 @@ def main() -> int:
 
     pcm = _lib.read_wav_as_pcm16le(args.wav, target_sr=16000)
 
-    topics = []
-    if args.check_recording_finished:
-        topics.append("recordings.finished")
-    if args.check_refined:
-        topics.append("transcripts.refined")
-    if args.check_final:
-        topics.append("transcripts.final")
-
-    if not topics:
-        raise SystemExit("No topics selected")
+    if args.signal == "recording-finished":
+        topics = ["recordings.finished"]
+    elif args.signal == "refined":
+        topics = ["transcripts.refined"]
+    elif args.signal == "final":
+        topics = ["transcripts.final"]
+    else:
+        raise SystemExit(f"Unsupported --signal: {args.signal}")
 
     consumer = _make_consumer(args.kafka_bootstrap, group_id=f"tier4-{int(time.time())}")
     consumer.subscribe(topics)
@@ -116,24 +133,35 @@ def main() -> int:
                 ev = stream_pb2.RecordingFinished()
                 ev.ParseFromString(payload)
                 if ev.session_id == session_id:
-                    print(f"[tier4] PASS: got RecordingFinished for session={session_id} url={ev.recording_url}")
+                    print(
+                        f"[tier4] PASS(signal=recording-finished): got RecordingFinished "
+                        f"for session={session_id} url={ev.recording_url}"
+                    )
                     return 0
 
             if topic == "transcripts.refined":
                 ev = stream_pb2.RefinedEvent()
                 ev.ParseFromString(payload)
                 if ev.session_id == session_id:
-                    print(f"[tier4] PASS: got RefinedEvent for session={session_id} text_len={len(ev.text)}")
+                    print(
+                        f"[tier4] PASS(signal=refined): got RefinedEvent "
+                        f"for session={session_id} text_len={len(ev.text)}"
+                    )
                     return 0
 
             if topic == "transcripts.final":
                 ev = stream_pb2.SessionTranscript()
                 ev.ParseFromString(payload)
                 if ev.session_id == session_id:
-                    print(f"[tier4] PASS: got SessionTranscript for session={session_id} segments={len(ev.segments)}")
+                    print(
+                        f"[tier4] PASS(signal=final): got SessionTranscript "
+                        f"for session={session_id} segments={len(ev.segments)}"
+                    )
                     return 0
 
-        print(f"[tier4] FAIL: did not observe any selected events within {args.timeout:.0f}s")
+        print(
+            f"[tier4] FAIL(signal={args.signal}): did not observe expected event within {args.timeout:.0f}s"
+        )
         return 1
 
     finally:
