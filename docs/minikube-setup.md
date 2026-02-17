@@ -166,6 +166,8 @@ Access BFF (recommended for Docker Desktop on Windows):
 
 Port-forward (preferred):
 ```bash
+# If port 8000 is already used on your machine, you can choose a different local port:
+#   kubectl port-forward svc/nanosamurai-stack-bff 8001:8000
 kubectl port-forward svc/nanosamurai-stack-bff 8000:8000
 ```
 Then open:
