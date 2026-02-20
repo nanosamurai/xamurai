@@ -1,4 +1,4 @@
-# Enrolled speakers in a multi-tenant environment (drsynth)
+ # Enrolled speakers in a multi-tenant environment (drsynth)
 
 Status: **WIP / In progress**
 
@@ -147,8 +147,16 @@ Deliverables:
 - emit `RefinedEvent.speaker`
 
 Status:
-- [ ] Started
-- [ ] Completed
+- [x] Started
+- [x] Completed
+
+Implemented in:
+- `whisperx_worker/src/whisperx_worker/whisperx_worker.py`
+- `tests/test_whisperx_worker_unit.py`
+
+Notes:
+- Diarization is best-effort and requires `HF_TOKEN` (pyannote models). If missing, the worker falls back to speaker="".
+- Enrollment mapping supports both legacy local dir (dev) and manifest-based backends via `ENROLL_BACKEND`.
 
 ---
 
