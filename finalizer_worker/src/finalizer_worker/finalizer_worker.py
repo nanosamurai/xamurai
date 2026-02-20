@@ -2,8 +2,9 @@
 import json
 import logging
 import os
-import uuid
-from typing import Optional, List, Tuple
+import time
+from threading import Event
+from typing import Optional
 
 from confluent_kafka import Consumer, Producer, KafkaException
 
@@ -28,7 +29,19 @@ GROUP_ID = os.getenv("KAFKA_GROUP_ID_FINALIZER", "finalizer-worker")
 # so the default Kafka client max.poll.interval.ms (5 minutes) is too low.
 # If exceeded, the consumer leaves the group mid-processing.
 MAX_POLL_INTERVAL_MS = int(
-    os.getenv("FINALIZER_MAX_POLL_INTERVAL_MS", os.getenv("KAFKA_MAX_POLL_INTERVAL_MS", "1800000"))
+    os.getenv(
+        "FINALIZER_MAX_POLL_INTERVAL_MS",
+        os.getenv("KAFKA_MAX_POLL_INTERVAL_MS", "1800000"),
+    )
+)
+
+# Only commit the input offset after we know the output message was delivered.
+FINALIZER_PRODUCE_ACK_TIMEOUT_S = float(
+    os.getenv("FINALIZER_PRODUCE_ACK_TIMEOUT_S", "30.0")
+)
+FINALIZER_PRODUCE_RETRIES = int(os.getenv("FINALIZER_PRODUCE_RETRIES", "8"))
+FINALIZER_PRODUCE_RETRY_BACKOFF_S = float(
+    os.getenv("FINALIZER_PRODUCE_RETRY_BACKOFF_S", "1.0")
 )
 
 
@@ -137,6 +150,94 @@ def _save_transcript_json(transcript: stream_pb2.SessionTranscript) -> Optional[
     return json_path
 
 
+def _produce_with_ack(
+    producer: Producer,
+    *,
+    topic: str,
+    key: bytes,
+    value: bytes,
+    timeout_s: float,
+    retries: int,
+    base_backoff_s: float,
+) -> None:
+    """Produce a message and wait until Kafka acks it.
+
+    This is critical for finalizer_worker semantics: we must not commit the input
+    offset until we are sure the output message has been accepted by Kafka.
+
+    Notes:
+    - confluent_kafka's `produce()` is async.
+    - delivery callbacks run when we call `poll()` / `flush()`.
+    """
+
+    last_err: Exception | None = None
+
+    for attempt in range(1, retries + 1):
+        delivered = Event()
+        delivery_err: dict[str, object] = {}
+
+        def _on_delivery(err, _msg):
+            delivery_err["err"] = err
+            delivered.set()
+
+        # Try producing, handle local queue being full.
+        while True:
+            try:
+                producer.produce(
+                    topic=topic,
+                    key=key,
+                    value=value,
+                    on_delivery=_on_delivery,
+                )
+                break
+            except BufferError as e:
+                # Local producer queue is full; poll to clear delivery reports.
+                last_err = e
+                producer.poll(0.2)
+
+        # Let producer start IO.
+        producer.poll(0)
+
+        # Wait for delivery callback.
+        if not delivered.wait(timeout_s):
+            # Force IO + callbacks; after flush returns, any deliverable messages
+            # should have triggered callbacks.
+            producer.flush(timeout_s)
+            producer.poll(0)
+
+        err = delivery_err.get("err")
+        if delivered.is_set() and err is None:
+            return
+
+        # Failed or timed out.
+        if not delivered.is_set():
+            last_err = TimeoutError(
+                f"Kafka produce delivery timed out after {timeout_s:.1f}s"
+            )
+        else:
+            # `err` is typically a KafkaError instance.
+            last_err = KafkaException(err)  # type: ignore[arg-type]
+
+        backoff_s = base_backoff_s * (2 ** (attempt - 1))
+        logger.warning(
+            "Produce to topic=%s failed (attempt %d/%d): %s. Retrying in %.1fs",
+            topic,
+            attempt,
+            retries,
+            last_err,
+            backoff_s,
+        )
+        try:
+            producer.flush(5.0)
+        except Exception:
+            pass
+        time.sleep(backoff_s)
+
+    raise RuntimeError(
+        f"Failed to produce to topic={topic} after {retries} attempts: {last_err}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Main loop
 # --------------------------------------------------------------------------- #
@@ -178,6 +279,7 @@ def main():
                     rf.recording_url,
                     e,
                 )
+                # Bad event is not retriable, commit and move on.
                 consumer.commit(msg, asynchronous=True)
                 continue
 
@@ -210,14 +312,36 @@ def main():
             _ = _save_transcript_json(transcript)
 
             # 2) Publish to Kafka for downstream consumers (persistence handled by samuraipersistor)
-            producer.produce(
-                topic=TOPIC_TRANSCRIPTS_FINAL,
-                key=rf.session_id.encode("utf-8"),
-                value=transcript.SerializeToString(),
-            )
-            producer.poll(0)
+            # IMPORTANT: commit the input offset only after Kafka acked this publish.
+            try:
+                _produce_with_ack(
+                    producer,
+                    topic=TOPIC_TRANSCRIPTS_FINAL,
+                    key=rf.session_id.encode("utf-8"),
+                    value=transcript.SerializeToString(),
+                    timeout_s=FINALIZER_PRODUCE_ACK_TIMEOUT_S,
+                    retries=FINALIZER_PRODUCE_RETRIES,
+                    base_backoff_s=FINALIZER_PRODUCE_RETRY_BACKOFF_S,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to publish final transcript for session=%s; will NOT commit input offset.",
+                    rf.session_id,
+                )
+                # Avoid a hot loop if Kafka is down.
+                time.sleep(1.0)
+                continue
 
-            consumer.commit(msg, asynchronous=True)
+            # If commit fails, we may reprocess (at-least-once). That's preferred over
+            # committing before the output exists.
+            try:
+                consumer.commit(msg, asynchronous=False)
+            except Exception:
+                logger.exception(
+                    "Offset commit failed after successful publish (session=%s). "
+                    "Worker may reprocess this RecordingFinished.",
+                    rf.session_id,
+                )
 
     except KeyboardInterrupt:
         logger.info("Stopping finalizer_worker (KeyboardInterrupt)")
