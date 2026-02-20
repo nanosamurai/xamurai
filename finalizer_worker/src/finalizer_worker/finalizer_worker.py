@@ -9,7 +9,7 @@ from typing import Optional
 from confluent_kafka import Consumer, Producer, KafkaException
 
 from proto_gen import stream_pb2
-from whisperx_worker.whisperx_worker import run_whisperx
+from whisperx_worker.whisperx_worker import run_whisperx_diarized
 
 
 # --------------------------------------------------------------------------- #
@@ -283,12 +283,13 @@ def main():
                 consumer.commit(msg, asynchronous=True)
                 continue
 
-            # Full-session WhisperX with alignment
-            full_text, segments = run_whisperx(
+            # Full-session WhisperX with alignment + optional diarization/enrollment.
+            # Enrollment backend is configured via env (ENROLL_BACKEND=...).
+            full_text, segments = run_whisperx_diarized(
                 wav_path,
-                lang=rf.lang or None,
+                tenant=(rf.tenant_id or None),
+                lang=(rf.lang or None),
                 use_alignment=True,
-                alignment_min_coverage=0.7,
             )
 
             transcript = stream_pb2.SessionTranscript(
