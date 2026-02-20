@@ -79,6 +79,7 @@ def gen_chunks(
             sample_rate=SR,
             pcm16_le=frame.tobytes(),
             lang=lang or "",
+            tenant_id="t-test",
         )
         logger.debug(
             "[test] sending chunk seq=%d samples=%d (%.3fs-%.3fs)",

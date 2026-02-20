@@ -104,8 +104,12 @@ Deliverables:
 - unit tests
 
 Status:
-- [ ] Started
-- [ ] Completed
+- [x] Started
+- [x] Completed
+
+Implemented in:
+- `shared/src/drsynth_common/enrollment/`
+- `tests/test_enrollment_cache_unit.py`
 
 ---
 
