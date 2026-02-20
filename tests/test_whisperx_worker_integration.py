@@ -17,6 +17,7 @@ import importlib.util
 from proto_gen import stream_pb2
 
 _HAS_WHISPERX = importlib.util.find_spec("whisperx") is not None
+_HAS_HF_TOKEN = bool(os.getenv("HF_TOKEN"))
 
 SR = 16000  # must match whisperx_worker.SR
 
@@ -188,3 +189,154 @@ def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
     # Optional extra sanity checks:
     non_empty = [e for e in received_events if e.text.strip()]
     assert non_empty, "Received RefinedEvent(s) but all had empty text"
+
+
+@pytest.mark.timeout(1200)
+@pytest.mark.integration
+@pytest.mark.skipif(not _HAS_WHISPERX, reason="whisperx not installed in this env")
+@pytest.mark.skipif(not _HAS_HF_TOKEN, reason="HF_TOKEN not provided; diarization is disabled")
+def test_whisperx_worker_diarization_and_enrollment_on_test_wav(kafka_bootstrap, tmp_path, monkeypatch):
+    """Stricter E2E test:
+
+    - runs WhisperX worker against real Kafka
+    - enables diarization (requires HF_TOKEN)
+    - enrolls ONLY one speaker (Miro-cz.wav) to make mapping deterministic
+    - asserts at least one emitted RefinedEvent has speaker == "Miro-cz"
+
+    This ensures diarization+enrollment mapping actually runs on the provided sample.
+    """
+
+    topic_audio = "audio.raw.test.diar"
+    topic_refined = "transcripts.refined.test.diar"
+    _ensure_topics(kafka_bootstrap, [topic_audio, topic_refined])
+
+    # Build a valid enrollment WAV on the fly to keep the test self-contained.
+    # The repo's enrolled_speakers/ currently contains placeholder 0-byte wavs.
+    enroll_dir = tmp_path / "enrolled_speakers"
+    enroll_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use the first few seconds of the test wav as the enrollment sample.
+    # This makes it very likely that at least one diarization cluster maps to this embedding.
+    test_wav_path = Path(__file__).parent / "data" / "test_cs.wav"
+    assert test_wav_path.exists(), f"Missing test WAV at {test_wav_path}"
+
+    import soundfile as sf
+
+    x, sr = sf.read(test_wav_path, dtype="float32")
+    if x.ndim > 1:
+        x = x[:, 0]
+
+    # save ~5 seconds as enrollment sample
+    enroll_seconds = 5.0
+    n = int(enroll_seconds * SR)
+
+    # resample if needed (match worker SR)
+    if sr != SR:
+        ratio = SR / float(sr)
+        new_len = int(len(x) * ratio)
+        x_old = np.linspace(0, 1, len(x), endpoint=False)
+        x_new = np.linspace(0, 1, new_len, endpoint=False)
+        x = np.interp(x_new, x_old, x)
+
+    x = x[:n]
+    sf.write(enroll_dir / "Miro-cz.wav", x, SR, subtype="PCM_16")
+
+    os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap
+    os.environ["KAFKA_TOPIC_AUDIO"] = topic_audio
+    os.environ["KAFKA_TOPIC_REFINED"] = topic_refined
+    os.environ["WHISPERX_SLICE_SECONDS"] = "10.0"
+    os.environ["WHISPERX_ENABLE_DIARIZATION"] = "true"
+    os.environ["WHISPERX_DIAR_MODEL"] = "pyannote/speaker-diarization-3.1"
+
+    # Use legacy enrollment dir for deterministic local mapping.
+    os.environ["ENROLL_BACKEND"] = "legacy_dir"
+    os.environ["ENROLL_DIR"] = str(enroll_dir)
+
+    # reduce flakiness: allow any similarity to map (we assert the label itself)
+    os.environ["ENROLL_SIM_THRESHOLD"] = "-1.0"
+
+    # make sure worker re-reads env
+    import importlib
+    from whisperx_worker import whisperx_worker
+
+    importlib.reload(whisperx_worker)
+
+    worker_thread = threading.Thread(
+        target=whisperx_worker.main,
+        name="whisperx-worker-main-diar",
+        daemon=True,
+    )
+    worker_thread.start()
+
+    print("[test] waiting 30s for whisperx_worker (diar) to start up…")
+    time.sleep(30.0)
+
+    session_id = "integration-whisperx-diar-1"
+
+    # Reuse the test wav as the produced audio
+    wav_data, wav_sr = sf.read(test_wav_path)
+    if wav_data.ndim > 1:
+        wav_data = wav_data[:, 0]
+
+    if wav_sr != SR:
+        ratio = SR / float(wav_sr)
+        new_len = int(len(wav_data) * ratio)
+        x_old = np.linspace(0, 1, len(wav_data), endpoint=False)
+        x_new = np.linspace(0, 1, new_len, endpoint=False)
+        wav_data = np.interp(x_new, x_old, wav_data)
+
+    wav_data = wav_data.astype("float32")
+
+    min_seconds = 11.0
+    if len(wav_data) < min_seconds * SR:
+        reps = int(np.ceil((min_seconds * SR) / len(wav_data)))
+        wav_data = np.tile(wav_data, reps)
+
+    wav_data = wav_data[: int(min_seconds * SR)]
+    wav_data = np.clip(wav_data, -1.0, 1.0)
+    pcm16 = (wav_data * 32767.0).astype("<i2")
+
+    audio_chunk = stream_pb2.AudioChunk(
+        session_id=session_id,
+        t0_ns=0,
+        pcm16_le=pcm16.tobytes(),
+        sample_rate=SR,
+        lang="cs",
+        tenant_id="default",
+    )
+
+    producer = _make_producer(kafka_bootstrap)
+    producer.produce(
+        topic=topic_audio,
+        key=session_id.encode("utf-8"),
+        value=audio_chunk.SerializeToString(),
+    )
+    producer.flush(30_000)
+
+    consumer = _make_consumer(kafka_bootstrap, group_id="test-whisperx-consumer-real-diar")
+    consumer.subscribe([topic_refined])
+
+    deadline = time.time() + 240.0
+    seen_speakers = []
+
+    try:
+        while time.time() < deadline:
+            msg = consumer.poll(5.0)
+            if msg is None:
+                continue
+            if msg.error():
+                continue
+
+            ev = stream_pb2.RefinedEvent()
+            ev.ParseFromString(msg.value())
+            seen_speakers.append(ev.speaker)
+            print(f"[test] refined speaker={ev.speaker!r} text={ev.text!r}")
+
+            if ev.speaker == "Miro-cz":
+                return
+    finally:
+        consumer.close()
+
+    raise AssertionError(
+        f"Did not see expected speaker label 'Miro-cz'. Seen speakers: {sorted(set(seen_speakers))}"
+    )

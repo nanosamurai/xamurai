@@ -64,16 +64,22 @@ except Exception:
     pass
 
 try:
-    _orig_torch_load = torch.load
+    # Make this idempotent across module reloads (tests do importlib.reload).
+    # Store the original unwrapped torch.load on the torch module.
+    if not hasattr(torch, "_drsynth_orig_load"):
+        torch._drsynth_orig_load = torch.load  # type: ignore[attr-defined]
 
-    def _torch_load_weights_only_false_default(*args, **kwargs):
-        # Force weights_only=False even if a caller explicitly passes True.
-        # This is required for some Lightning/pyannote checkpoints containing
-        # objects outside the default safe allowlist.
-        kwargs["weights_only"] = False
-        return _orig_torch_load(*args, **kwargs)
+    if getattr(torch.load, "__name__", "") != "_torch_load_weights_only_false_default":
+        _orig_torch_load = torch._drsynth_orig_load  # type: ignore[attr-defined]
 
-    torch.load = _torch_load_weights_only_false_default
+        def _torch_load_weights_only_false_default(*args, **kwargs):
+            # Force weights_only=False even if a caller explicitly passes True.
+            # This is required for some Lightning/pyannote checkpoints containing
+            # objects outside the default safe allowlist.
+            kwargs["weights_only"] = False
+            return _orig_torch_load(*args, **kwargs)
+
+        torch.load = _torch_load_weights_only_false_default
 except Exception:
     pass
 
@@ -195,17 +201,39 @@ def _init_diarization_models() -> None:
 
     diar_model_id = os.getenv(
         "WHISPERX_DIAR_MODEL",
-        "pyannote/speaker-diarization-community-1",
+        # NOTE: pyannote.audio 3.x compatible pipeline id
+        "pyannote/speaker-diarization-3.1",
     ).strip()
 
+    def _load_diar(mid: str):
+        logger.info("Loading diarization pipeline (%s) on %s", mid, _DIAR_DEVICE)
+        # pyannote.audio 3.x uses use_auth_token=... (older versions used token=...)
+        pipe = Pipeline.from_pretrained(mid, use_auth_token=hf_token)
+        pipe.to(torch.device(_DIAR_DEVICE))
+        return pipe
+
     try:
-        logger.info("Loading diarization pipeline (%s) on %s", diar_model_id, _DIAR_DEVICE)
-        _DIAR_PIPE = Pipeline.from_pretrained(diar_model_id, token=hf_token)
-        _DIAR_PIPE.to(torch.device(_DIAR_DEVICE))
+        _DIAR_PIPE = _load_diar(diar_model_id)
     except Exception:
-        logger.warning("Failed to init diarization pipeline; diarization disabled", exc_info=True)
-        _DIAR_PIPE = None
-        return
+        # Compatibility fallback: older/community models may not load under pyannote 3.x.
+        fallback = "pyannote/speaker-diarization-3.1"
+        if diar_model_id != fallback:
+            logger.warning(
+                "Failed to init diarization pipeline (%s); trying fallback %s",
+                diar_model_id,
+                fallback,
+                exc_info=True,
+            )
+            try:
+                _DIAR_PIPE = _load_diar(fallback)
+            except Exception:
+                logger.warning("Failed to init diarization pipeline; diarization disabled", exc_info=True)
+                _DIAR_PIPE = None
+                return
+        else:
+            logger.warning("Failed to init diarization pipeline; diarization disabled", exc_info=True)
+            _DIAR_PIPE = None
+            return
 
     try:
         logger.info("Loading embedding model (pyannote/embedding) on %s", _DIAR_DEVICE)
@@ -373,7 +401,8 @@ def _diarize_audio(audio: np.ndarray) -> List[DiarizationSegment]:
         w = torch.from_numpy(audio.astype(np.float32, copy=False)).unsqueeze(0)
         out = _DIAR_PIPE({"waveform": w, "sample_rate": SR})
         segs: List[DiarizationSegment] = []
-        for turn, spk in out.speaker_diarization:
+        # pyannote returns an Annotation; iterate speaker-labeled segments
+        for turn, _, spk in out.itertracks(yield_label=True):
             segs.append(DiarizationSegment(start_s=float(turn.start), end_s=float(turn.end), speaker=str(spk)))
         return segs
     except Exception:
