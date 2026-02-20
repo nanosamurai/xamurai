@@ -157,6 +157,9 @@ Implemented in:
 Notes:
 - Diarization is best-effort and requires `HF_TOKEN` (pyannote models). If missing, the worker falls back to speaker="".
 - Enrollment mapping supports both legacy local dir (dev) and manifest-based backends via `ENROLL_BACKEND`.
+- Dev/testing:
+  - lightweight unit tests run in `drsynth-bff` (no WhisperX installed)
+  - full integration/E2E should run in `drsynth-whisperx` (or the Docker image)
 
 ---
 
