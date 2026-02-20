@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from confluent_kafka import Producer, Consumer
 
-from conftest import _ensure_topics
+from tests.conftest import _ensure_topics
 
 import importlib.util
 
@@ -18,6 +18,7 @@ from proto_gen import stream_pb2
 
 _HAS_WHISPERX = importlib.util.find_spec("whisperx") is not None
 _HAS_HF_TOKEN = bool(os.getenv("HF_TOKEN"))
+_HAS_BOTO3 = importlib.util.find_spec("boto3") is not None
 
 SR = 16000  # must match whisperx_worker.SR
 
@@ -314,6 +315,168 @@ def test_whisperx_worker_diarization_and_enrollment_on_test_wav(kafka_bootstrap,
     producer.flush(30_000)
 
     consumer = _make_consumer(kafka_bootstrap, group_id="test-whisperx-consumer-real-diar")
+    consumer.subscribe([topic_refined])
+
+    deadline = time.time() + 240.0
+    seen_speakers = []
+
+    try:
+        while time.time() < deadline:
+            msg = consumer.poll(5.0)
+            if msg is None:
+                continue
+            if msg.error():
+                continue
+
+            ev = stream_pb2.RefinedEvent()
+            ev.ParseFromString(msg.value())
+            seen_speakers.append(ev.speaker)
+            print(f"[test] refined speaker={ev.speaker!r} text={ev.text!r}")
+
+            if ev.speaker == "Miro-cz":
+                return
+    finally:
+        consumer.close()
+
+    raise AssertionError(
+        f"Did not see expected speaker label 'Miro-cz'. Seen speakers: {sorted(set(seen_speakers))}"
+    )
+
+
+@pytest.mark.timeout(1500)
+@pytest.mark.integration
+@pytest.mark.skipif(not _HAS_WHISPERX, reason="whisperx not installed in this env")
+@pytest.mark.skipif(not _HAS_HF_TOKEN, reason="HF_TOKEN not provided; diarization is disabled")
+@pytest.mark.skipif(not _HAS_BOTO3, reason="boto3 not installed")
+def test_whisperx_worker_diarization_and_s3_enrollment_on_test_wav(
+    kafka_bootstrap, tmp_path, localstack_s3
+):
+    """Strict E2E test with S3-backed enrollment (LocalStack).
+
+    This validates:
+    - diarization actually runs
+    - enrollment cache loads from S3 manifest backend
+    - emitted RefinedEvent.speaker is the enrolled human label
+
+    Requires Docker (LocalStack + Kafka).
+    """
+
+    from tests._s3_enrollment_testdata import (
+        make_enrollment_wav_from_test_audio,
+        upload_tenant_enrollment_to_s3,
+    )
+
+    # Kafka topics
+    topic_audio = "audio.raw.test.diar.s3"
+    topic_refined = "transcripts.refined.test.diar.s3"
+    _ensure_topics(kafka_bootstrap, [topic_audio, topic_refined])
+
+    # Build enrollment wav + upload to LocalStack S3
+    test_wav_path = Path(__file__).parent / "data" / "test_cs.wav"
+    enroll_wav = tmp_path / "enroll" / "Miro-cz.wav"
+    make_enrollment_wav_from_test_audio(src_wav_path=test_wav_path, out_wav_path=enroll_wav, seconds=5.0)
+
+    import boto3
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=localstack_s3["endpoint_url"],
+        region_name=localstack_s3["region"],
+        aws_access_key_id=localstack_s3["access_key"],
+        aws_secret_access_key=localstack_s3["secret_key"],
+    )
+
+    tenant = "t-test"
+    upload_tenant_enrollment_to_s3(
+        s3_client=s3,
+        bucket=localstack_s3["bucket"],
+        prefix=localstack_s3["prefix"],
+        tenant_id=tenant,
+        speaker_id="spk-1",
+        label="Miro-cz",
+        sample_wav_path=enroll_wav,
+    )
+
+    # Configure worker
+    os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap
+    os.environ["KAFKA_TOPIC_AUDIO"] = topic_audio
+    os.environ["KAFKA_TOPIC_REFINED"] = topic_refined
+    os.environ["WHISPERX_SLICE_SECONDS"] = "10.0"
+    os.environ["WHISPERX_ENABLE_DIARIZATION"] = "true"
+    os.environ["WHISPERX_DIAR_MODEL"] = "pyannote/speaker-diarization-3.1"
+
+    os.environ["ENROLL_BACKEND"] = "s3_manifest"
+    os.environ["ENROLL_S3_BUCKET"] = localstack_s3["bucket"]
+    os.environ["ENROLL_S3_PREFIX"] = localstack_s3["prefix"]
+    os.environ["ENROLL_S3_ENDPOINT"] = localstack_s3["endpoint_url"]
+    os.environ["ENROLL_S3_REGION"] = localstack_s3["region"]
+    os.environ["ENROLL_S3_ACCESS_KEY"] = localstack_s3["access_key"]
+    os.environ["ENROLL_S3_SECRET_KEY"] = localstack_s3["secret_key"]
+    os.environ["ENROLL_S3_FORCE_PATH_STYLE"] = "true"
+
+    # make mapping permissive
+    os.environ["ENROLL_SIM_THRESHOLD"] = "-1.0"
+
+    # make sure worker re-reads env
+    import importlib
+    from whisperx_worker import whisperx_worker
+
+    importlib.reload(whisperx_worker)
+
+    worker_thread = threading.Thread(
+        target=whisperx_worker.main,
+        name="whisperx-worker-main-diar-s3",
+        daemon=True,
+    )
+    worker_thread.start()
+
+    print("[test] waiting 30s for whisperx_worker (diar+s3) to start up…")
+    time.sleep(30.0)
+
+    session_id = "integration-whisperx-diar-s3-1"
+
+    import soundfile as sf
+
+    wav_data, wav_sr = sf.read(test_wav_path)
+    if wav_data.ndim > 1:
+        wav_data = wav_data[:, 0]
+
+    if wav_sr != SR:
+        ratio = SR / float(wav_sr)
+        new_len = int(len(wav_data) * ratio)
+        x_old = np.linspace(0, 1, len(wav_data), endpoint=False)
+        x_new = np.linspace(0, 1, new_len, endpoint=False)
+        wav_data = np.interp(x_new, x_old, wav_data)
+
+    wav_data = wav_data.astype("float32")
+
+    min_seconds = 11.0
+    if len(wav_data) < min_seconds * SR:
+        reps = int(np.ceil((min_seconds * SR) / len(wav_data)))
+        wav_data = np.tile(wav_data, reps)
+
+    wav_data = wav_data[: int(min_seconds * SR)]
+    wav_data = np.clip(wav_data, -1.0, 1.0)
+    pcm16 = (wav_data * 32767.0).astype("<i2")
+
+    audio_chunk = stream_pb2.AudioChunk(
+        session_id=session_id,
+        t0_ns=0,
+        pcm16_le=pcm16.tobytes(),
+        sample_rate=SR,
+        lang="cs",
+        tenant_id=tenant,
+    )
+
+    producer = _make_producer(kafka_bootstrap)
+    producer.produce(
+        topic=topic_audio,
+        key=session_id.encode("utf-8"),
+        value=audio_chunk.SerializeToString(),
+    )
+    producer.flush(30_000)
+
+    consumer = _make_consumer(kafka_bootstrap, group_id="test-whisperx-consumer-real-diar-s3")
     consumer.subscribe([topic_refined])
 
     deadline = time.time() + 240.0

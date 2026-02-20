@@ -269,12 +269,33 @@ class RealtimeModelBundle:
             compute_type="float16" if torch.cuda.is_available() else "int8_float32",
         )
 
-        logger.info("Initializing pyannote Community-1 diarization on %s", device)
-        self._pipe = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-community-1",
-            token=hf_token,
-        )
-        self._pipe.to(torch.device(device))
+        diar_model_id = os.getenv(
+            "RT_DIAR_MODEL",
+            # pyannote.audio 3.x compatible pipeline id
+            "pyannote/speaker-diarization-3.1",
+        ).strip()
+
+        def _load_pipe(mid: str):
+            logger.info("Initializing diarization pipeline (%s) on %s", mid, device)
+            # pyannote.audio 4.x uses `token=` (not `use_auth_token=`)
+            pipe = Pipeline.from_pretrained(mid, token=hf_token)
+            pipe.to(torch.device(device))
+            return pipe
+
+        try:
+            self._pipe = _load_pipe(diar_model_id)
+        except Exception:
+            fallback = "pyannote/speaker-diarization-3.1"
+            if diar_model_id != fallback:
+                logger.warning(
+                    "Failed to init diarization pipeline (%s); trying fallback %s",
+                    diar_model_id,
+                    fallback,
+                    exc_info=True,
+                )
+                self._pipe = _load_pipe(fallback)
+            else:
+                raise
 
         # VAD
         self._vad_model = None
@@ -301,7 +322,7 @@ class RealtimeModelBundle:
         if USE_SPEAKER_ENROLLMENT:
             try:
                 logger.info("Initializing pyannote/embedding for enrollment on %s", device)
-                emb_model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token)
+                emb_model = Model.from_pretrained("pyannote/embedding", token=hf_token)
                 self._embedding_infer = EmbeddingInference(emb_model, window="whole")
             except Exception as e:
                 logger.warning("Failed to load embedding model: %s", e)
@@ -353,8 +374,14 @@ class RealtimeModelBundle:
 
         w = torch.from_numpy(wave.copy()).unsqueeze(0)
         out = self._pipe({"waveform": w, "sample_rate": self._cfg.sr})
+
+        # pyannote.audio 4.x returns DiarizeOutput with an Annotation in `.speaker_diarization`
+        diar = getattr(out, "speaker_diarization", None)
         segs: List[DiarSeg] = []
-        for turn, spk in out.speaker_diarization:
+        if diar is None:
+            return segs
+
+        for turn, _, spk in diar.itertracks(yield_label=True):
             segs.append({"start": float(turn.start), "end": float(turn.end), "speaker": str(spk)})
         return segs
 

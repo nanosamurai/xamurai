@@ -10,7 +10,7 @@ import importlib.util
 import pytest
 from confluent_kafka import Consumer, Producer
 
-from conftest import _ensure_topics
+from tests.conftest import _ensure_topics
 
 from proto_gen import stream_pb2
 

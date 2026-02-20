@@ -22,6 +22,7 @@ _HAS_TORCH = importlib.util.find_spec("torch") is not None
 _HAS_PYANNOTE = importlib.util.find_spec("pyannote") is not None
 _HAS_FASTER_WHISPER = importlib.util.find_spec("faster_whisper") is not None
 _HAS_HF_TOKEN = bool(os.getenv("HF_TOKEN"))
+_HAS_BOTO3 = importlib.util.find_spec("boto3") is not None
 
 pytestmark = pytest.mark.skipif(
     not (_HAS_TORCH and _HAS_PYANNOTE and _HAS_FASTER_WHISPER and _HAS_HF_TOKEN),
@@ -61,6 +62,7 @@ def gen_chunks(
     audio: np.ndarray,
     lang: str = "cs",
     chunk_samples: int = CHUNK_SAMPLES,
+    tenant_id: str = "t-test",
 ) -> Iterable[stream_pb2.AudioChunk]:
     """
     Turn a mono 16k float32 waveform into a stream of AudioChunk messages.
@@ -79,7 +81,7 @@ def gen_chunks(
             sample_rate=SR,
             pcm16_le=frame.tobytes(),
             lang=lang or "",
-            tenant_id="t-test",
+            tenant_id=tenant_id,
         )
         logger.debug(
             "[test] sending chunk seq=%d samples=%d (%.3fs-%.3fs)",
@@ -97,6 +99,7 @@ def gen_chunks(
         sample_rate=SR,
         pcm16_le=b"",
         lang=lang or "",
+        tenant_id=tenant_id,
     )
     logger.debug("[test] sent final chunk seq=%d", seq + 1)
 
@@ -204,3 +207,84 @@ def test_realtime_asr_stream(grpc_channel):
     total_chars = sum(len(ev.text) for ev in events)
     logger.info("[test-stream] total AsrEvents=%d total_chars=%d", len(events), total_chars)
     assert total_chars > 0, f"Expected non-empty text, got total_chars={total_chars}"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _HAS_HF_TOKEN, reason="requires HF_TOKEN")
+@pytest.mark.skipif(not _HAS_BOTO3, reason="boto3 not installed")
+def test_realtime_asr_stream_s3_enrollment(localstack_s3, tmp_path):
+    """Integration test: rtservice loads enrolled speakers from S3 (LocalStack).
+
+    This ensures multi-tenant enrollment works without relying on local filesystem.
+
+    Requires Docker (LocalStack). Uses in-process gRPC server.
+    """
+
+    # Upload tenant enrollment to LocalStack
+    from tests._s3_enrollment_testdata import (
+        make_enrollment_wav_from_test_audio,
+        upload_tenant_enrollment_to_s3,
+    )
+
+    import boto3
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=localstack_s3["endpoint_url"],
+        region_name=localstack_s3["region"],
+        aws_access_key_id=localstack_s3["access_key"],
+        aws_secret_access_key=localstack_s3["secret_key"],
+    )
+
+    tenant = "t-test"
+    test_wav_path = Path(__file__).parent / "data" / "test_cs.wav"
+
+    # Create enrollment wav from the same test audio
+    enroll_wav = tmp_path / "enroll" / "Miro-cz.wav"
+    make_enrollment_wav_from_test_audio(src_wav_path=test_wav_path, out_wav_path=enroll_wav, seconds=5.0)
+
+    upload_tenant_enrollment_to_s3(
+        s3_client=s3,
+        bucket=localstack_s3["bucket"],
+        prefix=localstack_s3["prefix"],
+        tenant_id=tenant,
+        speaker_id="spk-1",
+        label="Miro-cz",
+        sample_wav_path=enroll_wav,
+    )
+
+    # Configure rtservice enrollment backend via env (engine reads env at init)
+    os.environ["ENROLL_BACKEND"] = "s3_manifest"
+    os.environ["ENROLL_S3_BUCKET"] = localstack_s3["bucket"]
+    os.environ["ENROLL_S3_PREFIX"] = localstack_s3["prefix"]
+    os.environ["ENROLL_S3_ENDPOINT"] = localstack_s3["endpoint_url"]
+    os.environ["ENROLL_S3_REGION"] = localstack_s3["region"]
+    os.environ["ENROLL_S3_ACCESS_KEY"] = localstack_s3["access_key"]
+    os.environ["ENROLL_S3_SECRET_KEY"] = localstack_s3["secret_key"]
+    os.environ["ENROLL_S3_FORCE_PATH_STYLE"] = "true"
+
+    # diarization model compatible with pyannote 3.x
+    os.environ["RT_DIAR_MODEL"] = "pyannote/speaker-diarization-3.1"
+
+    # make mapping permissive
+    os.environ["ENROLL_SIM_THRESHOLD"] = "-1.0"
+
+    # Start gRPC server with a freshly initialized engine
+    server = create_realtime_asr_server(port=50053)
+    t = threading.Thread(target=server.start, daemon=True)
+    t.start()
+    time.sleep(1.0)
+
+    try:
+        with grpc.insecure_channel("localhost:50053") as channel:
+            stub = stream_pb2_grpc.RealtimeASRStub(channel)
+
+            audio = load_audio_mono_16k(test_wav_path)
+            events: List[stream_pb2.AsrEvent] = list(stub.Stream(gen_chunks("test-grpc-s3", audio, tenant_id=tenant)))
+
+        assert events, "Expected some AsrEvents"
+        speakers = {e.speaker for e in events if e.speaker}
+        assert "Miro-cz" in speakers, f"Expected Miro-cz in speakers, got {sorted(speakers)}"
+    finally:
+        server.stop(grace=5.0)
+        t.join(timeout=5.0)
