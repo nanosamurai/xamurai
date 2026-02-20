@@ -124,8 +124,17 @@ Deliverables:
 - integration tests: concurrent sessions do not contaminate each other
 
 Status:
-- [ ] Started
-- [ ] Completed
+- [x] Started
+- [x] Completed
+
+Implemented in:
+- `rtservice/src/rtservice/engine.py`
+- `rtservice/src/rtservice/server.py`
+- `tests/test_rtservice_session_isolation_unit.py`
+
+Notes:
+- The engine now keys per-session state by `(tenant_id, session_id)` to avoid collisions.
+- `AudioChunk.tenant_id` is now passed from gRPC into the engine.
 
 ---
 
