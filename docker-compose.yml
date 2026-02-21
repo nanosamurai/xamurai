@@ -36,6 +36,27 @@ services:
       - 39092:39092
       - 49092:49092
 
+  # -------------------- LocalStack (S3 for enrollment, persistent) --------------------
+  localstack:
+    image: localstack/localstack:latest
+    container_name: nanosamurai-localstack
+    restart: unless-stopped
+    ports:
+      - 4566:4566
+    environment:
+      SERVICES: s3
+      DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      EAGER_SERVICE_LOADING: 1
+      PERSISTENCE: 1
+      DATA_DIR: /var/lib/localstack
+      # used by init script
+      XAMURAI_ENROLLMENT_BUCKET: xamurai-enrollment
+    volumes:
+      - nanosamurai_localstack:/var/lib/localstack
+      - ./docker/localstack/init:/etc/localstack/init/ready.d:ro
+
   # -------------------- Postgres --------------------
   postgres:
     image: postgres:18.1-alpine
@@ -163,7 +184,18 @@ services:
       HF_TOKEN: ${HF_TOKEN:?set HF_TOKEN in your environment}
       # HuggingFace cache location (container runs as non-root user)
       HF_HOME: /data/hf_cache
-      # Optional
+
+      # Enrollment (multi-tenant, S3-backed)
+      ENROLL_BACKEND: s3_manifest
+      ENROLL_S3_ENDPOINT: http://localstack:4566
+      ENROLL_S3_BUCKET: xamurai-enrollment
+      ENROLL_S3_PREFIX: enrollment
+      ENROLL_S3_REGION: us-east-1
+      ENROLL_S3_ACCESS_KEY: test
+      ENROLL_S3_SECRET_KEY: test
+      ENROLL_S3_FORCE_PATH_STYLE: "true"
+
+      # Optional legacy dev path
       ENROLL_DIR: /app/enrolled_speakers
       FW_LANG_DEFAULT: ""
     # Persist HF caches so the *first* startup is slow, subsequent restarts are fast.
@@ -191,6 +223,16 @@ services:
       WHISPERX_SLICE_SECONDS: "60.0"
       WHISPERX_IDLE_SECONDS: "30.0"
       WHISPERX_COMPUTE_TYPE: ""
+
+      # Enrollment (multi-tenant, S3-backed)
+      ENROLL_BACKEND: s3_manifest
+      ENROLL_S3_ENDPOINT: http://localstack:4566
+      ENROLL_S3_BUCKET: xamurai-enrollment
+      ENROLL_S3_PREFIX: enrollment
+      ENROLL_S3_REGION: us-east-1
+      ENROLL_S3_ACCESS_KEY: test
+      ENROLL_S3_SECRET_KEY: test
+      ENROLL_S3_FORCE_PATH_STYLE: "true"
     volumes:
       - drsynth_hf_cache:/data/hf_cache
     depends_on:
@@ -238,6 +280,17 @@ services:
       KAFKA_GROUP_ID_FINALIZER: finalizer-worker
       # HuggingFace cache location (container runs as non-root user)
       HF_HOME: /data/hf_cache
+
+      # Enrollment (multi-tenant, S3-backed)
+      ENROLL_BACKEND: s3_manifest
+      ENROLL_S3_ENDPOINT: http://localstack:4566
+      ENROLL_S3_BUCKET: xamurai-enrollment
+      ENROLL_S3_PREFIX: enrollment
+      ENROLL_S3_REGION: us-east-1
+      ENROLL_S3_ACCESS_KEY: test
+      ENROLL_S3_SECRET_KEY: test
+      ENROLL_S3_FORCE_PATH_STYLE: "true"
+
       # Uses file:// URLs so it needs the same volume as recorder_worker
       RECORDINGS_DIR: /data/recordings
       # Allow long processing time per message (full session + model downloads)
@@ -263,6 +316,15 @@ services:
     environment:
       SAMURAIBFF_HTTP_HOST: 0.0.0.0
       SAMURAIBFF_HTTP_PORT: 8000
+
+      # Enrollment storage (LocalStack S3)
+      SAMURAIBFF_S3_ENDPOINT: http://localstack:4566
+      SAMURAIBFF_S3_BUCKET: xamurai-enrollment
+      SAMURAIBFF_S3_ENROLLMENT_PREFIX: enrollment
+      SAMURAIBFF_S3_REGION: us-east-1
+      SAMURAIBFF_S3_ACCESS_KEY: test
+      SAMURAIBFF_S3_SECRET_KEY: test
+      SAMURAIBFF_S3_FORCE_PATH_STYLE: "true"
 
       SAMURAIBFF_DB_JDBC_URL: jdbc:postgresql://postgres:5432/drsynth
       SAMURAIBFF_DB_USERNAME: drsynth
@@ -331,6 +393,7 @@ volumes:
   drsynth_pgdata:
   drsynth_recordings:
   drsynth_hf_cache:
+  nanosamurai_localstack:
 
 # Within the Kafka image, for testing create following topics:
 #/ $ cd /opt/kafka/bin/
