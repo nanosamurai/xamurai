@@ -172,8 +172,8 @@ Deliverables:
 - populate `SessionTranscriptSegment.speaker`
 
 Status:
-- [ ] Started
-- [ ] Completed
+- [x] Started
+- [x] Completed
 
 ---
 
