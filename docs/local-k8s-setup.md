@@ -112,13 +112,24 @@ minikube image load samuraipersistor:local
 # (Images are already in the Docker Desktop engine; no extra load step needed.)
 
 # IMPORTANT: If you rebuild an image but keep the same tag (e.g. :local),
-# Kubernetes will not automatically restart pods.
+#Docker Desktop's k8s (if you are using kind) might not automatically pull the image, force upload them to kind's docker image like this:
+REM --- core services ---
+docker save drsynth-rtservice:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save drsynth-recorder-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save drsynth-finalizer-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save drsynth-whisperx-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+
+REM --- if you also build/pin these locally (only include if you have local tags) ---
+REM docker save drsynth-samuraibff:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+REM docker save drsynth-samuraipersistor:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+
+# Kubernetes will also not automatically restart pods.
 # Force a restart to pick up rebuilt images:
 #   kubectl rollout restart deploy/nanosamurai-stack-finalizer-worker
 #   kubectl rollout restart deploy/nanosamurai-stack-whisperx-worker
 ```
 
-### Option B: build directly into minikube Docker daemon (minikube only)
+### Option B (for minikube only): build directly into minikube Docker daemon (minikube only)
 
 ```bash
 minikube -p minikube docker-env
@@ -190,6 +201,16 @@ NodePort (optional):
 
 ## 6) Stop / cleanup (important on laptops)
 
+### Docker Desktop
+
+```bash
+#To stop:
+helm uninstall nanosamurai-stack
+#To start again:
+helm install nanosamurai-stack .\charts\nanosamurai-stack -f .\charts\nanosamurai-stack\values.local.docker-desktop.yaml
+```
+
+### Minikube
 If you used **minikube in WSL2**, stop it when you’re done so it doesn’t keep consuming CPU/RAM:
 
 ```bash
