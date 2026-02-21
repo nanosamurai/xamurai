@@ -107,7 +107,7 @@ curl -X POST http://localhost:8000/api/sessions
 
 ---
 
-## 2) Mode B — Docker Compose infra + Minikube apps
+## 2) Mode B — Docker Compose infra + K8s apps
 
 This runs **Kafka + Postgres** in Docker Compose and deploys app services to local Kubernetes using the Helm chart in `charts/nanosamurai-stack`.
 
