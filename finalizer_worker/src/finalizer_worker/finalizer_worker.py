@@ -245,6 +245,21 @@ def _produce_with_ack(
 def main():
     logger.info("Starting finalizer_worker")
 
+    import torch
+
+    if not torch.cuda.is_available():
+        logger.warning(
+            "finalizer_worker: CUDA not available; running on CPU (torch=%s torch.version.cuda=%s)",
+            getattr(torch, "__version__", "unknown"),
+            getattr(getattr(torch, "version", None), "cuda", None),
+        )
+    else:
+        logger.info(
+            "finalizer_worker: CUDA available; will use GPU (torch=%s torch.version.cuda=%s)",
+            getattr(torch, "__version__", "unknown"),
+            getattr(getattr(torch, "version", None), "cuda", None),
+        )
+
     consumer = make_consumer()
     producer = make_producer()
     consumer.subscribe([TOPIC_RECORDING_FINISHED])
