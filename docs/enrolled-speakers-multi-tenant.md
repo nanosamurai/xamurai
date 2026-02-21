@@ -65,7 +65,7 @@ We store enrollment data under a tenant prefix:
        <sample_id>.wav
 ```
 
-Optional (recommended) listing index:
+Optional listing index (could be problematic due to concurrency issues):
 
 ```
  s3://<bucket>/<enrollment_prefix>/<tenant_id>/speakers/index.json
