@@ -822,6 +822,19 @@ def make_producer() -> Producer:
 def main():
     logger.info("Starting whisperx_worker")
 
+    if not torch.cuda.is_available():
+        logger.warning(
+            "whisperx_worker: CUDA not available; running on CPU (torch=%s torch.version.cuda=%s)",
+            getattr(torch, "__version__", "unknown"),
+            getattr(getattr(torch, "version", None), "cuda", None),
+        )
+    else:
+        logger.info(
+            "whisperx_worker: CUDA available; will use GPU (torch=%s torch.version.cuda=%s)",
+            getattr(torch, "__version__", "unknown"),
+            getattr(getattr(torch, "version", None), "cuda", None),
+        )
+
     try:
         _init_whisperx()
     except Exception as e:
