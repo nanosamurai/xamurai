@@ -262,6 +262,19 @@ class RealtimeModelBundle:
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+        if not torch.cuda.is_available():
+            logger.warning(
+                "rtservice: CUDA not available; running on CPU (torch=%s torch.version.cuda=%s)",
+                getattr(torch, "__version__", "unknown"),
+                getattr(getattr(torch, "version", None), "cuda", None),
+            )
+        else:
+            logger.info(
+                "rtservice: CUDA available; will use GPU (torch=%s torch.version.cuda=%s)",
+                getattr(torch, "__version__", "unknown"),
+                getattr(getattr(torch, "version", None), "cuda", None),
+            )
+
         logger.info("Initializing Faster-Whisper 'medium' on %s", device)
         self._asr = WhisperModel(
             "medium",
