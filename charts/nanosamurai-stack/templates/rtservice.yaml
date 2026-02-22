@@ -37,7 +37,18 @@ spec:
             - name: FW_LANG_DEFAULT
               value: ""
 
-            {{- if .Values.rtservice.hfToken }}
+            {{- if .Values.hfCache.enabled }}
+            - name: HF_HOME
+              value: {{ .Values.hfCache.mountPath | quote }}
+            {{- end }}
+
+            {{- if .Values.rtservice.hfTokenSecret.name }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.rtservice.hfTokenSecret.name | quote }}
+                  key: {{ .Values.rtservice.hfTokenSecret.key | default "HF_TOKEN" | quote }}
+            {{- else if .Values.rtservice.hfToken }}
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -69,6 +80,18 @@ spec:
             limits:
               nvidia.com/gpu: {{ .Values.rtservice.gpu.count }}
           {{- end }}
+
+          {{- if .Values.hfCache.enabled }}
+          volumeMounts:
+            - name: hf-cache
+              mountPath: {{ .Values.hfCache.mountPath | quote }}
+          {{- end }}
+      {{- if .Values.hfCache.enabled }}
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: {{ include "nanosamurai-stack.fullname" . }}-hf-cache-pvc
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
