@@ -47,6 +47,15 @@ spec:
             - name: SP_KAFKA_TOPIC_DLQ
               value: "transcripts.persistor.dlq"
 
+          # Persistor can take a bit to warm up (DB + Kafka connections).
+          # Use a startupProbe so the liveness probe doesn't kill it prematurely.
+          startupProbe:
+            httpGet:
+              path: {{ .Values.persistor.probes.livenessPath | default "/health" | quote }}
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60 # ~5 minutes
+
           readinessProbe:
             httpGet:
               path: {{ .Values.persistor.probes.readinessPath | default "/ready" | quote }}
