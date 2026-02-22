@@ -40,7 +40,7 @@ spec:
             - name: SAMURAIBFF_KAFKA_BOOTSTRAP_SERVERS
               value: {{ .Values.infra.kafkaBootstrapServers | quote }}
             - name: SAMURAIBFF_GRPC_RTSERVICE_ADDR
-              value: "{{ include \"drsynth-stack.fullname\" . }}-rtservice:50052"
+              value: {{ printf "%s-rtservice:50052" (include "drsynth-stack.fullname" .) | quote }}
 
             - name: SAMURAIBFF_AUTH_REQUIRED
               value: {{ ternary "true" "false" .Values.bff.auth.required | quote }}
