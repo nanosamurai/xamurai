@@ -323,6 +323,36 @@ resources:
 
 ## Tests
 
+### LocalStack-backed enrollment integration tests (S3)
+
+These tests validate that **whisperx_worker** and **rtservice** can load per-tenant enrolled speakers from an S3-compatible backend.
+Locally we run S3 using **LocalStack** (`localstack/localstack`) via **testcontainers**, so you only need Docker running.
+
+Prereqs:
+- Docker Desktop running
+- `HF_TOKEN` set (pyannote models)
+
+Run WhisperX worker strict S3 enrollment test:
+```bat
+conda run -n drsynth-whisperx python -m pytest -q -m integration \
+  tests/test_whisperx_worker_integration.py::test_whisperx_worker_diarization_and_s3_enrollment_on_test_wav
+```
+
+Run rtservice strict S3 enrollment gRPC test:
+```bat
+conda run -n drsynth-rtservice python -m pytest -q -m integration \
+  tests/test_realtime_asr_grpc.py::test_realtime_asr_stream_s3_enrollment
+```
+
+Notes:
+- Both tests create a tenant enrollment structure under:
+  `s3://<bucket>/<prefix>/<tenant_id>/speakers/<speaker_id>/speaker.json`
+  with samples under `.../samples/*.wav`.
+- Default test bucket/prefix can be overridden with:
+  `TEST_ENROLL_S3_BUCKET`, `TEST_ENROLL_S3_PREFIX`, `TEST_AWS_REGION`.
+
+## Tests
+
 ### Integration tests
 
 Integration tests run Kafka via Testcontainers and execute real worker codepaths.

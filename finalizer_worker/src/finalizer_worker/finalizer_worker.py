@@ -9,7 +9,7 @@ from typing import Optional
 from confluent_kafka import Consumer, Producer, KafkaException
 
 from proto_gen import stream_pb2
-from whisperx_worker.whisperx_worker import run_whisperx
+from whisperx_worker.whisperx_worker import run_whisperx_diarized
 
 
 # --------------------------------------------------------------------------- #
@@ -245,6 +245,21 @@ def _produce_with_ack(
 def main():
     logger.info("Starting finalizer_worker")
 
+    import torch
+
+    if not torch.cuda.is_available():
+        logger.warning(
+            "finalizer_worker: CUDA not available; running on CPU (torch=%s torch.version.cuda=%s)",
+            getattr(torch, "__version__", "unknown"),
+            getattr(getattr(torch, "version", None), "cuda", None),
+        )
+    else:
+        logger.info(
+            "finalizer_worker: CUDA available; will use GPU (torch=%s torch.version.cuda=%s)",
+            getattr(torch, "__version__", "unknown"),
+            getattr(getattr(torch, "version", None), "cuda", None),
+        )
+
     consumer = make_consumer()
     producer = make_producer()
     consumer.subscribe([TOPIC_RECORDING_FINISHED])
@@ -283,12 +298,13 @@ def main():
                 consumer.commit(msg, asynchronous=True)
                 continue
 
-            # Full-session WhisperX with alignment
-            full_text, segments = run_whisperx(
+            # Full-session WhisperX with alignment + optional diarization/enrollment.
+            # Enrollment backend is configured via env (ENROLL_BACKEND=...).
+            full_text, segments = run_whisperx_diarized(
                 wav_path,
-                lang=rf.lang or None,
+                tenant=(rf.tenant_id or None),
+                lang=(rf.lang or None),
                 use_alignment=True,
-                alignment_min_coverage=0.7,
             )
 
             transcript = stream_pb2.SessionTranscript(

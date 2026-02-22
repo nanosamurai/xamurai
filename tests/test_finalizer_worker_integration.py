@@ -10,13 +10,15 @@ import importlib.util
 import pytest
 from confluent_kafka import Consumer, Producer
 
-from conftest import _ensure_topics
+from tests.conftest import _ensure_topics
 
 from proto_gen import stream_pb2
 
 SR = 16000
 
 _HAS_WHISPERX = importlib.util.find_spec("whisperx") is not None
+_HAS_HF_TOKEN = bool(os.getenv("HF_TOKEN"))
+_HAS_BOTO3 = importlib.util.find_spec("boto3") is not None
 
 
 def _make_producer(bootstrap: str) -> Producer:
@@ -189,3 +191,149 @@ def test_finalizer_worker_writes_json_and_emits_event(
     assert ft.session_id == session_id
     assert ft.recording_url == recording_url
     assert len(ft.segments) > 0
+
+
+@pytest.mark.timeout(1200)
+@pytest.mark.integration
+@pytest.mark.skipif(not _HAS_WHISPERX, reason="whisperx not installed in this env")
+@pytest.mark.skipif(not _HAS_HF_TOKEN, reason="HF_TOKEN not provided; diarization is disabled")
+@pytest.mark.skipif(not _HAS_BOTO3, reason="boto3 not installed")
+def test_finalizer_worker_s3_enrollment_speaker_labels(
+    tmp_path: Path,
+    kafka_bootstrap: str,
+    localstack_s3,
+):
+    """Strict integration test for finalizer_worker with S3-backed enrollment.
+
+    Validates:
+    - finalizer_worker uses tenant_id from RecordingFinished
+    - loads enrolled speakers from S3 manifest backend (LocalStack)
+    - emits SessionTranscript with at least one segment speaker == "Miro-cz"
+
+    Requires Docker (Kafka + LocalStack).
+    """
+
+    from tests._s3_enrollment_testdata import (
+        make_enrollment_wav_from_test_audio,
+        upload_tenant_enrollment_to_s3,
+    )
+
+    # Topics
+    topic_recording_finished = "recordings.finished.test.s3enroll"
+    topic_session_transcripts = "transcripts.final.test.s3enroll"
+    _ensure_topics(kafka_bootstrap, [topic_recording_finished, topic_session_transcripts])
+
+    # Configure env BEFORE importing worker
+    os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap
+    os.environ["KAFKA_TOPIC_RECORDING_FINISHED"] = topic_recording_finished
+    os.environ["KAFKA_TOPIC_TRANSCRIPTS_FINAL"] = topic_session_transcripts
+    os.environ["KAFKA_GROUP_ID_FINALIZER"] = "finalizer-worker-test-s3enroll"
+
+    os.environ["WHISPERX_ENABLE_DIARIZATION"] = "true"
+    os.environ["WHISPERX_DIAR_MODEL"] = "pyannote/speaker-diarization-3.1"
+
+    # S3 enrollment backend
+    os.environ["ENROLL_BACKEND"] = "s3_manifest"
+    os.environ["ENROLL_S3_BUCKET"] = localstack_s3["bucket"]
+    os.environ["ENROLL_S3_PREFIX"] = localstack_s3["prefix"]
+    os.environ["ENROLL_S3_ENDPOINT"] = localstack_s3["endpoint_url"]
+    os.environ["ENROLL_S3_REGION"] = localstack_s3["region"]
+    os.environ["ENROLL_S3_ACCESS_KEY"] = localstack_s3["access_key"]
+    os.environ["ENROLL_S3_SECRET_KEY"] = localstack_s3["secret_key"]
+    os.environ["ENROLL_S3_FORCE_PATH_STYLE"] = "true"
+
+    # reduce flakiness: accept any similarity
+    os.environ["ENROLL_SIM_THRESHOLD"] = "-1.0"
+
+    # Prepare WAV
+    session_id = "finalizer-integration-s3enroll-1"
+    tenant = "t-test"
+
+    src_wav = Path(__file__).parent / "data" / "test_cs.wav"
+    dst_wav = tmp_path / f"{session_id}.wav"
+    dst_wav.write_bytes(src_wav.read_bytes())
+    recording_url = f"file://{dst_wav}"
+
+    # Upload tenant enrollment to LocalStack
+    import boto3
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=localstack_s3["endpoint_url"],
+        region_name=localstack_s3["region"],
+        aws_access_key_id=localstack_s3["access_key"],
+        aws_secret_access_key=localstack_s3["secret_key"],
+    )
+
+    enroll_wav = tmp_path / "enroll" / "Miro-cz.wav"
+    make_enrollment_wav_from_test_audio(src_wav_path=src_wav, out_wav_path=enroll_wav, seconds=5.0)
+    upload_tenant_enrollment_to_s3(
+        s3_client=s3,
+        bucket=localstack_s3["bucket"],
+        prefix=localstack_s3["prefix"],
+        tenant_id=tenant,
+        speaker_id="spk-1",
+        label="Miro-cz",
+        sample_wav_path=enroll_wav,
+    )
+
+    # Start worker
+    import importlib
+    from finalizer_worker import finalizer_worker  # type: ignore
+
+    importlib.reload(finalizer_worker)
+
+    worker_thread = threading.Thread(
+        target=finalizer_worker.main,
+        name="finalizer-worker-main-s3enroll",
+        daemon=True,
+    )
+    worker_thread.start()
+
+    time.sleep(2.0)
+
+    # Produce RecordingFinished
+    event = stream_pb2.RecordingFinished(
+        session_id=session_id,
+        recording_url=recording_url,
+        duration_s=20.0,
+        sample_rate=SR,
+        lang="cs",
+        tenant_id=tenant,
+        created_at_ns=time.time_ns(),
+    )
+
+    producer = _make_producer(kafka_bootstrap)
+    producer.produce(
+        topic=topic_recording_finished,
+        key=session_id.encode("utf-8"),
+        value=event.SerializeToString(),
+    )
+    producer.flush(30_000)
+
+    # Consume SessionTranscript
+    consumer = _make_consumer(kafka_bootstrap, group_id="test-finalizer-consumer-s3enroll")
+    consumer.subscribe([topic_session_transcripts])
+
+    ft: stream_pb2.SessionTranscript | None = None
+    deadline = time.time() + 240.0
+
+    try:
+        while time.time() < deadline:
+            msg = consumer.poll(5.0)
+            if msg is None:
+                continue
+            if msg.error():
+                continue
+            ev = stream_pb2.SessionTranscript()
+            ev.ParseFromString(msg.value())
+            if ev.session_id != session_id:
+                continue
+            ft = ev
+            break
+    finally:
+        consumer.close()
+
+    assert ft is not None, "Did not receive SessionTranscript"
+    speakers = {s.speaker for s in ft.segments if s.speaker}
+    assert "Miro-cz" in speakers, f"Expected Miro-cz in speakers, got {sorted(speakers)}"

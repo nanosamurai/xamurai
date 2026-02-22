@@ -47,8 +47,15 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                 lang,
             )
 
+            tenant_id = getattr(chunk, "tenant_id", "") or None
+
             # Feed into realtime engine
-            results = self._engine.feed(session_id, chunk.pcm16_le, lang=lang)
+            results = self._engine.feed(
+                session_id,
+                chunk.pcm16_le,
+                lang=lang,
+                tenant_id=tenant_id,
+            )
 
             # Fan out final events
             for r in results:

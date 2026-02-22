@@ -1,47 +1,59 @@
+import io
+import logging
 import os
 import threading
-import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
-import torch
 import soundfile as sf
-from faster_whisper import WhisperModel
-from pyannote.audio import Pipeline, Model
-from pyannote.audio import Inference as EmbeddingInference
 
-# NOTE: the Python BFF package has been removed from this repo.
-# rtservice should not depend on bff settings; keep SR fixed at 16k for now.
 from proto_gen import stream_pb2
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Constants / defaults
+# ---------------------------------------------------------------------------
+
 SR = 16000
-BLOCK = 2048                  # processing block (samples @16k)
-WINDOW_SEC = 5.0              # diarization/ASR window size
-OVERLAP_SEC = 0.5             # overlap between windows
+WINDOW_SEC = 5.0
+OVERLAP_SEC = 0.5
 HOP_SEC = WINDOW_SEC - OVERLAP_SEC
 
-# default language; can be overridden per-session
-DEFAULT_LANG = os.getenv("FW_LANG_DEFAULT", None)   # "cs", "en", or None
+DEFAULT_LANG = os.getenv("FW_LANG_DEFAULT", None)  # per-session override still possible
 
-FINALIZE_MIN_DUR_SEC = 0.25   # ignore tiny segments
+FINALIZE_MIN_DUR_SEC = 0.25
+KEY_RES = 0.25
 
 # VAD (window-level)
 USE_SILERO_VAD = True
-VAD_MIN_SPEECH_MS = 150      # was 350
-VAD_MIN_SILENCE_MS = 400     # was 250
-# MIN_SPEECH_IN_WINDOW_SEC = 0.35
+VAD_MIN_SPEECH_MS = 150
+VAD_MIN_SILENCE_MS = 400
 
 # Speaker enrollment
 USE_SPEAKER_ENROLLMENT = True
-ENROLL_DIR = os.getenv("ENROLL_DIR", "enrolled_speakers")
-ENROLL_SIM_THRESHOLD = 0.30
+ENROLL_SIM_THRESHOLD = float(os.getenv("ENROLL_SIM_THRESHOLD", "0.30"))
 
-# Dedupe key resolution
-KEY_RES = 0.25  # seconds (250 ms)
+# Session eviction (rtservice only)
+RT_SESSION_IDLE_SECONDS = float(os.getenv("RT_SESSION_IDLE_SECONDS", "120.0"))
+RT_SESSION_EVICT_SCAN_SECONDS = float(os.getenv("RT_SESSION_EVICT_SCAN_SECONDS", "10.0"))
+
+
+def _resample_linear(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
+    if sr_in == sr_out:
+        return x.astype(np.float32)
+    if x.size == 0:
+        return x.astype(np.float32)
+    n_out = int(round(float(x.size) * float(sr_out) / float(sr_in)))
+    if n_out <= 1:
+        return np.zeros((0,), dtype=np.float32)
+    t_old = np.linspace(0.0, 1.0, num=x.size, endpoint=False)
+    t_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+    y = np.interp(t_new, t_old, x).astype(np.float32)
+    return y
 
 
 @dataclass
@@ -50,65 +62,218 @@ class AsrResult:
     end_s: float
     text: str
     is_final: bool
-    lang: Optional[str] = None  # per-result language
+    lang: Optional[str] = None
     speaker: Optional[str] = None
 
 
-class RealtimeEngine:
-    """
-    Realtime diarization+ASR engine, ported from 20_stream_diar_first.py.
+@dataclass
+class RealtimeConfig:
+    """Runtime configuration for windowing and heuristics.
 
-    - Input: 16kHz mono PCM16 bytes (BLOCK=2048) from BFF WS (any session).
-    - Internal (global rolling stream):
-        * rolling buffer `self._buf` of float32 samples
-        * windows of length WINDOW_SEC (5s), hop HOP_SEC (4.5s)
-        * per window:
-            - optional VAD gate
-            - pyannote/speaker-diarization-community-1
-            - center-based window "ownership" to avoid double ASR across overlaps
-            - coarse dedupe key (round start/end, label)
-            - optional speaker enrollment mapping (SPEAKER_XX → enrolled name)
-            - faster-whisper ASR (vad_filter=False, language=per-session)
-    - Output: list[AsrResult] for each feed() call, with absolute start_s/end_s.
+    NOTE: This is separated so unit tests can instantiate a lightweight engine
+    without pulling in torch/pyannote.
     """
 
-    def __init__(self) -> None:
-        # Previously this validated SR against bff.settings; with BFF removed,
-        # we keep the engine SR fixed.
+    sr: int = SR
+    window_sec: float = WINDOW_SEC
+    overlap_sec: float = OVERLAP_SEC
+    finalize_min_dur_sec: float = FINALIZE_MIN_DUR_SEC
+    key_resolution_sec: float = KEY_RES
 
-        self.sr = SR
-        self.default_lang = DEFAULT_LANG
+    @property
+    def hop_sec(self) -> float:
+        return float(self.window_sec - self.overlap_sec)
 
-        # Rolling analysis buffer (mixed mono stream)
-        self._buf = np.zeros(0, dtype=np.float32)
+    @property
+    def window_samples(self) -> int:
+        return int(round(self.window_sec * self.sr))
 
-        # Time of LEFT edge of `buf` in seconds
-        self._base_offset_sec = 0.0
+    @property
+    def hop_samples(self) -> int:
+        return int(round(self.hop_sec * self.sr))
 
-        # Window index for center-ownership
-        self._window_index = 0
 
-        # Dedup across overlapping windows: coarse (start,end,label)
-        self._emitted_keys: Set[Tuple[float, float, str]] = set()
+@dataclass
+class SessionState:
+    """Per-(tenant,session) realtime rolling window state."""
 
-        # VAD globals
-        self._vad_model = None
-        self._get_speech_timestamps = None
+    buf: np.ndarray
+    base_offset_sec: float
+    window_index: int
+    emitted_keys: Set[Tuple[float, float, str]]
+    last_activity_s: float
+    lock: threading.Lock
 
-        # Enrollment globals (shared within this engine)
-        self._embedding_infer: Optional[EmbeddingInference] = None
-        self._enrolled_speakers: Dict[str, np.ndarray] = {}
+    @staticmethod
+    def new(now_s: float) -> "SessionState":
+        return SessionState(
+            buf=np.zeros(0, dtype=np.float32),
+            base_offset_sec=0.0,
+            window_index=0,
+            emitted_keys=set(),
+            last_activity_s=now_s,
+            lock=threading.Lock(),
+        )
 
-        # Thread safety for feed()
-        self._lock = threading.Lock()
 
-        # ---- HF token ----
+# ---------------------------------------------------------------------------
+# Session processor (injectable for unit tests)
+# ---------------------------------------------------------------------------
+
+DiarSeg = Dict[str, object]  # {start: float, end: float, speaker: str}
+
+GateFn = Callable[[np.ndarray], bool]
+DiarizeFn = Callable[[np.ndarray], List[DiarSeg]]
+AsrFn = Callable[[np.ndarray, Optional[str]], str]
+MapSpeakerFn = Callable[[str, str, np.ndarray], str]  # (tenant_id, diar_label, wave_chunk) -> label
+
+
+class RealtimeSessionProcessor:
+    def __init__(
+        self,
+        *,
+        cfg: RealtimeConfig,
+        gate_fn: GateFn,
+        diarize_fn: DiarizeFn,
+        asr_fn: AsrFn,
+        map_speaker_fn: MapSpeakerFn,
+    ) -> None:
+        self._cfg = cfg
+        self._gate_fn = gate_fn
+        self._diarize_fn = diarize_fn
+        self._asr_fn = asr_fn
+        self._map_speaker_fn = map_speaker_fn
+
+    def process(
+        self,
+        *,
+        tenant_id: str,
+        session_id: str,
+        state: SessionState,
+        pcm16: bytes,
+        lang: Optional[str],
+    ) -> List[AsrResult]:
+        cfg = self._cfg
+        effective_lang = lang
+
+        x = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
+        out: List[AsrResult] = []
+
+        # ingest
+        state.buf = np.concatenate([state.buf, x])
+
+        # process
+        while state.buf.size >= cfg.window_samples:
+            window = state.buf[: cfg.window_samples]
+            window_offset = state.base_offset_sec
+            my_idx = state.window_index
+
+            if self._gate_fn(window):
+                diar_segs = self._diarize_fn(window)
+
+                for d in diar_segs:
+                    seg_start = float(d.get("start") or 0.0)
+                    seg_end = float(d.get("end") or 0.0)
+                    diar_label = str(d.get("speaker") or "")
+
+                    dur = seg_end - seg_start
+                    if dur < cfg.finalize_min_dur_sec:
+                        continue
+
+                    s_abs = window_offset + seg_start
+                    e_abs = window_offset + seg_end
+                    center_abs = 0.5 * (s_abs + e_abs)
+
+                    owner_idx = int(center_abs / cfg.hop_sec + 1e-6)
+                    if owner_idx != my_idx:
+                        continue
+
+                    key = (
+                        _round_time(s_abs, cfg.key_resolution_sec),
+                        _round_time(e_abs, cfg.key_resolution_sec),
+                        diar_label,
+                    )
+                    if key in state.emitted_keys:
+                        continue
+
+                    s_idx = int(seg_start * cfg.sr)
+                    e_idx = int(seg_end * cfg.sr)
+                    s_idx = max(0, min(window.size, s_idx))
+                    e_idx = max(0, min(window.size, e_idx))
+                    if e_idx - s_idx < int(cfg.finalize_min_dur_sec * cfg.sr):
+                        continue
+
+                    wave_chunk = window[s_idx:e_idx]
+                    label = self._map_speaker_fn(tenant_id, diar_label, wave_chunk)
+                    text = self._asr_fn(wave_chunk, effective_lang)
+
+                    if text:
+                        state.emitted_keys.add(key)
+                        out.append(
+                            AsrResult(
+                                start_s=s_abs,
+                                end_s=e_abs,
+                                text=text,
+                                is_final=True,
+                                lang=effective_lang,
+                                speaker=label,
+                            )
+                        )
+
+            # slide
+            state.buf = state.buf[cfg.hop_samples :]
+            state.base_offset_sec += cfg.hop_samples / cfg.sr
+            state.window_index += 1
+
+        return out
+
+
+def _round_time(t: float, resolution: float) -> float:
+    return round(t / resolution) * resolution
+
+
+# ---------------------------------------------------------------------------
+# Production model bundle (heavy deps are imported lazily here)
+# ---------------------------------------------------------------------------
+
+
+class RealtimeModelBundle:
+    """Holds heavy ML models + enrollment resolver.
+
+    The goal is:
+    - models load once per process
+    - per-session state stays separate
+
+    Heavy imports (torch/pyannote/faster_whisper) are intentionally inside
+    this class so importing `rtservice.engine` stays lightweight for unit tests.
+    """
+
+    def __init__(self, *, cfg: RealtimeConfig) -> None:
+        self._cfg = cfg
+
         hf_token = os.environ.get("HF_TOKEN")
         if not hf_token:
             raise RuntimeError("Set HF_TOKEN environment variable for pyannote.")
 
-        # ---- Models ----
+        import torch
+        from faster_whisper import WhisperModel
+        from pyannote.audio import Pipeline, Model
+        from pyannote.audio import Inference as EmbeddingInference
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        if not torch.cuda.is_available():
+            logger.warning(
+                "rtservice: CUDA not available; running on CPU (torch=%s torch.version.cuda=%s)",
+                getattr(torch, "__version__", "unknown"),
+                getattr(getattr(torch, "version", None), "cuda", None),
+            )
+        else:
+            logger.info(
+                "rtservice: CUDA available; will use GPU (torch=%s torch.version.cuda=%s)",
+                getattr(torch, "__version__", "unknown"),
+                getattr(getattr(torch, "version", None), "cuda", None),
+            )
 
         logger.info("Initializing Faster-Whisper 'medium' on %s", device)
         self._asr = WhisperModel(
@@ -117,13 +282,37 @@ class RealtimeEngine:
             compute_type="float16" if torch.cuda.is_available() else "int8_float32",
         )
 
-        logger.info("Initializing pyannote Community-1 diarization on %s", device)
-        self._pipe = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-community-1",
-            token=hf_token,
-        )
-        self._pipe.to(torch.device(device))
+        diar_model_id = os.getenv(
+            "RT_DIAR_MODEL",
+            # pyannote.audio 3.x compatible pipeline id
+            "pyannote/speaker-diarization-3.1",
+        ).strip()
 
+        def _load_pipe(mid: str):
+            logger.info("Initializing diarization pipeline (%s) on %s", mid, device)
+            # pyannote.audio 4.x uses `token=` (not `use_auth_token=`)
+            pipe = Pipeline.from_pretrained(mid, token=hf_token)
+            pipe.to(torch.device(device))
+            return pipe
+
+        try:
+            self._pipe = _load_pipe(diar_model_id)
+        except Exception:
+            fallback = "pyannote/speaker-diarization-3.1"
+            if diar_model_id != fallback:
+                logger.warning(
+                    "Failed to init diarization pipeline (%s); trying fallback %s",
+                    diar_model_id,
+                    fallback,
+                    exc_info=True,
+                )
+                self._pipe = _load_pipe(fallback)
+            else:
+                raise
+
+        # VAD
+        self._vad_model = None
+        self._get_speech_timestamps = None
         if USE_SILERO_VAD:
             try:
                 logger.info("Initializing Silero VAD…")
@@ -134,181 +323,93 @@ class RealtimeEngine:
                     onnx=False,
                     trust_repo=True,
                 )
-                (get_speech_timestamps,
-                 save_audio,
-                 read_audio,
-                 VADIterator,
-                 collect_chunks) = _vad_utils
+                (get_speech_timestamps, _save_audio, _read_audio, _VADIterator, _collect_chunks) = _vad_utils
                 self._vad_model = _vad_model
                 self._get_speech_timestamps = get_speech_timestamps
             except Exception as e:
                 logger.warning("Failed to init Silero VAD, disabling: %s", e)
 
+        # Embedding
+        self._embedding_infer = None
+        self._embed_lock = threading.Lock()
         if USE_SPEAKER_ENROLLMENT:
             try:
                 logger.info("Initializing pyannote/embedding for enrollment on %s", device)
-                emb_model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token)
+                emb_model = Model.from_pretrained("pyannote/embedding", token=hf_token)
                 self._embedding_infer = EmbeddingInference(emb_model, window="whole")
             except Exception as e:
                 logger.warning("Failed to load embedding model: %s", e)
                 self._embedding_infer = None
 
-        if USE_SPEAKER_ENROLLMENT and self._embedding_infer is not None:
-            self._load_enrolled_speakers()
-        else:
-            logger.info("Speaker enrollment disabled or unavailable.")
+        # Enrollment: new per-tenant cache (optional)
+        self._enrollment_cache = None
+        self._init_enrollment_cache_from_env()
 
-        # Precompute sample counts
-        self.WINDOW_SAMPLES = int(WINDOW_SEC * SR)
-        self.HOP_SAMPLES = int(HOP_SEC * SR)
+        # Enrollment: legacy flat dir (dev compatibility)
+        self._legacy_enrolled_speakers: Dict[str, np.ndarray] = {}
+        self._load_legacy_enrolled_speakers_flat_dir()
 
         logger.info(
-            "RealtimeEngine ready: SR=%d WINDOW=%.2fs HOP=%.2fs USE_VAD=%s ENROLL=%s default_lang=%s",
-            SR,
-            WINDOW_SEC,
-            HOP_SEC,
+            "RealtimeModelBundle ready: SR=%d WINDOW=%.2fs HOP=%.2fs USE_VAD=%s ENROLL=%s",
+            cfg.sr,
+            cfg.window_sec,
+            cfg.hop_sec,
             USE_SILERO_VAD,
             USE_SPEAKER_ENROLLMENT,
-            self.default_lang,
         )
 
-    # ===================== PUBLIC API =====================
+    # ---------------- VAD / diarization / ASR ----------------
 
-    def feed(self, session_id: str, pcm16: bytes, lang: Optional[str] = None) -> List[AsrResult]:
-        """
-        Append PCM16 mono audio to the rolling buffer, run as many 5s windows
-        as available, and return finalized ASR results.
+    def gate_window(self, window: np.ndarray) -> bool:
+        # RMS pre-gate
+        rms = float(np.sqrt(np.mean(window * window)) + 1e-12)
+        if rms < 3e-5:
+            return False
 
-        lang: optional ISO code ("cs", "en", etc.). If None, uses self.default_lang.
-        """
-        effective_lang = lang or self.default_lang
+        if not USE_SILERO_VAD or self._vad_model is None:
+            return True
 
-        x = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
-        out: List[AsrResult] = []
-
-        with self._lock:
-            # 1) Ingest audio into buf
-            self._buf = np.concatenate([self._buf, x])
-            logger.debug(
-                "feed(session=%s, lang=%s): appended %d samples, buf_len=%d",
-                session_id, effective_lang, x.size, self._buf.size
-            )
-
-            # 2) Process complete windows
-            while len(self._buf) >= self.WINDOW_SAMPLES:
-                window = self._buf[:self.WINDOW_SAMPLES]
-                window_offset = self._base_offset_sec
-                my_idx = self._window_index
-
-                if self._maybe_gate_window_with_vad(window):
-                    diar_segs = self._diarize_window_in_memory(window)
-
-                    logger.debug(
-                        "Window idx=%d offset=[%.3f, %.3f] diar_segs=%d",
-                        my_idx,
-                        window_offset,
-                        window_offset + WINDOW_SEC,
-                        len(diar_segs),
-                    )
-
-                    for d in diar_segs:
-                        seg_start = d["start"]
-                        seg_end = d["end"]
-                        dur = seg_end - seg_start
-                        if dur < FINALIZE_MIN_DUR_SEC:
-                            continue
-
-                        # Absolute times
-                        s_abs = window_offset + seg_start
-                        e_abs = window_offset + seg_end
-                        center_abs = 0.5 * (s_abs + e_abs)
-
-                        # Unique owner window via segment center
-                        owner_idx = int(center_abs / HOP_SEC + 1e-6)
-                        if owner_idx != my_idx:
-                            continue
-
-                        key = (
-                            self._round_time(s_abs, KEY_RES),
-                            self._round_time(e_abs, KEY_RES),
-                            d["speaker"],
-                        )
-                        if key in self._emitted_keys:
-                            continue
-
-                        # Cut from this window
-                        s_idx = int(seg_start * SR)
-                        e_idx = int(seg_end * SR)
-                        s_idx = max(0, min(len(window), s_idx))
-                        e_idx = max(0, min(len(window), e_idx))
-                        if e_idx - s_idx < int(FINALIZE_MIN_DUR_SEC * SR):
-                            continue
-
-                        wave_chunk = window[s_idx:e_idx]
-                        label = self._map_speaker_label(d["speaker"], wave_chunk)
-                        text = self._asr_text_on_chunk(wave_chunk, effective_lang)
-
-                        if text:
-                            self._emitted_keys.add(key)
-                            logger.debug(
-                                "Emitting session=%s speaker=%s [%.3f, %.3f] lang=%s: %s",
-                                session_id, label, s_abs, e_abs, effective_lang, text
-                            )
-                            out.append(AsrResult(
-                                start_s=s_abs,
-                                end_s=e_abs,
-                                text=text,
-                                is_final=True,
-                                lang=effective_lang,
-                                speaker=label,
-                            ))
-
-                # Slide window
-                self._buf = self._buf[self.HOP_SAMPLES:]
-                self._base_offset_sec += self.HOP_SAMPLES / SR
-                self._window_index += 1
-
-        return out
-
-    def to_asr_events(self, session_id: str, r: AsrResult) -> stream_pb2.AsrEvent:
-        return stream_pb2.AsrEvent(
-            session_id=session_id,
-            start_s=r.start_s,
-            end_s=r.end_s,
-            text=r.text,
-            type=stream_pb2.FINAL if r.is_final else stream_pb2.PARTIAL,
-            lang=(r.lang or self.default_lang or ""),
-            speaker=(r.speaker or ""),
+        wav16 = (np.clip(window, -1.0, 1.0) * 32767).astype(np.int16)
+        ts = self._get_speech_timestamps(
+            wav16,
+            self._vad_model,
+            sampling_rate=self._cfg.sr,
+            return_seconds=True,
+            min_speech_duration_ms=VAD_MIN_SPEECH_MS,
+            min_silence_duration_ms=VAD_MIN_SILENCE_MS,
         )
+        return bool(ts)
 
-    # ===================== INTERNALS =====================
-
-    def _round_time(self, t: float, resolution: float) -> float:
-        return round(t / resolution) * resolution
-
-    def _diarize_window_in_memory(self, wave: np.ndarray):
+    def diarize_window(self, wave: np.ndarray) -> List[DiarSeg]:
         if wave.size == 0:
             return []
+        import torch
+
         w = torch.from_numpy(wave.copy()).unsqueeze(0)
-        out = self._pipe({"waveform": w, "sample_rate": SR})
-        segs = []
-        for turn, spk in out.speaker_diarization:
-            segs.append({
-                "start": float(turn.start),
-                "end": float(turn.end),
-                "speaker": str(spk),
-            })
+        out = self._pipe({"waveform": w, "sample_rate": self._cfg.sr})
+
+        # pyannote.audio 4.x returns DiarizeOutput with an Annotation in `.speaker_diarization`
+        diar = getattr(out, "speaker_diarization", None)
+        segs: List[DiarSeg] = []
+        if diar is None:
+            return segs
+
+        for turn, _, spk in diar.itertracks(yield_label=True):
+            segs.append({"start": float(turn.start), "end": float(turn.end), "speaker": str(spk)})
         return segs
 
-    def _asr_text_on_chunk(self, wave: np.ndarray, lang: Optional[str]) -> str:
-        if wave.size < int(FINALIZE_MIN_DUR_SEC * SR):
+    def asr_text(self, wave: np.ndarray, lang: Optional[str]) -> str:
+        if wave.size < int(self._cfg.finalize_min_dur_sec * self._cfg.sr):
             return ""
-        import tempfile, os as _os
+        import tempfile
+        import os as _os
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             path = tmp.name
-        sf.write(path, wave, SR, subtype="PCM_16")
+
+        sf.write(path, wave, self._cfg.sr, subtype="PCM_16")
         try:
-            segs, _ = self._asr.transcribe(
+            segs, _info = self._asr.transcribe(
                 path,
                 language=(lang or None),
                 task="transcribe",
@@ -318,7 +419,7 @@ class RealtimeEngine:
                 vad_filter=False,
                 word_timestamps=True,
             )
-            words = []
+            words: list[str] = []
             for s in segs:
                 if getattr(s, "words", None):
                     for w in s.words:
@@ -333,96 +434,159 @@ class RealtimeEngine:
             except Exception:
                 pass
 
-    def _maybe_gate_window_with_vad(self, window: np.ndarray) -> bool:
-        # 1) RMS pre-gate: kill *really* quiet stuff
-        rms = float(np.sqrt(np.mean(window * window)) + 1e-12)
-        if rms < 3e-5:
-            return False
+    # ---------------- Enrollment mapping ----------------
 
-        # 2) If Silero is disabled or unavailable → always keep
-        if not USE_SILERO_VAD or self._vad_model is None:
-            return True
+    def _init_enrollment_cache_from_env(self) -> None:
+        if not USE_SPEAKER_ENROLLMENT:
+            return
+        if self._embedding_infer is None:
+            return
 
-        # 3) Silero: we only care if there is *any* speech at all
-        wav16 = (np.clip(window, -1.0, 1.0) * 32767).astype(np.int16)
-        ts = self._get_speech_timestamps(
-            wav16,
-            self._vad_model,
-            sampling_rate=SR,
-            return_seconds=True,
-            min_speech_duration_ms=VAD_MIN_SPEECH_MS,
-            min_silence_duration_ms=VAD_MIN_SILENCE_MS,
+        backend = os.getenv("ENROLL_BACKEND", "legacy_dir").strip().lower()
+        if backend in ("none", "disabled"):
+            return
+        if backend == "legacy_dir":
+            return
+
+        from drsynth_common.enrollment import EnrollmentCache, LocalEnrollmentProvider, S3EnrollmentProvider
+
+        ttl_s = float(os.getenv("ENROLL_CACHE_TTL_S", "300"))
+        max_tenants = int(os.getenv("ENROLL_CACHE_MAX_TENANTS", "128"))
+
+        if backend == "local_manifest":
+            enroll_dir = os.getenv("ENROLL_DIR", "enrolled_speakers")
+            provider = LocalEnrollmentProvider(root_dir=enroll_dir)
+        elif backend == "s3_manifest":
+            bucket = os.getenv("ENROLL_S3_BUCKET", os.getenv("S3_BUCKET", "")).strip()
+            if not bucket:
+                raise RuntimeError("ENROLL_BACKEND=s3_manifest but ENROLL_S3_BUCKET is not set")
+
+            prefix = os.getenv("ENROLL_S3_PREFIX", "enrollment").strip()
+
+            provider = S3EnrollmentProvider(
+                bucket=bucket,
+                prefix=prefix,
+                endpoint=os.getenv("ENROLL_S3_ENDPOINT", os.getenv("S3_ENDPOINT", "")).strip(),
+                region=os.getenv("ENROLL_S3_REGION", os.getenv("S3_REGION", "")).strip(),
+                access_key=os.getenv("ENROLL_S3_ACCESS_KEY", os.getenv("S3_ACCESS_KEY", "")).strip(),
+                secret_key=os.getenv("ENROLL_S3_SECRET_KEY", os.getenv("S3_SECRET_KEY", "")).strip(),
+                force_path_style=(
+                    os.getenv("ENROLL_S3_FORCE_PATH_STYLE", os.getenv("S3_FORCE_PATH_STYLE", "true"))
+                    .strip()
+                    .lower()
+                    in ("1", "true", "yes", "y")
+                ),
+            )
+        else:
+            raise RuntimeError(f"Unknown ENROLL_BACKEND={backend}")
+
+        def _embed_bytes(sample_bytes: bytes) -> np.ndarray:
+            # decode audio bytes to mono float32
+            b = io.BytesIO(sample_bytes)
+            x, sr = sf.read(b, dtype="float32")
+            if isinstance(x, np.ndarray) and x.ndim > 1:
+                x = x.mean(axis=1)
+            x = np.asarray(x, dtype=np.float32).reshape(-1)
+            if int(sr) != self._cfg.sr:
+                x = _resample_linear(x, int(sr), self._cfg.sr)
+            emb = self._embed_wave(x)
+            if emb is None:
+                raise RuntimeError("Failed to embed enrollment sample")
+            return emb
+
+        self._enrollment_cache = EnrollmentCache(
+            provider=provider,
+            embed_fn=_embed_bytes,
+            ttl_s=ttl_s,
+            max_tenants=max_tenants,
         )
+        logger.info("Enrollment cache enabled: backend=%s ttl_s=%.1f max_tenants=%d", backend, ttl_s, max_tenants)
 
-        if not ts:
-            # pure silence: drop window, prevents hallucinations
-            return False
-
-        # some speech → keep the window and let diarization+ASR decide
-        return True
-
-    # ====== Enrollment ======
-
-    def _load_enrolled_speakers(self) -> None:
+    def _load_legacy_enrolled_speakers_flat_dir(self) -> None:
         if not USE_SPEAKER_ENROLLMENT or self._embedding_infer is None:
-            logger.info("Speaker enrollment disabled or no embedding model.")
             return
 
-        if not os.path.isdir(ENROLL_DIR):
-            logger.info("Enrollment dir '%s' not found; skipping.", ENROLL_DIR)
+        # legacy enrollment is kept for local runs.
+        enroll_dir = os.getenv("ENROLL_DIR", "enrolled_speakers")
+        if not os.path.isdir(enroll_dir):
             return
+
+        # If the directory contains per-tenant subdirs, we don't do legacy.
+        # (tenant-aware should be done via ENROLL_BACKEND=local_manifest)
+        try:
+            has_tenant_layout = any((os.path.isdir(os.path.join(enroll_dir, d)) for d in os.listdir(enroll_dir)))
+            if has_tenant_layout:
+                return
+        except Exception:
+            pass
 
         per_name: Dict[str, List[np.ndarray]] = defaultdict(list)
-        for fname in os.listdir(ENROLL_DIR):
+        for fname in os.listdir(enroll_dir):
             if not fname.lower().endswith((".wav", ".flac", ".mp3", ".ogg")):
                 continue
-            path = os.path.join(ENROLL_DIR, fname)
+            path = os.path.join(enroll_dir, fname)
             base = os.path.splitext(fname)[0]
             name = base.split("_")[0]
-
             try:
                 emb = self._embedding_infer(path)
                 emb = np.array(emb, dtype=np.float32)
                 if emb.ndim > 1:
                     emb = emb.mean(axis=0)
                 per_name[name].append(emb)
-                logger.info("Enrolled segment for '%s' from %s", name, fname)
-            except Exception as e:
-                logger.warning("Failed to enroll from %s: %s", fname, e)
+                logger.info("[legacy] Enrolled segment for '%s' from %s", name, fname)
+            except Exception:
+                logger.warning("[legacy] Failed to enroll from %s", fname, exc_info=True)
 
         for name, embs in per_name.items():
             if not embs:
                 continue
             arr = np.stack(embs, axis=0)
-            mean_emb = arr.mean(axis=0)
-            mean_emb /= np.linalg.norm(mean_emb) + 1e-12
-            self._enrolled_speakers[name] = mean_emb
+            mean = arr.mean(axis=0)
+            mean /= np.linalg.norm(mean) + 1e-12
+            self._legacy_enrolled_speakers[name] = mean
 
-        if self._enrolled_speakers:
-            logger.info(
-                "Enrollment complete. Known speakers: %s",
-                ", ".join(self._enrolled_speakers.keys()),
-            )
-        else:
-            logger.info("No valid enrollment samples found.")
+        if self._legacy_enrolled_speakers:
+            logger.info("[legacy] Enrollment complete. Known speakers: %s", ", ".join(self._legacy_enrolled_speakers.keys()))
 
     def _embed_wave(self, wave: np.ndarray) -> Optional[np.ndarray]:
-        if self._embedding_infer is None or wave.size < int(0.25 * SR):
+        if self._embedding_infer is None or wave.size < int(0.25 * self._cfg.sr):
             return None
+
+        import torch
+
         try:
-            audio = {"waveform": torch.from_numpy(wave).unsqueeze(0), "sample_rate": SR}
-            emb = self._embedding_infer(audio)
+            with self._embed_lock:
+                audio = {"waveform": torch.from_numpy(wave).unsqueeze(0), "sample_rate": self._cfg.sr}
+                emb = self._embedding_infer(audio)
             emb = np.array(emb, dtype=np.float32)
             if emb.ndim > 1:
                 emb = emb.mean(axis=0)
             emb /= np.linalg.norm(emb) + 1e-12
             return emb
-        except Exception as e:
-            logger.warning("Failed to embed segment: %s", e)
+        except Exception:
+            logger.warning("Failed to embed wave", exc_info=True)
             return None
 
-    def _map_speaker_label(self, diar_label: str, wave_chunk: np.ndarray) -> str:
-        if not USE_SPEAKER_ENROLLMENT or not self._enrolled_speakers:
+    def map_speaker_label(self, tenant_id: str, diar_label: str, wave_chunk: np.ndarray) -> str:
+        if not USE_SPEAKER_ENROLLMENT:
+            return diar_label
+
+        # Prefer tenant-aware enrollment cache when enabled.
+        if self._enrollment_cache is not None and tenant_id:
+            try:
+                snap = self._enrollment_cache.get(tenant_id)
+                enrolled = snap.embeddings_by_label
+            except Exception:
+                logger.warning("Failed to load tenant enrollment tenant=%s", tenant_id, exc_info=True)
+                enrolled = {}
+        else:
+            enrolled = {}
+
+        # Legacy fallback only for default tenant.
+        if not enrolled and (not tenant_id or tenant_id == "default"):
+            enrolled = self._legacy_enrolled_speakers
+
+        if not enrolled:
             return diar_label
 
         emb = self._embed_wave(wave_chunk)
@@ -431,15 +595,130 @@ class RealtimeEngine:
 
         best_name = None
         best_sim = -1.0
-        for name, ref in self._enrolled_speakers.items():
+        for name, ref in enrolled.items():
             sim = float(np.dot(emb, ref))
             if sim > best_sim:
                 best_sim = sim
                 best_name = name
 
         if best_name is not None and best_sim >= ENROLL_SIM_THRESHOLD:
-            logger.debug(
-                "speaker %s → %s (sim=%.3f)", diar_label, best_name, best_sim
-            )
             return best_name
         return diar_label
+
+
+# ---------------------------------------------------------------------------
+# Public rtservice engine
+# ---------------------------------------------------------------------------
+
+
+class RealtimeEngine:
+    """Realtime diarization+ASR engine.
+
+    Key properties:
+    - heavy models are loaded once (in RealtimeModelBundle)
+    - session state is per (tenant_id, session_id)
+    - safe under concurrent sessions
+    """
+
+    def __init__(
+        self,
+        *,
+        cfg: Optional[RealtimeConfig] = None,
+        model_bundle: Optional[RealtimeModelBundle] = None,
+        processor: Optional[RealtimeSessionProcessor] = None,
+    ) -> None:
+        self.cfg = cfg or RealtimeConfig()
+        self.default_lang = DEFAULT_LANG
+
+        self._sessions: Dict[Tuple[str, str], SessionState] = {}
+        self._sessions_lock = threading.Lock()
+
+        self._last_evict_scan_s = 0.0
+
+        self._model_bundle = model_bundle
+        if processor is not None:
+            self._processor = processor
+        else:
+            if self._model_bundle is None:
+                self._model_bundle = RealtimeModelBundle(cfg=self.cfg)
+            self._processor = RealtimeSessionProcessor(
+                cfg=self.cfg,
+                gate_fn=self._model_bundle.gate_window,
+                diarize_fn=self._model_bundle.diarize_window,
+                asr_fn=self._model_bundle.asr_text,
+                map_speaker_fn=self._model_bundle.map_speaker_label,
+            )
+
+        logger.info(
+            "RealtimeEngine ready: SR=%d WINDOW=%.2fs HOP=%.2fs default_lang=%s",
+            self.cfg.sr,
+            self.cfg.window_sec,
+            self.cfg.hop_sec,
+            self.default_lang,
+        )
+
+    def feed(
+        self,
+        session_id: str,
+        pcm16: bytes,
+        *,
+        lang: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> List[AsrResult]:
+        """Feed PCM16 audio bytes for a session.
+
+        tenant_id:
+        - used only for enrolled speaker resolution
+        - defaults to "default" (dev) when not present
+        """
+
+        effective_lang = lang or self.default_lang
+        tid = str(tenant_id or "default")
+        sid = str(session_id or "unknown")
+
+        now = time.time()
+        self._maybe_evict_idle_sessions(now)
+
+        key = (tid, sid)
+        with self._sessions_lock:
+            state = self._sessions.get(key)
+            if state is None:
+                state = SessionState.new(now)
+                self._sessions[key] = state
+
+        # Per-session lock for correctness under concurrent sessions.
+        with state.lock:
+            state.last_activity_s = now
+            return self._processor.process(
+                tenant_id=tid,
+                session_id=sid,
+                state=state,
+                pcm16=pcm16,
+                lang=effective_lang,
+            )
+
+    def to_asr_events(self, session_id: str, r: AsrResult) -> stream_pb2.AsrEvent:
+        return stream_pb2.AsrEvent(
+            session_id=session_id,
+            start_s=r.start_s,
+            end_s=r.end_s,
+            text=r.text,
+            type=stream_pb2.FINAL if r.is_final else stream_pb2.PARTIAL,
+            lang=(r.lang or self.default_lang or ""),
+            speaker=(r.speaker or ""),
+        )
+
+    def _maybe_evict_idle_sessions(self, now_s: float) -> None:
+        if (now_s - self._last_evict_scan_s) < RT_SESSION_EVICT_SCAN_SECONDS:
+            return
+        self._last_evict_scan_s = now_s
+
+        idle_before = now_s - RT_SESSION_IDLE_SECONDS
+
+        with self._sessions_lock:
+            to_delete = [k for k, st in self._sessions.items() if st.last_activity_s < idle_before]
+            for k in to_delete:
+                self._sessions.pop(k, None)
+
+        if to_delete:
+            logger.info("Evicted %d idle realtime sessions", len(to_delete))

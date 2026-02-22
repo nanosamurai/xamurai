@@ -62,6 +62,72 @@ def _ensure_topics(kafka_bootstrap: str, topics: list[str]) -> None:
 
 
 @pytest.fixture(scope="session")
+def localstack_s3():
+    """Session-scoped LocalStack S3 fixture.
+
+    Requires Docker. Spins up localstack/localstack with S3 enabled,
+    creates a fresh bucket, and yields connection info.
+
+    Returns a dict with keys:
+      - endpoint_url
+      - region
+      - access_key
+      - secret_key
+      - bucket
+      - prefix
+    """
+
+    try:
+        import boto3  # noqa: F401
+    except Exception as e:
+        pytest.skip(f"boto3 not available (required for LocalStack S3 tests): {e}")
+        raise
+
+    try:
+        from testcontainers.localstack import LocalStackContainer
+    except Exception as e:
+        pytest.skip(f"testcontainers.localstack not available: {e}")
+        raise
+
+    # LocalStack defaults
+    region = os.getenv("TEST_AWS_REGION", "us-east-1")
+    bucket = os.getenv("TEST_ENROLL_S3_BUCKET", "drsynth-enrollment-test")
+    prefix = os.getenv("TEST_ENROLL_S3_PREFIX", "enrollment")
+
+    with LocalStackContainer("localstack/localstack:latest").with_services("s3") as ls:
+        endpoint_url = ls.get_url()
+
+        # Create bucket via boto3
+        import boto3
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            region_name=region,
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+        )
+
+        # us-east-1 special-cases CreateBucketConfiguration
+        if region == "us-east-1":
+            s3.create_bucket(Bucket=bucket)
+        else:
+            s3.create_bucket(
+                Bucket=bucket,
+                CreateBucketConfiguration={"LocationConstraint": region},
+            )
+
+        yield {
+            "endpoint_url": endpoint_url,
+            "region": region,
+            "access_key": "test",
+            "secret_key": "test",
+            "bucket": bucket,
+            "prefix": prefix,
+        }
+
+
+@pytest.fixture(scope="session")
 def kafka_bootstrap() -> str:
     """Kafka bootstrap address for integration tests.
 

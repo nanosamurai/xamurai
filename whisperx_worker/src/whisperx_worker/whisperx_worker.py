@@ -1,8 +1,9 @@
 import logging
 import os
 import tempfile
+import threading
 from collections import defaultdict, deque
-from typing import Deque, Tuple, List, Dict, Optional
+from typing import Deque, Tuple, List, Dict, Optional, TYPE_CHECKING
 
 import numpy as np
 import soundfile as sf
@@ -63,20 +64,40 @@ except Exception:
     pass
 
 try:
-    _orig_torch_load = torch.load
+    # Make this idempotent across module reloads (tests do importlib.reload).
+    # Store the original unwrapped torch.load on the torch module.
+    if not hasattr(torch, "_drsynth_orig_load"):
+        torch._drsynth_orig_load = torch.load  # type: ignore[attr-defined]
 
-    def _torch_load_weights_only_false_default(*args, **kwargs):
-        # Force weights_only=False even if a caller explicitly passes True.
-        # This is required for some Lightning/pyannote checkpoints containing
-        # objects outside the default safe allowlist.
-        kwargs["weights_only"] = False
-        return _orig_torch_load(*args, **kwargs)
+    if getattr(torch.load, "__name__", "") != "_torch_load_weights_only_false_default":
+        _orig_torch_load = torch._drsynth_orig_load  # type: ignore[attr-defined]
 
-    torch.load = _torch_load_weights_only_false_default
+        def _torch_load_weights_only_false_default(*args, **kwargs):
+            # Force weights_only=False even if a caller explicitly passes True.
+            # This is required for some Lightning/pyannote checkpoints containing
+            # objects outside the default safe allowlist.
+            kwargs["weights_only"] = False
+            return _orig_torch_load(*args, **kwargs)
+
+        torch.load = _torch_load_weights_only_false_default
 except Exception:
     pass
 
-import whisperx
+# NOTE: whisperx is heavy and not installed in all envs (e.g. drsynth-bff).
+# Import lazily inside functions so unit tests can still import this module.
+whisperx = None
+
+# diarization + enrollment mapping
+# NOTE: we import pyannote lazily so this worker can still run in environments
+# where WhisperX is available but diarization deps are not.
+from drsynth_common.diarization_assign import (
+    DiarizationSegment,
+    TimeSegment,
+    assign_speaker_by_overlap,
+)
+
+if TYPE_CHECKING:
+    from drsynth_common.enrollment import EnrollmentCache
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 TOPIC_AUDIO = os.getenv("KAFKA_TOPIC_AUDIO", "audio.raw")
@@ -110,6 +131,370 @@ _ALIGN_MODEL = None
 _ALIGN_METADATA = None
 _WHISPERX_DEVICE = None
 
+# --------------------------------------------------------------------------- #
+# Diarization + enrollment globals
+# --------------------------------------------------------------------------- #
+
+_ENABLE_DIARIZATION = os.getenv("WHISPERX_ENABLE_DIARIZATION", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "y",
+)
+
+_DIAR_PIPE = None
+_DIAR_DEVICE = None
+
+_EMBED_INFER: Optional[object] = None
+_EMBED_LOCK = threading.Lock()
+
+# Legacy enrollment (flat dir)
+_LEGACY_ENROLLED: Dict[str, np.ndarray] = {}
+
+# Per-tenant enrollment cache (optional)
+_ENROLL_CACHE: Optional["EnrollmentCache"] = None
+
+ENROLL_SIM_THRESHOLD = float(os.getenv("ENROLL_SIM_THRESHOLD", "0.30"))
+
+
+def _resample_linear(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
+    if sr_in == sr_out:
+        return x.astype(np.float32)
+    if x.size == 0:
+        return x.astype(np.float32)
+    n_out = int(round(float(x.size) * float(sr_out) / float(sr_in)))
+    if n_out <= 1:
+        return np.zeros((0,), dtype=np.float32)
+    t_old = np.linspace(0.0, 1.0, num=x.size, endpoint=False)
+    t_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+    return np.interp(t_new, t_old, x).astype(np.float32)
+
+
+def _init_diarization_models() -> None:
+    """Best-effort initialization of diarization + embedding models.
+
+    This is optional and can be disabled via env.
+    """
+    global _DIAR_PIPE, _DIAR_DEVICE, _EMBED_INFER, _ENROLL_CACHE, _LEGACY_ENROLLED
+
+    if not _ENABLE_DIARIZATION:
+        logger.info("WHISPERX_ENABLE_DIARIZATION=false; diarization disabled")
+        return
+
+    if _DIAR_PIPE is not None and _EMBED_INFER is not None:
+        return
+
+    hf_token = os.getenv("HF_TOKEN")
+    if not hf_token:
+        logger.warning("HF_TOKEN not set; WhisperX diarization will be disabled")
+        return
+
+    # Lazy imports
+    try:
+        from pyannote.audio import Pipeline, Model
+        from pyannote.audio import Inference as EmbeddingInference
+    except Exception:
+        logger.warning("pyannote not available; WhisperX diarization disabled", exc_info=True)
+        return
+
+    _DIAR_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+    diar_model_id = os.getenv(
+        "WHISPERX_DIAR_MODEL",
+        # NOTE: pyannote.audio 3.x compatible pipeline id
+        "pyannote/speaker-diarization-3.1",
+    ).strip()
+
+    def _load_diar(mid: str):
+        logger.info("Loading diarization pipeline (%s) on %s", mid, _DIAR_DEVICE)
+        # pyannote.audio 3.x uses use_auth_token=... (older versions used token=...)
+        pipe = Pipeline.from_pretrained(mid, use_auth_token=hf_token)
+        pipe.to(torch.device(_DIAR_DEVICE))
+        return pipe
+
+    try:
+        _DIAR_PIPE = _load_diar(diar_model_id)
+    except Exception:
+        # Compatibility fallback: older/community models may not load under pyannote 3.x.
+        fallback = "pyannote/speaker-diarization-3.1"
+        if diar_model_id != fallback:
+            logger.warning(
+                "Failed to init diarization pipeline (%s); trying fallback %s",
+                diar_model_id,
+                fallback,
+                exc_info=True,
+            )
+            try:
+                _DIAR_PIPE = _load_diar(fallback)
+            except Exception:
+                logger.warning("Failed to init diarization pipeline; diarization disabled", exc_info=True)
+                _DIAR_PIPE = None
+                return
+        else:
+            logger.warning("Failed to init diarization pipeline; diarization disabled", exc_info=True)
+            _DIAR_PIPE = None
+            return
+
+    try:
+        logger.info("Loading embedding model (pyannote/embedding) on %s", _DIAR_DEVICE)
+        emb_model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token)
+        _EMBED_INFER = EmbeddingInference(emb_model, window="whole")
+    except Exception:
+        logger.warning("Failed to init embedding model; enrollment mapping disabled", exc_info=True)
+        _EMBED_INFER = None
+        return
+
+    # Enrollment: either cache-backed tenant manifests or legacy flat dir
+    backend = os.getenv("ENROLL_BACKEND", "legacy_dir").strip().lower()
+
+    if backend in ("none", "disabled"):
+        logger.info("ENROLL_BACKEND=%s; enrollment mapping disabled", backend)
+        return
+
+    if backend != "legacy_dir":
+        try:
+            from drsynth_common.enrollment import EnrollmentCache, LocalEnrollmentProvider, S3EnrollmentProvider
+
+            ttl_s = float(os.getenv("ENROLL_CACHE_TTL_S", "300"))
+            max_tenants = int(os.getenv("ENROLL_CACHE_MAX_TENANTS", "128"))
+
+            if backend == "local_manifest":
+                enroll_dir = os.getenv("ENROLL_DIR", "enrolled_speakers")
+                provider = LocalEnrollmentProvider(root_dir=enroll_dir)
+            elif backend == "s3_manifest":
+                bucket = os.getenv("ENROLL_S3_BUCKET", os.getenv("S3_BUCKET", "")).strip()
+                if not bucket:
+                    raise RuntimeError("ENROLL_BACKEND=s3_manifest but ENROLL_S3_BUCKET is not set")
+                prefix = os.getenv("ENROLL_S3_PREFIX", "enrollment").strip()
+                provider = S3EnrollmentProvider(
+                    bucket=bucket,
+                    prefix=prefix,
+                    endpoint=os.getenv("ENROLL_S3_ENDPOINT", os.getenv("S3_ENDPOINT", "")).strip(),
+                    region=os.getenv("ENROLL_S3_REGION", os.getenv("S3_REGION", "")).strip(),
+                    access_key=os.getenv("ENROLL_S3_ACCESS_KEY", os.getenv("S3_ACCESS_KEY", "")).strip(),
+                    secret_key=os.getenv("ENROLL_S3_SECRET_KEY", os.getenv("S3_SECRET_KEY", "")).strip(),
+                    force_path_style=(
+                        os.getenv("ENROLL_S3_FORCE_PATH_STYLE", os.getenv("S3_FORCE_PATH_STYLE", "true"))
+                        .strip()
+                        .lower()
+                        in ("1", "true", "yes", "y")
+                    ),
+                )
+            else:
+                raise RuntimeError(f"Unknown ENROLL_BACKEND={backend}")
+
+            def _embed_bytes(sample_bytes: bytes) -> np.ndarray:
+                import io
+
+                b = io.BytesIO(sample_bytes)
+                x, sr = sf.read(b, dtype="float32")
+                if isinstance(x, np.ndarray) and x.ndim > 1:
+                    x = x.mean(axis=1)
+                x = np.asarray(x, dtype=np.float32).reshape(-1)
+                if int(sr) != SR:
+                    x = _resample_linear(x, int(sr), SR)
+                emb = _embed_wave(x)
+                if emb is None:
+                    raise RuntimeError("Failed to embed enrollment sample")
+                return emb
+
+            _ENROLL_CACHE = EnrollmentCache(
+                provider=provider,
+                embed_fn=_embed_bytes,
+                ttl_s=ttl_s,
+                max_tenants=max_tenants,
+            )
+            logger.info("Enrollment cache enabled for whisperx_worker: backend=%s", backend)
+        except Exception:
+            logger.warning("Failed to initialize enrollment cache; falling back to legacy_dir", exc_info=True)
+            _ENROLL_CACHE = None
+
+    # Legacy flat dir is always allowed as a dev fallback.
+    enroll_dir = os.getenv("ENROLL_DIR", "enrolled_speakers")
+    if os.path.isdir(enroll_dir):
+        per_name: Dict[str, List[np.ndarray]] = defaultdict(list)
+        for fname in os.listdir(enroll_dir):
+            if not fname.lower().endswith((".wav", ".flac", ".mp3", ".ogg")):
+                continue
+            path = os.path.join(enroll_dir, fname)
+            base = os.path.splitext(fname)[0]
+            name = base.split("_")[0]
+            try:
+                with _EMBED_LOCK:
+                    emb = _EMBED_INFER(path)  # type: ignore[operator]
+                emb = np.array(emb, dtype=np.float32)
+                if emb.ndim > 1:
+                    emb = emb.mean(axis=0)
+                per_name[name].append(emb)
+            except Exception:
+                logger.warning("Failed to legacy-enroll from %s", fname, exc_info=True)
+
+        for name, embs in per_name.items():
+            if not embs:
+                continue
+            arr = np.stack(embs, axis=0)
+            mean = arr.mean(axis=0)
+            mean /= np.linalg.norm(mean) + 1e-12
+            _LEGACY_ENROLLED[name] = mean
+
+        if _LEGACY_ENROLLED:
+            logger.info("Legacy enrollment loaded: %s", ", ".join(sorted(_LEGACY_ENROLLED.keys())))
+
+
+def _embed_wave(wave: np.ndarray) -> Optional[np.ndarray]:
+    if _EMBED_INFER is None or wave.size < int(0.25 * SR):
+        return None
+
+    try:
+        with _EMBED_LOCK:
+            audio = {"waveform": torch.from_numpy(wave).unsqueeze(0), "sample_rate": SR}
+            emb = _EMBED_INFER(audio)  # type: ignore[operator]
+        emb = np.array(emb, dtype=np.float32)
+        if emb.ndim > 1:
+            emb = emb.mean(axis=0)
+        emb /= np.linalg.norm(emb) + 1e-12
+        return emb
+    except Exception:
+        logger.warning("Failed to embed wave", exc_info=True)
+        return None
+
+
+def _get_enrolled_embeddings_for_tenant(tenant: Optional[str]) -> Dict[str, np.ndarray]:
+    t = (tenant or "default").strip() or "default"
+    if _ENROLL_CACHE is not None and t:
+        try:
+            snap = _ENROLL_CACHE.get(t)
+            if snap.embeddings_by_label:
+                return snap.embeddings_by_label
+        except Exception:
+            logger.warning("Failed to load enrollment cache snapshot tenant=%s", t, exc_info=True)
+
+    # legacy fallback only for default tenant
+    if t == "default":
+        return _LEGACY_ENROLLED
+
+    return {}
+
+
+def _map_embedding_to_enrolled_label(emb: np.ndarray, enrolled: Dict[str, np.ndarray]) -> str:
+    if not enrolled:
+        return ""
+
+    best_name = ""
+    best_sim = -1.0
+    for name, ref in enrolled.items():
+        sim = float(np.dot(emb, ref))
+        if sim > best_sim:
+            best_sim = sim
+            best_name = name
+
+    if best_name and best_sim >= ENROLL_SIM_THRESHOLD:
+        return best_name
+    return ""
+
+
+def _diarize_audio(audio: np.ndarray) -> List[DiarizationSegment]:
+    if _DIAR_PIPE is None:
+        return []
+
+    try:
+        w = torch.from_numpy(audio.astype(np.float32, copy=False)).unsqueeze(0)
+        out = _DIAR_PIPE({"waveform": w, "sample_rate": SR})
+        segs: List[DiarizationSegment] = []
+        # pyannote returns an Annotation; iterate speaker-labeled segments
+        for turn, _, spk in out.itertracks(yield_label=True):
+            segs.append(DiarizationSegment(start_s=float(turn.start), end_s=float(turn.end), speaker=str(spk)))
+        return segs
+    except Exception:
+        logger.warning("Diarization failed", exc_info=True)
+        return []
+
+
+def run_whisperx_diarized(
+    wav_path: str,
+    *,
+    tenant: Optional[str],
+    lang: Optional[str],
+    use_alignment: bool,
+) -> Tuple[str, List[Tuple[float, float, str, str]]]:
+    """Run ASR and (optionally) diarization+enrollment mapping."""
+
+    # Make sure diarization models are ready (best-effort).
+    _init_diarization_models()
+
+    full_text, segs = run_whisperx(wav_path, lang=lang, use_alignment=use_alignment)
+
+    if not _ENABLE_DIARIZATION or _DIAR_PIPE is None or _EMBED_INFER is None:
+        return full_text, segs
+
+    # Load audio for diarization
+    _ensure_whisperx_imported()
+    try:
+        audio = whisperx.load_audio(wav_path)
+    except FileNotFoundError:
+        audio, _sr = sf.read(wav_path, dtype="float32")
+
+    if isinstance(audio, np.ndarray) and audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+
+    diar = _diarize_audio(audio)
+    if not diar:
+        return full_text, segs
+
+    # Assign diarization speakers to ASR segments by overlap
+    asr_time_segs = [TimeSegment(start_s=s0, end_s=s1) for (s0, s1, _txt, _spk) in segs]
+    diar_speakers = assign_speaker_by_overlap(
+        segments=asr_time_segs,
+        diarization=diar,
+        default_speaker="",
+        min_coverage=0.1,
+    )
+
+    # Map diar speaker clusters -> enrolled labels (tenant-aware)
+    enrolled = _get_enrolled_embeddings_for_tenant(tenant)
+
+    cluster_map: Dict[str, str] = {}
+    if enrolled:
+        unique_clusters = sorted({s for s in diar_speakers if s})
+        for cluster in unique_clusters:
+            # build a representative embedding for this cluster
+            chunks = []
+            for d in diar:
+                if d.speaker != cluster:
+                    continue
+                s_idx = int(max(0.0, d.start_s) * SR)
+                e_idx = int(min(float(audio.size) / SR, d.end_s) * SR)
+                if e_idx > s_idx:
+                    chunks.append(audio[s_idx:e_idx])
+
+            if not chunks:
+                continue
+
+            wave = np.concatenate(chunks)
+            # cap to 10 seconds for cost
+            max_samples = int(10.0 * SR)
+            if wave.size > max_samples:
+                wave = wave[:max_samples]
+
+            emb = _embed_wave(wave)
+            if emb is None:
+                continue
+
+            mapped = _map_embedding_to_enrolled_label(emb, enrolled)
+            if mapped:
+                cluster_map[cluster] = mapped
+
+    # Build final segments
+    out: List[Tuple[float, float, str, str]] = []
+    for (seg, cluster) in zip(segs, diar_speakers):
+        s0, s1, txt, _old = seg
+        speaker = cluster_map.get(cluster) or cluster or ""
+        out.append((s0, s1, txt, speaker))
+
+    return full_text, out
+
+
 def _flush_session_partial(
     session_id: str,
     lang_hint: Optional[str],
@@ -117,6 +502,9 @@ def _flush_session_partial(
     buf_samples: Dict[str, int],
     slice_index: Dict[str, int],
     producer: Producer,
+    session_lang: Dict[str, Optional[str]],
+    bff_origin_uri: Dict[str, Optional[str]],
+    tenant_id: Dict[str, Optional[str]],
 ) -> None:
     """
     Flush whatever remains in buffers[session_id] as a final (possibly < SLICE_SECONDS)
@@ -154,8 +542,9 @@ def _flush_session_partial(
     )
 
     try:
-        text, segments = run_whisperx(
+        text, segments = run_whisperx_diarized(
             wav_path,
+            tenant=tenant_id.get(session_id),
             lang=lang_hint,
             use_alignment=False,  # keep streaming worker lightweight
         )
@@ -192,6 +581,15 @@ def _flush_session_partial(
     buf_samples.pop(session_id, None)
     slice_index.pop(session_id, None)
 
+def _ensure_whisperx_imported() -> None:
+    global whisperx
+    if whisperx is not None:
+        return
+    import importlib
+
+    whisperx = importlib.import_module("whisperx")
+
+
 def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     """
     Global initialization of WhisperX.
@@ -200,6 +598,8 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     the full model download/compile cost.
     """
     global _WHISPERX_MODEL, _ALIGN_MODEL, _ALIGN_METADATA, _WHISPERX_DEVICE
+
+    _ensure_whisperx_imported()
 
     if _WHISPERX_MODEL is not None:
         logger.debug("WhisperX model already initialized, skipping.")
@@ -244,7 +644,7 @@ def _ensure_align_model(language_code: str) -> None:
     """
     global _ALIGN_MODEL, _ALIGN_METADATA, _WHISPERX_DEVICE
 
-    import whisperx
+    _ensure_whisperx_imported()
 
     if _ALIGN_MODEL is not None and _ALIGN_METADATA is not None:
         if _ALIGN_METADATA.get("language") == language_code:
@@ -422,6 +822,19 @@ def make_producer() -> Producer:
 def main():
     logger.info("Starting whisperx_worker")
 
+    if not torch.cuda.is_available():
+        logger.warning(
+            "whisperx_worker: CUDA not available; running on CPU (torch=%s torch.version.cuda=%s)",
+            getattr(torch, "__version__", "unknown"),
+            getattr(getattr(torch, "version", None), "cuda", None),
+        )
+    else:
+        logger.info(
+            "whisperx_worker: CUDA available; will use GPU (torch=%s torch.version.cuda=%s)",
+            getattr(torch, "__version__", "unknown"),
+            getattr(getattr(torch, "version", None), "cuda", None),
+        )
+
     try:
         _init_whisperx()
     except Exception as e:
@@ -457,10 +870,20 @@ def main():
                 )
                 lang_hint = session_lang.get(sid)
                 _flush_session_partial(
-                    sid, lang_hint, buffers, buf_samples, slice_index, p
+                    sid,
+                    lang_hint,
+                    buffers,
+                    buf_samples,
+                    slice_index,
+                    p,
+                    session_lang,
+                    bff_origin_uri,
+                    tenant_id,
                 )
                 last_activity.pop(sid, None)
                 session_lang.pop(sid, None)
+                bff_origin_uri.pop(sid, None)
+                tenant_id.pop(sid, None)
 
             # --- 2) Normal Kafka polling ---
             logger.debug("Waiting for message from Kafka")
@@ -537,8 +960,11 @@ def main():
                     wav_path,
                 )
 
-                text, segments = run_whisperx(
-                    wav_path, lang=session_lang.get(session_id), use_alignment=False
+                text, segments = run_whisperx_diarized(
+                    wav_path,
+                    tenant=tenant_id.get(session_id),
+                    lang=session_lang.get(session_id),
+                    use_alignment=False,
                 )
                 logger.debug("Ran WhisperX inference, entire text is: %s", text)
 
@@ -583,7 +1009,15 @@ def main():
         for sid in list(buffers.keys()):
             lang_hint = session_lang.get(sid)
             _flush_session_partial(
-                sid, lang_hint, buffers, buf_samples, slice_index, p
+                sid,
+                lang_hint,
+                buffers,
+                buf_samples,
+                slice_index,
+                p,
+                session_lang,
+                bff_origin_uri,
+                tenant_id,
             )
         try:
             c.close()

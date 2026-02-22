@@ -6,15 +6,27 @@ import numpy as np
 import pytest
 
 # Unit tests can run without whisperx installed.
-import importlib.util
-
-if importlib.util.find_spec("whisperx") is None:
-    pytest.skip(
-        "whisperx not installed in this env; skipping whisperx worker unit tests",
-        allow_module_level=True,
-    )
+# We will stub the lazy import mechanism.
 
 from whisperx_worker import whisperx_worker
+
+
+class DummyWhisperXModule:
+    def __init__(self):
+        self._load_model_calls = []
+
+    def load_model(self, name, device, compute_type):
+        self._load_model_calls.append((name, device, compute_type))
+        return DummyWhisperXModel([])
+
+    def load_audio(self, path):
+        return np.zeros(16000, dtype=np.float32)
+
+    def load_align_model(self, language_code, device):
+        return object(), {"language": language_code}
+
+    def align(self, *args, **kwargs):
+        return {"segments": []}
 
 
 class DummyWhisperXModel:
@@ -32,14 +44,17 @@ class DummyWhisperXModel:
 
 @pytest.fixture(autouse=True)
 def reset_globals(monkeypatch):
-    """
-    Make sure each test starts from a clean-ish worker state.
-    """
+    """Make sure each test starts from a clean-ish worker state."""
+
+    # stub whisperx module and bypass importlib
+    dummy_whisperx = DummyWhisperXModule()
+    monkeypatch.setattr(whisperx_worker, "whisperx", dummy_whisperx, raising=False)
+    monkeypatch.setattr(whisperx_worker, "_ensure_whisperx_imported", lambda: None, raising=False)
+
     monkeypatch.setattr(whisperx_worker, "_WHISPERX_MODEL", None, raising=False)
     monkeypatch.setattr(whisperx_worker, "_ALIGN_MODEL", None, raising=False)
     monkeypatch.setattr(whisperx_worker, "_ALIGN_METADATA", None, raising=False)
     yield
-    # best-effort reset after
     whisperx_worker._WHISPERX_MODEL = None
     whisperx_worker._ALIGN_MODEL = None
     whisperx_worker._ALIGN_METADATA = None
@@ -108,3 +123,42 @@ def test_run_whisperx_no_alignment(monkeypatch, tmp_path):
     assert out_segments[0][1] == pytest.approx(1.0)
     assert out_segments[0][2] == "Hello"
     assert out_segments[1][2] == "world"
+
+
+def test_run_whisperx_diarized_smoke_no_diarization(monkeypatch, tmp_path):
+    """Unit-level check: run_whisperx_diarized falls back to run_whisperx when
+    diarization is disabled/unavailable.
+
+    This keeps unit tests light (no pyannote required).
+    """
+
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "Hello"},
+    ]
+
+    dummy_model = DummyWhisperXModel(segments, language="en")
+
+    # avoid real model init
+    monkeypatch.setattr(whisperx_worker, "_init_whisperx", lambda lang_hint=None: None)
+
+    # patch model + load_audio
+    whisperx_worker._WHISPERX_MODEL = dummy_model
+    monkeypatch.setattr(
+        whisperx_worker.whisperx, "load_audio", lambda path: np.zeros(16000, dtype=np.float32)
+    )
+
+    # force diarization off
+    monkeypatch.setattr(whisperx_worker, "_ENABLE_DIARIZATION", False, raising=False)
+
+    wav_path = str(tmp_path / "dummy.wav")
+    Path(wav_path).write_bytes(b"")
+
+    full_text, out_segments = whisperx_worker.run_whisperx_diarized(
+        wav_path,
+        tenant="t",
+        lang="en",
+        use_alignment=False,
+    )
+
+    assert full_text == "Hello"
+    assert out_segments == [(0.0, 1.0, "Hello", "")]
