@@ -35,6 +35,10 @@ copy .env.example .env
 Edit `.env` and set at least:
 - `HF_TOKEN=...`
 
+Security note:
+- By default, `docker-compose.yml` binds published ports to **localhost only** via `COMPOSE_BIND_IP=127.0.0.1`.
+- If you need services reachable from outside localhost (not recommended), override `COMPOSE_BIND_IP`.
+
 Optional overrides:
 - `SAMURAIBFF_PATH=...`
 - `SAMURAIPERSISTOR_PATH=...`
@@ -132,6 +136,11 @@ This runs **Kafka + Postgres** in Docker Compose and deploys app services to loc
 > Keycloak is expected to be reachable externally (your ECS dev profile is fine). Compose does not start it by default.
 
 ### 2.1 Start infra only
+
+Before you start: for **Docker Desktop Kubernetes pods** to reach compose infra via `host.docker.internal`, you may need:
+- `COMPOSE_BIND_IP=0.0.0.0` (and then use Windows Firewall to restrict LAN access)
+
+Then:
 
 ```bash
 docker compose up -d broker kafka_init postgres persistor_migrate db_seed
@@ -231,8 +240,17 @@ kubectl port-forward svc/nanosamurai-stack-bff 8000:8000
 Then open:
 - http://localhost:8000
 
-NodePort (optional):
-- http://localhost:30080
+NodePort (optional / opt-in):
+- By default the Helm chart uses **ClusterIP** for security.
+- To expose the BFF via NodePort, set:
+  ```yaml
+  bff:
+    service:
+      type: NodePort
+      nodePort: 30080
+  ```
+  Then access:
+  - http://localhost:30080
 
 > Keycloak note: your Keycloak client redirect URIs must match whichever host+port you use.
 > Allow `http://localhost:8000/*` for port-forward and/or `http://localhost:30080/*` for NodePort.

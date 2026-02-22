@@ -36,7 +36,27 @@ From repo root:
 ```bash
 copy .env.example .env
 # set HF_TOKEN in .env
+```
 
+### Security note: avoid exposing infra ports to your LAN
+
+By default, `docker-compose.yml` binds published ports (Postgres/Kafka/LocalStack/etc.) to **localhost only**.
+
+- Default: `COMPOSE_BIND_IP=127.0.0.1` (recommended; safest)
+- If you run **Docker Desktop Kubernetes** and need pods to reach compose infra via `host.docker.internal`, set:
+  - `COMPOSE_BIND_IP=0.0.0.0`
+  - and rely on **Windows Firewall** to block inbound LAN traffic to these ports.
+
+Sanity check (Windows):
+```bat
+netstat -ano | findstr ":5432 :4566 :9092 :39092 :49092"
+```
+- With `COMPOSE_BIND_IP=127.0.0.1`, listeners should show `127.0.0.1:<port>`.
+- If you see `0.0.0.0:<port>`, that port is reachable from outside localhost unless blocked by a firewall.
+
+Then start infra:
+
+```bash
 docker compose up -d broker kafka_init postgres db_migrate db_seed
 ```
 
@@ -190,8 +210,17 @@ kubectl port-forward svc/nanosamurai-stack-bff 8000:8000
 Then open:
 - http://localhost:8000
 
-NodePort (optional):
-- http://localhost:30080 (default NodePort)
+NodePort (optional / opt-in):
+- By default the Helm chart uses **ClusterIP** for security.
+- To expose the BFF via NodePort, set:
+  ```yaml
+  bff:
+    service:
+      type: NodePort
+      nodePort: 30080
+  ```
+  Then access:
+  - http://localhost:30080
 
 > Keycloak note: redirects/callbacks are controlled by the client configuration (redirect URIs).
 > If you use NodePort, include `http://localhost:30080/*` in allowed redirect URIs.
