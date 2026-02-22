@@ -47,6 +47,7 @@ docker compose up --build
 
 What this starts:
 - Kafka (with internal + host + minikube listeners)
+- **LocalStack (S3)** for enrollment storage (persistent volume)
 - Postgres
 - DB migrations (samuraipersistor migratus)
 - DB seed (creates the dev tenant row needed by unauth BFF)
@@ -57,6 +58,7 @@ What this starts:
 Open:
 - BFF/UI: http://localhost:8000
 - Persistor health: http://127.0.0.1:8010/health
+- LocalStack S3 endpoint: http://localhost:4566
 
 > Note: on Windows, `localhost` may resolve to IPv6 first (`::1`), and persistor binds IPv4 (`0.0.0.0`).
 
@@ -77,7 +79,23 @@ set SAMURAIBFF_AUTH_ISSUER=https://<your-issuer>/realms/<realm>
 
 > We keep `docker/keycloak/realm-drsynth.json` as a reference realm import if you want to run a local Keycloak.
 
-### 1.4 Common checks
+### 1.4 Enrollment storage (LocalStack S3)
+
+For end-to-end multi-tenant speaker enrollment we run S3 locally using **LocalStack**.
+
+Defaults in `docker-compose.yml`:
+- bucket: `xamurai-enrollment`
+- prefix: `enrollment/`
+- endpoint: `http://localhost:4566`
+
+LocalStack is configured with persistence, so speaker enrollment uploads survive `docker compose down` / up.
+
+To list enrollment objects:
+```bash
+aws --endpoint-url http://localhost:4566 s3 ls s3://xamurai-enrollment/enrollment --recursive
+```
+
+### 1.5 Common checks
 
 Kafka topics were created by `kafka_init`.
 
