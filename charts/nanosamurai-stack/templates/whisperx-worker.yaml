@@ -29,6 +29,11 @@ spec:
               value: "audio.raw"
             - name: KAFKA_TOPIC_REFINED
               value: "transcripts.refined"
+
+            {{- if .Values.hfCache.enabled }}
+            - name: HF_HOME
+              value: {{ .Values.hfCache.mountPath | quote }}
+            {{- end }}
             - name: KAFKA_GROUP_ID
               value: "whisperx-async"
             - name: WHISPERX_SLICE_SECONDS
@@ -43,4 +48,16 @@ spec:
             limits:
               nvidia.com/gpu: {{ .Values.whisperxWorker.gpu.count }}
           {{- end }}
+
+          {{- if .Values.hfCache.enabled }}
+          volumeMounts:
+            - name: hf-cache
+              mountPath: {{ .Values.hfCache.mountPath | quote }}
+          {{- end }}
+      {{- if .Values.hfCache.enabled }}
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: {{ include "nanosamurai-stack.fullname" . }}-hf-cache-pvc
+      {{- end }}
 {{- end }}

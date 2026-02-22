@@ -11,7 +11,7 @@ BFF (samuraibff)
 
 {{- if eq .Values.bff.service.type "NodePort" }}
 
-  NodePort URL (optional): http://localhost:{{ .Values.bff.service.nodePort }}
+  NodePort URL (optional / opt-in): http://localhost:{{ .Values.bff.service.nodePort }}
 {{- end }}
 
 Persistor

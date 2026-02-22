@@ -34,8 +34,11 @@ images:
 bff:
   replicas: 1
   service:
-    type: NodePort
+    # Security-first default: keep the Service internal and access it via
+    # `kubectl port-forward`. NodePort is supported but must be an explicit opt-in.
+    type: ClusterIP
     port: 8000
+    # Only used when `type: NodePort`.
     nodePort: 30080
 
   originUri: "http://localhost:8000"

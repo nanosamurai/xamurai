@@ -50,8 +50,11 @@ bff:
 
   replicas: 1
   service:
-    type: NodePort
+    # Security-first default: keep the Service internal and access it via
+    # `kubectl port-forward`. NodePort is supported but must be an explicit opt-in.
+    type: ClusterIP
     port: 8000
+    # Only used when `type: NodePort`.
     nodePort: 30080
 
   probes:
@@ -90,7 +93,17 @@ rtservice:
     port: 50052
 
   # HF token is required for pyannote downloads.
+  #
+  # Security note:
+  # - Prefer providing the token via an existing Kubernetes Secret (hfTokenSecret)
+  #   rather than putting it directly into Helm values.
   hfToken: ""
+
+  # Optional: reference an existing Secret containing HF_TOKEN.
+  # If set, the chart will NOT create its own Secret.
+  hfTokenSecret:
+    name: ""
+    key: "HF_TOKEN"
 
   gpu:
     enabled: false
@@ -116,6 +129,26 @@ finalizerWorker:
   gpu:
     enabled: false
     count: 1
+
+# Optional shared HuggingFace cache to avoid re-downloading models on each restart.
+#
+# Recommended for local clusters (Docker Desktop / minikube). If disabled, pods will
+# download models into the container filesystem which is lost on restart.
+hfCache:
+  enabled: false
+
+  pvc:
+    # Create a PVC named <release>-hf-cache-pvc.
+    enabled: true
+    # Leave empty to use the cluster default storage class.
+    storageClassName: ""
+    # Adjust to your needs; Whisper/pyannote/WhisperX caches can be many GB.
+    size: 20Gi
+    accessModes:
+      - ReadWriteOnce
+
+  # Mounted into model-downloading pods (rtservice/whisperx/finalizer).
+  mountPath: "/data/hf_cache"
 
 recordings:
   # In Kubernetes, recorder + finalizer must share the same storage.
