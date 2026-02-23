@@ -97,6 +97,10 @@ If you plan to use **enrolled speakers** end-to-end in k8s mode:
 - **samuraibff** needs S3 access (it writes `speaker.json` + samples)
 - **rtservice/whisperx/finalizer** need S3 access (they read tenant enrollment and map diarization speakers)
 
+> Important: diarization/enrollment in `whisperx_worker` and `finalizer_worker` also require **HF_TOKEN**.
+> When using the chart’s `rtservice.hfTokenSecret`, make sure the Helm chart version you deploy
+> propagates that Secret into those worker pods as well.
+
 Create a Kubernetes secret with the LocalStack credentials (default `test`/`test`):
 
 ```bash

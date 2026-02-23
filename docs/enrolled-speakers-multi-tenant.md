@@ -156,6 +156,8 @@ Implemented in:
 
 Notes:
 - Diarization is best-effort and requires `HF_TOKEN` (pyannote models). If missing, the worker falls back to speaker="".
+- In Kubernetes, make sure `HF_TOKEN` is provided not only to `rtservice`, but also to `whisperx_worker` and `finalizer_worker`.
+  If you use a Secret via Helm (`rtservice.hfTokenSecret`), the chart must propagate it to those pods.
 - Enrollment mapping supports both legacy local dir (dev) and manifest-based backends via `ENROLL_BACKEND`.
 - Dev/testing:
   - lightweight unit tests run in `drsynth-bff` (no WhisperX installed)
@@ -187,6 +189,9 @@ Deliverables:
 - persistor writes
 - S3 manifest writer
 
+Status:
+- [x] Started
+- [x] Completed
 ---
 
 ## Notes on HA
