@@ -32,8 +32,7 @@ spec:
               value: "audio.raw"
             - name: RT_GRPC_PORT
               value: "50052"
-            - name: ENROLL_DIR
-              value: "/app/enrolled_speakers"
+            {{- include "nanosamurai-stack.enrollmentEnv" . | nindent 12 }}
             - name: FW_LANG_DEFAULT
               value: ""
 

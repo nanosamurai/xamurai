@@ -57,7 +57,48 @@ netstat -ano | findstr ":5432 :4566 :9092 :39092 :49092"
 Then start infra:
 
 ```bash
-docker compose up -d broker kafka_init postgres db_migrate db_seed
+docker compose up -d broker kafka_init postgres db_migrate db_seed localstack
+```
+
+### LocalStack S3 (speaker enrollment)
+
+If you plan to use **enrolled speakers** end-to-end in k8s mode:
+- **samuraibff** needs S3 access (it writes `speaker.json` + samples)
+- **rtservice/whisperx/finalizer** need S3 access (they read tenant enrollment and map diarization speakers)
+
+We run LocalStack in compose on the host.
+
+Create a Kubernetes secret with the LocalStack credentials (default `test`/`test`):
+
+```bash
+kubectl create secret generic nanosamurai-localstack-s3 \
+  --from-literal=accessKey=test \
+  --from-literal=secretKey=test
+```
+
+And ensure your Helm values include (Docker Desktop example):
+
+```yaml
+bff:
+  s3:
+    endpoint: "http://host.docker.internal:4566"
+    bucket: "xamurai-enrollment"
+    enrollmentPrefix: "enrollment"
+    region: "us-east-1"
+    forcePathStyle: true
+    credentialsSecret:
+      name: "nanosamurai-localstack-s3"
+
+enrollment:
+  backend: "s3_manifest"
+  s3:
+    endpoint: "http://host.docker.internal:4566"
+    bucket: "xamurai-enrollment"
+    prefix: "enrollment"
+    region: "us-east-1"
+    forcePathStyle: true
+    credentialsSecret:
+      name: "nanosamurai-localstack-s3"
 ```
 
 Infra endpoints:
@@ -71,6 +112,8 @@ Infra endpoints:
 - Kafka (from pods):
   - Docker Desktop k8s: `host.docker.internal:49092`
   - minikube: `host.minikube.internal:39092`
+
+- LocalStack for AWS3
 
 Why two Kafka ports? See `docs/local-stack.md`.
 
@@ -119,6 +162,26 @@ docker build -t drsynth-finalizer-worker:local -f finalizer_worker/Dockerfile .
 
 Load into cluster:
 
+#### Docker Desktop's k8s
+```bash
+#Docker Desktop's k8s (if you are using kind) might not automatically pull the image, force upload them to kind's docker image like this:
+REM --- core services ---
+docker save drsynth-rtservice:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save drsynth-recorder-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save drsynth-finalizer-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save drsynth-whisperx-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+
+REM --- if you also build/pin these locally (only include if you have local tags) ---
+docker save samuraibff:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save samuraipersistor:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+
+# Kubernetes will also not automatically restart pods.
+# Force a restart to pick up rebuilt images:
+#   kubectl rollout restart deploy/nanosamurai-stack-finalizer-worker
+#   kubectl rollout restart deploy/nanosamurai-stack-whisperx-worker
+```
+
+#### Minikube
 ```bash
 # Minikube only:
 minikube image load drsynth-rtservice:local
@@ -132,21 +195,6 @@ minikube image load samuraipersistor:local
 # (Images are already in the Docker Desktop engine; no extra load step needed.)
 
 # IMPORTANT: If you rebuild an image but keep the same tag (e.g. :local),
-#Docker Desktop's k8s (if you are using kind) might not automatically pull the image, force upload them to kind's docker image like this:
-REM --- core services ---
-docker save drsynth-rtservice:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
-docker save drsynth-recorder-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
-docker save drsynth-finalizer-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
-docker save drsynth-whisperx-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
-
-REM --- if you also build/pin these locally (only include if you have local tags) ---
-REM docker save drsynth-samuraibff:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
-REM docker save drsynth-samuraipersistor:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
-
-# Kubernetes will also not automatically restart pods.
-# Force a restart to pick up rebuilt images:
-#   kubectl rollout restart deploy/nanosamurai-stack-finalizer-worker
-#   kubectl rollout restart deploy/nanosamurai-stack-whisperx-worker
 ```
 
 ### Option B (for minikube only): build directly into minikube Docker daemon (minikube only)

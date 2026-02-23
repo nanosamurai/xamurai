@@ -39,6 +39,8 @@ spec:
             - name: RECORDINGS_DIR
               value: {{ .Values.recordings.mountPath | quote }}
 
+            {{- include "nanosamurai-stack.enrollmentEnv" . | nindent 12 }}
+
           volumeMounts:
             - name: recordings
               mountPath: {{ .Values.recordings.mountPath | quote }}

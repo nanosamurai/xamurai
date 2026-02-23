@@ -45,6 +45,43 @@ images:
     repository: "drsynth-finalizer-worker"
     tag: "dev"
 
+# Enrollment reader configuration (rtservice/whisperx/finalizer)
+#
+# This controls how transcription services resolve per-tenant enrolled speakers.
+#
+# Supported backends:
+# - legacy_dir: load a flat local folder (dev-only)
+# - local_manifest: read per-tenant manifests from a shared filesystem
+# - s3_manifest: read per-tenant manifests + samples from S3/S3-compatible storage
+#
+# Env vars emitted into pods:
+# - ENROLL_BACKEND
+# - ENROLL_DIR (legacy_dir/local_manifest)
+# - ENROLL_S3_* (s3_manifest)
+# - ENROLL_CACHE_* (optional)
+
+enrollment:
+  backend: "legacy_dir"
+
+  # Used when backend is legacy_dir or local_manifest
+  dir: "/app/enrolled_speakers"
+
+  cache:
+    ttlSeconds: 300
+    maxTenants: 128
+
+  s3:
+    bucket: ""
+    prefix: "enrollment"
+    region: ""
+    endpoint: ""
+    forcePathStyle: true
+
+    credentialsSecret:
+      name: ""
+      accessKeyKey: "accessKey"
+      secretKeyKey: "secretKey"
+
 bff:
   enabled: true
 
@@ -71,6 +108,22 @@ bff:
   rtservice:
     inCluster: true
     externalGrpcAddr: "host.docker.internal:50052"
+
+  # Enrolled speakers (S3 / S3-compatible)
+  # Used by samuraibff to store speaker enrollment manifests and WAV samples.
+  s3:
+    bucket: ""
+    enrollmentPrefix: "enrollment"
+    region: ""
+    endpoint: ""
+    # For LocalStack/MinIO you typically want this true.
+    forcePathStyle: true
+
+    # Secret holding S3 credentials (accessKey/secretKey). Use an existing Secret.
+    credentialsSecret:
+      name: ""
+      accessKeyKey: "accessKey"
+      secretKeyKey: "secretKey"
 
 persistor:
   enabled: true
