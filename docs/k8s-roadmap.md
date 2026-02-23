@@ -1,7 +1,11 @@
 # Kubernetes deployment roadmap (nanosamurai)
 
 This is a living design doc for the long-term Kubernetes deployment of the nanosamurai stack.
-It’s intended to guide local minikube development, staging, and production.
+It’s intended to guide local Kubernetes development, staging, and production.
+
+Local note:
+- On **Windows**, the preferred and tested local cluster is **Docker Desktop Kubernetes**.
+- **Minikube** is still useful on Linux/WSL2, but it’s not the primary Windows workflow.
 
 **Services**
 - App/API/UI: `samuraibff`
@@ -21,7 +25,7 @@ It’s intended to guide local minikube development, staging, and production.
 
 ### Short-term (dev reliability)
 - One-command local bring-up (compose-only)
-- One-command “k8s-like” bring-up (compose infra + minikube apps)
+- One-command “k8s-like” bring-up (compose infra + local k8s apps)
 - Deterministic topic + schema initialization
 
 ### Medium-term (staging/prod correctness)
@@ -61,7 +65,8 @@ Why: infra lifecycle differs (stateful, backups, upgrades). Apps iterate faster.
 
 Use Helm values overlays per environment:
 - `values.yaml` (defaults)
-- `values.local.yaml` (minikube)
+- `values.local.docker-desktop.yaml` (Docker Desktop Kubernetes)
+- `values.local.minikube.yaml` (minikube)
 - `values.dev.yaml` (shared dev cluster)
 - `values.staging.yaml`
 - `values.prod.yaml`
@@ -88,6 +93,7 @@ K8s equivalent options:
 Standardize bootstrap values:
 - in-cluster apps: `kafka:9092` (service)
 - local minikube apps: `host.minikube.internal:39092` (compose)
+- local Docker Desktop k8s apps: `host.docker.internal:49092` (compose)
 
 ---
 
