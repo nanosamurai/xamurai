@@ -36,6 +36,7 @@ RUN pip install \
       --index-url https://download.pytorch.org/whl/cu128
 
 # 2) Install the rest from PyPI
+# NOTE: pyannote-audio depends on omegaconf/hydra for some checkpoint configs.
 RUN pip install \
       numpy \
       scipy \
@@ -45,7 +46,9 @@ RUN pip install \
       grpcio \
       grpcio-tools \
       faster-whisper \
-      pyannote-audio
+      pyannote-audio \
+      omegaconf \
+      hydra-core
 
 # Copy monorepo
 COPY . /app
