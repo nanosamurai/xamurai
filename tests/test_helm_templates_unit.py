@@ -21,6 +21,10 @@ def test_nanosamurai_chart_propagates_hf_token_to_diarization_workers() -> None:
     # must appear 3x: rtservice + whisperx_worker + finalizer_worker
     assert rendered.count("- name: HF_TOKEN") >= 3
 
+    # Local overlay should also relax rollout/probe settings for slow cold starts.
+    assert "progressDeadlineSeconds: 3600" in rendered
+    assert "failureThreshold: 360" in rendered
+
 
 def test_nanosamurai_chart_renders_enrollment_env_when_backend_s3_manifest() -> None:
     rendered = _render(
