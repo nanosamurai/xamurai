@@ -49,6 +49,35 @@ bff:
   probes:
     readinessPath: "/health"
 
+  # Enrollment storage (LocalStack S3) - writer (samuraibff)
+  s3:
+    endpoint: "http://host.docker.internal:4566"
+    bucket: "xamurai-enrollment"
+    enrollmentPrefix: "enrollment"
+    region: "us-east-1"
+    forcePathStyle: true
+    credentialsSecret:
+      name: "nanosamurai-localstack-s3"
+      accessKeyKey: "accessKey"
+      secretKeyKey: "secretKey"
+
+# Enrollment reader (rtservice/whisperx/finalizer)
+enrollment:
+  backend: "s3_manifest"
+  cache:
+    ttlSeconds: 300
+    maxTenants: 128
+  s3:
+    endpoint: "http://host.docker.internal:4566"
+    bucket: "xamurai-enrollment"
+    prefix: "enrollment"
+    region: "us-east-1"
+    forcePathStyle: true
+    credentialsSecret:
+      name: "nanosamurai-localstack-s3"
+      accessKeyKey: "accessKey"
+      secretKeyKey: "secretKey"
+
 persistor:
   probes:
     readinessPath: "/health"

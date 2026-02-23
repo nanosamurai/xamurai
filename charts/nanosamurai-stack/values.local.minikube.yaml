@@ -8,6 +8,36 @@ infra:
   kafkaBootstrapServers: "host.minikube.internal:39092"
   postgresJdbcUrl: "jdbc:postgresql://host.minikube.internal:5432/drsynth"
 
+bff:
+  # Enrollment storage (LocalStack S3) - writer (samuraibff)
+  s3:
+    endpoint: "http://host.minikube.internal:4566"
+    bucket: "xamurai-enrollment"
+    enrollmentPrefix: "enrollment"
+    region: "us-east-1"
+    forcePathStyle: true
+    credentialsSecret:
+      name: "nanosamurai-localstack-s3"
+      accessKeyKey: "accessKey"
+      secretKeyKey: "secretKey"
+
+# Enrollment reader (rtservice/whisperx/finalizer)
+enrollment:
+  backend: "s3_manifest"
+  cache:
+    ttlSeconds: 300
+    maxTenants: 128
+  s3:
+    endpoint: "http://host.minikube.internal:4566"
+    bucket: "xamurai-enrollment"
+    prefix: "enrollment"
+    region: "us-east-1"
+    forcePathStyle: true
+    credentialsSecret:
+      name: "nanosamurai-localstack-s3"
+      accessKeyKey: "accessKey"
+      secretKeyKey: "secretKey"
+
 recordings:
   # For minikube we can use a simple hostPath PV.
   hostPath: "/data/nanosamurai-recordings"

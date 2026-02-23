@@ -43,6 +43,8 @@ spec:
             - name: WHISPERX_COMPUTE_TYPE
               value: ""
 
+            {{- include "nanosamurai-stack.enrollmentEnv" . | nindent 12 }}
+
           {{- if and .Values.whisperxWorker.gpu.enabled (gt (int .Values.whisperxWorker.gpu.count) 0) }}
           resources:
             limits:
