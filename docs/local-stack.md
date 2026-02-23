@@ -99,6 +99,14 @@ To list enrollment objects:
 aws --endpoint-url http://localhost:4566 s3 ls s3://xamurai-enrollment/enrollment --recursive
 ```
 
+To reset enrollment state completely (destroys persisted LocalStack state):
+
+```bash
+docker compose down
+docker volume rm drsynth_nanosamurai_localstack
+```
+
+
 ### 1.5 Common checks
 
 Kafka topics were created by `kafka_init`.
@@ -139,11 +147,12 @@ This runs **Kafka + Postgres** in Docker Compose and deploys app services to loc
 
 Before you start: for **Docker Desktop Kubernetes pods** to reach compose infra via `host.docker.internal`, you may need:
 - `COMPOSE_BIND_IP=0.0.0.0` (and then use Windows Firewall to restrict LAN access)
+- this is however unsecure and should be avoided
 
 Then:
 
 ```bash
-docker compose up -d broker kafka_init postgres persistor_migrate db_seed
+docker compose up -d broker kafka_init postgres persistor_migrate db_seed localstack
 ```
 
 #### Kafka ports and why we expose two of them

@@ -55,6 +55,30 @@ spec:
             - name: SAMURAIBFF_ORIGIN_URI
               value: {{ .Values.bff.originUri | quote }}
 
+            # Enrolled speakers (S3)
+            - name: SAMURAIBFF_S3_BUCKET
+              value: {{ .Values.bff.s3.bucket | default "" | quote }}
+            - name: SAMURAIBFF_S3_ENROLLMENT_PREFIX
+              value: {{ .Values.bff.s3.enrollmentPrefix | default "enrollment" | quote }}
+            - name: SAMURAIBFF_S3_REGION
+              value: {{ .Values.bff.s3.region | default "" | quote }}
+            - name: SAMURAIBFF_S3_ENDPOINT
+              value: {{ .Values.bff.s3.endpoint | default "" | quote }}
+            {{- if .Values.bff.s3.credentialsSecret.name }}
+            - name: SAMURAIBFF_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.bff.s3.credentialsSecret.name | quote }}
+                  key: {{ .Values.bff.s3.credentialsSecret.accessKeyKey | default "accessKey" | quote }}
+            - name: SAMURAIBFF_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.bff.s3.credentialsSecret.name | quote }}
+                  key: {{ .Values.bff.s3.credentialsSecret.secretKeyKey | default "secretKey" | quote }}
+            {{- end }}
+            - name: SAMURAIBFF_S3_FORCE_PATH_STYLE
+              value: {{ ternary "true" "false" (.Values.bff.s3.forcePathStyle | default true) | quote }}
+
           readinessProbe:
             httpGet:
               path: {{ .Values.bff.probes.readinessPath | default "/ready" | quote }}
