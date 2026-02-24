@@ -221,6 +221,8 @@ services:
       KAFKA_TOPIC_AUDIO: audio.raw
       KAFKA_TOPIC_REFINED: transcripts.refined
       KAFKA_GROUP_ID: whisperx-async
+      # Required for diarization (pyannote). Without this, the worker will emit speaker="".
+      HF_TOKEN: ${HF_TOKEN:?set HF_TOKEN in your environment}
       # HuggingFace cache location (container runs as non-root user)
       HF_HOME: /data/hf_cache
       WHISPERX_SLICE_SECONDS: "60.0"
@@ -281,6 +283,8 @@ services:
       KAFKA_TOPIC_RECORDING_FINISHED: recordings.finished
       KAFKA_TOPIC_TRANSCRIPTS_FINAL: transcripts.final
       KAFKA_GROUP_ID_FINALIZER: finalizer-worker
+      # Required for diarization (pyannote). Without this, the worker will emit speaker="".
+      HF_TOKEN: ${HF_TOKEN:?set HF_TOKEN in your environment}
       # HuggingFace cache location (container runs as non-root user)
       HF_HOME: /data/hf_cache
 
