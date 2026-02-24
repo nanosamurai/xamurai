@@ -42,6 +42,18 @@ If you need services reachable from outside localhost (not recommended), overrid
 
 ## 2) Start the stack (auth disabled by default)
 
+Compose defaults to `SAMURAIBFF_AUTH_REQUIRED=false`.
+
+When auth is disabled, the BFF still needs a **tenant id** so:
+- sessions are isolated in memory
+- Kafka `AudioChunk.tenant_id` is populated
+- enrollment lookup hits the correct S3 prefix
+
+For local dev we use a **guest tenant id** (seeded by `db_seed`):
+- `SAMURAIBFF_AUTH_GUEST_TENANT_ID=00000000-0000-0000-0000-000000000000`
+
+This is wired by default in `docker-compose.yml`.
+
 ```bash
 docker compose up --build
 ```
@@ -67,8 +79,15 @@ Open:
 
 ### Quick E2E verification (speaker labeling)
 
-If you have an enrollment sample in LocalStack (e.g. speaker label `Miro-cz` / `Miro (cz)`), you can validate that
-the async pipeline actually *labels* speakers (not just emits an empty `speaker` field) using the Tier4 smoke test.
+If you have an enrollment sample in LocalStack, you can validate that
+- diarization actually ran, and
+- enrollment mapping actually replaced `Speaker_0` with your enrolled label,
+
+using the Tier4 smoke test.
+
+Note: the label comes from the uploaded `speaker.json` (`"label"` field). If your LocalStack data uses
+`Miro (cz)` but you want the canonical test label `Miro-cz`, either re-enroll with that label or use
+`--expect-speaker-alias` in the smoke test.
 
 Create a small venv (Windows):
 
@@ -77,7 +96,7 @@ py -m venv .venv-smoke
 .venv-smoke\Scripts\pip install -r utilities/k8s_local_smoke_test/requirements.txt -r utilities/k8s_local_smoke_test/requirements.kafka.txt
 ```
 
-Run Tier4 and require a specific speaker label:
+Run Tier4 and require a specific speaker label (with an alias accepted for local data):
 
 ```bat
 .venv-smoke\Scripts\python utilities/k8s_local_smoke_test/tier4_async_pipeline.py \
@@ -85,7 +104,7 @@ Run Tier4 and require a specific speaker label:
   --wav tests/data/test_cs.wav --lang cs --stream-seconds 6.0 \
   --kafka-bootstrap 127.0.0.1:9092 \
   --timeout 420 --signal final \
-  --expect-speaker Miro-cz
+  --expect-speaker Miro-cz --expect-speaker-alias "Miro (cz)"
 ```
 
 If this fails, check logs for `whisperx_worker` and `finalizer_worker`:
@@ -112,6 +131,13 @@ To enable auth in BFF, set:
 ```bat
 set SAMURAIBFF_AUTH_REQUIRED=true
 set SAMURAIBFF_AUTH_ISSUER=https://<your-issuer>/realms/<realm>
+```
+
+When auth is disabled and you are running multi-tenant enrollment, ensure the guest tenant id is set:
+
+```bat
+set SAMURAIBFF_AUTH_REQUIRED=false
+set SAMURAIBFF_AUTH_GUEST_TENANT_ID=00000000-0000-0000-0000-000000000000
 ```
 
 > We keep `docker/keycloak/realm-drsynth.json` as a reference realm import if you want to run a local Keycloak.
