@@ -4,7 +4,7 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict
 
 import numpy as np
 
@@ -31,6 +31,10 @@ class EnrollmentCache:
     - Keyed by tenant_id
     - On cache miss / TTL expiry, fetches all speakers for the tenant via provider
       and computes mean embedding per human label.
+
+    Observability notes:
+    - We log when a tenant snapshot is loaded and how many speaker labels were produced.
+    - We intentionally do not log secrets; sample URLs may be logged at DEBUG.
 
     This is intentionally simple (eventual consistency). TTL is expected to be
     on the order of minutes.
@@ -61,21 +65,47 @@ class EnrollmentCache:
         if snap and (now - snap.loaded_at_s) <= self._ttl_s:
             # bump LRU
             self._lru.move_to_end(tid)
+            logger.debug(
+                "EnrollmentCache hit tenant=%s labels=%d age_s=%.1f",
+                tid,
+                len(snap.embeddings_by_label),
+                now - snap.loaded_at_s,
+            )
             return snap
 
         # reload
+        logger.info("EnrollmentCache load tenant=%s (ttl_s=%.1f)", tid, self._ttl_s)
+        t0 = time.time()
         snap = self._load_tenant(tid)
+        dt = time.time() - t0
+
         self._lru[tid] = snap
         self._lru.move_to_end(tid)
 
         # enforce max size
         while len(self._lru) > self._max_tenants:
-            self._lru.popitem(last=False)
+            evicted_tid, _ = self._lru.popitem(last=False)
+            logger.info("EnrollmentCache evict tenant=%s (max_tenants=%d)", evicted_tid, self._max_tenants)
+
+        if snap.embeddings_by_label:
+            logger.info(
+                "EnrollmentCache loaded tenant=%s labels=%d in %.2fs",
+                tid,
+                len(snap.embeddings_by_label),
+                dt,
+            )
+        else:
+            logger.warning(
+                "EnrollmentCache loaded tenant=%s but produced 0 embeddings (check manifests/samples)",
+                tid,
+            )
 
         return snap
 
     def _load_tenant(self, tenant_id: str) -> EnrollmentSnapshot:
         speaker_ids = self._provider.list_speaker_ids(tenant_id)
+        logger.info("EnrollmentCache: tenant=%s discovered speaker_ids=%d", tenant_id, len(speaker_ids))
+
         embeddings_by_label: Dict[str, np.ndarray] = {}
 
         for speaker_id in speaker_ids:
@@ -87,13 +117,33 @@ class EnrollmentCache:
                 )
                 continue
 
-            label = manifest.label
+            label = (manifest.label or "").strip()
             if not label:
+                logger.warning("Skipping speaker with empty label tenant=%s speaker_id=%s", tenant_id, speaker_id)
                 continue
+
+            if not manifest.samples:
+                logger.warning("Skipping speaker with 0 samples tenant=%s speaker_id=%s", tenant_id, speaker_id)
+                continue
+
+            logger.debug(
+                "EnrollmentCache: tenant=%s speaker_id=%s label=%s samples=%d",
+                tenant_id,
+                speaker_id,
+                label,
+                len(manifest.samples),
+            )
 
             embs = []
             for s in manifest.samples:
                 try:
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "Embedding enrollment sample tenant=%s speaker_id=%s url=%s",
+                            tenant_id,
+                            speaker_id,
+                            s.url,
+                        )
                     b = self._provider.open_url(s.url)
                     emb = self._embed_fn(b)
                     emb = np.asarray(emb, dtype=np.float32).reshape(-1)
@@ -110,6 +160,12 @@ class EnrollmentCache:
                     )
 
             if not embs:
+                logger.warning(
+                    "No usable embeddings for speaker tenant=%s speaker_id=%s label=%s",
+                    tenant_id,
+                    speaker_id,
+                    label,
+                )
                 continue
 
             # mean + normalize
