@@ -124,6 +124,8 @@ def main() -> int:
     audio_ws = _lib.connect_audio_ws(audio_url)
 
     try:
+        observed_speakers: dict[str, int] = {}
+
         print(f"[tier4] streaming {args.stream_seconds:.1f}s audio")
         _lib.stream_audio(audio_ws, pcm, frame_ms=20, max_seconds=args.stream_seconds)
         print("[tier4] waiting for async pipeline events (stop sending audio to allow idle)...")
@@ -153,6 +155,9 @@ def main() -> int:
                 ev = stream_pb2.RefinedEvent()
                 ev.ParseFromString(payload)
                 if ev.session_id == session_id:
+                    spk = ev.speaker or ""
+                    observed_speakers[spk] = observed_speakers.get(spk, 0) + 1
+
                     if args.expect_speaker:
                         if ev.speaker != args.expect_speaker:
                             # not good enough yet; keep waiting for a matching label
@@ -173,6 +178,11 @@ def main() -> int:
                 ev = stream_pb2.SessionTranscript()
                 ev.ParseFromString(payload)
                 if ev.session_id == session_id:
+                    # track observed speaker labels for debug (including empty)
+                    for s in ev.segments:
+                        spk = s.speaker or ""
+                        observed_speakers[spk] = observed_speakers.get(spk, 0) + 1
+
                     if args.expect_speaker:
                         speakers = {s.speaker for s in ev.segments if s.speaker}
                         if args.expect_speaker not in speakers:
@@ -192,6 +202,15 @@ def main() -> int:
                     return 0
 
         if args.expect_speaker:
+            if observed_speakers:
+                # sort by frequency desc for compact debug output
+                observed = sorted(observed_speakers.items(), key=lambda kv: (-kv[1], kv[0]))
+                observed_str = ", ".join([f"{k!r}:{v}" for (k, v) in observed[:10]])
+                more = "" if len(observed) <= 10 else f" (+{len(observed) - 10} more)"
+                print(f"[tier4] observed speakers (top): {observed_str}{more}")
+            else:
+                print("[tier4] observed speakers: <none>")
+
             print(
                 f"[tier4] FAIL(signal={args.signal}): did not observe expected event with speaker="
                 f"{args.expect_speaker!r} within {args.timeout:.0f}s"
