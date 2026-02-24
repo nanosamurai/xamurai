@@ -156,6 +156,8 @@ _ENROLL_CACHE: Optional["EnrollmentCache"] = None
 
 ENROLL_SIM_THRESHOLD = float(os.getenv("ENROLL_SIM_THRESHOLD", "0.30"))
 
+_DIAR_INIT_ATTEMPTED = False
+
 
 def _resample_linear(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     if sr_in == sr_out:
@@ -174,8 +176,36 @@ def _init_diarization_models() -> None:
     """Best-effort initialization of diarization + embedding models.
 
     This is optional and can be disabled via env.
+
+    Logging goal:
+    - make it obvious *why* diarization/enrollment is disabled (HF_TOKEN missing,
+      pyannote import error, pipeline init error, etc.)
     """
-    global _DIAR_PIPE, _DIAR_DEVICE, _EMBED_INFER, _ENROLL_CACHE, _LEGACY_ENROLLED
+
+    global _DIAR_PIPE, _DIAR_DEVICE, _EMBED_INFER, _ENROLL_CACHE, _LEGACY_ENROLLED, _DIAR_INIT_ATTEMPTED
+
+    if not _DIAR_INIT_ATTEMPTED:
+        _DIAR_INIT_ATTEMPTED = True
+        logger.info(
+            "whisperx_worker diarization config: enabled=%s hf_token=%s model=%s enroll_backend=%s sim_threshold=%.3f",
+            _ENABLE_DIARIZATION,
+            bool(os.getenv("HF_TOKEN")),
+            os.getenv("WHISPERX_DIAR_MODEL", "pyannote/speaker-diarization-3.1"),
+            os.getenv("ENROLL_BACKEND", "legacy_dir"),
+            ENROLL_SIM_THRESHOLD,
+        )
+
+        try:
+            import importlib.metadata as _md
+
+            logger.info(
+                "whisperx_worker versions: torch=%s pyannote-audio=%s whisperx=%s",
+                getattr(torch, "__version__", "unknown"),
+                _md.version("pyannote-audio"),
+                _md.version("whisperx"),
+            )
+        except Exception:
+            logger.debug("whisperx_worker versions: torch=%s", getattr(torch, "__version__", "unknown"))
 
     if not _ENABLE_DIARIZATION:
         logger.info("WHISPERX_ENABLE_DIARIZATION=false; diarization disabled")
@@ -207,8 +237,15 @@ def _init_diarization_models() -> None:
 
     def _load_diar(mid: str):
         logger.info("Loading diarization pipeline (%s) on %s", mid, _DIAR_DEVICE)
-        # pyannote.audio 3.x uses use_auth_token=... (older versions used token=...)
-        pipe = Pipeline.from_pretrained(mid, use_auth_token=hf_token)
+
+        # pyannote API compatibility:
+        # - pyannote.audio 4.x: Pipeline.from_pretrained(..., token=...)
+        # - pyannote.audio 3.x: Pipeline.from_pretrained(..., use_auth_token=...)
+        try:
+            pipe = Pipeline.from_pretrained(mid, token=hf_token)
+        except TypeError:
+            pipe = Pipeline.from_pretrained(mid, use_auth_token=hf_token)
+
         pipe.to(torch.device(_DIAR_DEVICE))
         return pipe
 
@@ -237,7 +274,10 @@ def _init_diarization_models() -> None:
 
     try:
         logger.info("Loading embedding model (pyannote/embedding) on %s", _DIAR_DEVICE)
-        emb_model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token)
+        try:
+            emb_model = Model.from_pretrained("pyannote/embedding", token=hf_token)
+        except TypeError:
+            emb_model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token)
         _EMBED_INFER = EmbeddingInference(emb_model, window="whole")
     except Exception:
         logger.warning("Failed to init embedding model; enrollment mapping disabled", exc_info=True)
@@ -388,6 +428,14 @@ def _map_embedding_to_enrolled_label(emb: np.ndarray, enrolled: Dict[str, np.nda
             best_sim = sim
             best_name = name
 
+    logger.debug(
+        "Enrollment mapping best=%s sim=%.3f threshold=%.3f candidates=%d",
+        best_name,
+        best_sim,
+        ENROLL_SIM_THRESHOLD,
+        len(enrolled),
+    )
+
     if best_name and best_sim >= ENROLL_SIM_THRESHOLD:
         return best_name
     return ""
@@ -400,10 +448,22 @@ def _diarize_audio(audio: np.ndarray) -> List[DiarizationSegment]:
     try:
         w = torch.from_numpy(audio.astype(np.float32, copy=False)).unsqueeze(0)
         out = _DIAR_PIPE({"waveform": w, "sample_rate": SR})
+
+        # pyannote output compatibility:
+        # - pyannote.audio 3.x: returns an Annotation directly
+        # - pyannote.audio 4.x: returns an object with `.speaker_diarization: Annotation`
+        diar = getattr(out, "speaker_diarization", None) or out
+
         segs: List[DiarizationSegment] = []
-        # pyannote returns an Annotation; iterate speaker-labeled segments
-        for turn, _, spk in out.itertracks(yield_label=True):
+        for turn, _, spk in diar.itertracks(yield_label=True):
             segs.append(DiarizationSegment(start_s=float(turn.start), end_s=float(turn.end), speaker=str(spk)))
+
+        if segs:
+            uniq = sorted({s.speaker for s in segs if s.speaker})
+            logger.debug("Diarization produced %d segments (speakers=%s)", len(segs), uniq)
+        else:
+            logger.info("Diarization produced 0 segments")
+
         return segs
     except Exception:
         logger.warning("Diarization failed", exc_info=True)
@@ -451,8 +511,21 @@ def run_whisperx_diarized(
         min_coverage=0.1,
     )
 
+    assigned = sum(1 for s in diar_speakers if s)
+    logger.info(
+        "Overlap assignment: asr_segments=%d assigned=%d unique=%d",
+        len(asr_time_segs),
+        assigned,
+        len(set(diar_speakers)),
+    )
+
     # Map diar speaker clusters -> enrolled labels (tenant-aware)
     enrolled = _get_enrolled_embeddings_for_tenant(tenant)
+    logger.info(
+        "Enrollment snapshot: tenant=%s labels=%d",
+        (tenant or "default"),
+        len(enrolled),
+    )
 
     cluster_map: Dict[str, str] = {}
     if enrolled:
