@@ -403,3 +403,39 @@ Notes:
   # Minikube
   kubectl exec -it deploy/nanosamurai-stack-whisperx-worker -- sh -lc "getent hosts host.minikube.internal"
   ```
+
+## Note: an easy wway to pause local setup without losing HF cache and data:
+#### Option A (safest): scale only this stack via label selector
+
+This avoids accidentally scaling other unrelated deployments:
+
+```bat
+kubectl scale deploy -n default -l app.kubernetes.io/name=nanosamurai-stack --replicas=0
+```
+
+Resume (you’ll need to set replicas back; if everything was 1):
+
+```bat
+kubectl scale deploy -n default -l app.kubernetes.io/name=nanosamurai-stack --replicas=1
+```
+
+#### Option B: scale explicit deployments (most explicit)
+
+```bat
+kubectl scale deploy/nanosamurai-stack-bff -n default --replicas=0
+kubectl scale deploy/nanosamurai-stack-persistor -n default --replicas=0
+kubectl scale deploy/nanosamurai-stack-rtservice -n default --replicas=0
+kubectl scale deploy/nanosamurai-stack-whisperx-worker -n default --replicas=0
+kubectl scale deploy/nanosamurai-stack-recorder-worker -n default --replicas=0
+kubectl scale deploy/nanosamurai-stack-finalizer-worker -n default --replicas=0
+```
+
+…and then scale them back to 1 when you want to continue.
+
+### Extra safety: keep the PVC even if you *do* uninstall later
+
+If you ever want the convenience of `helm uninstall` but still keep cache, you can annotate the PVC(s) with Helm’s keep policy:
+
+```bat
+kubectl annotate pvc nanosamurai-stack-hf-cache-pvc helm.sh/resource-policy=keep
+```
