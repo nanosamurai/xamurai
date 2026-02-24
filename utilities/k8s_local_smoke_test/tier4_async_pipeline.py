@@ -59,6 +59,16 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=90.0)
 
     ap.add_argument(
+        "--expect-speaker",
+        default="",
+        help=(
+            "Optional strict check: require that at least one emitted transcript segment "
+            "contains this exact speaker label (e.g. 'Miro-cz'). "
+            "Useful to catch cases where the speaker field exists but is always empty."
+        ),
+    )
+
+    ap.add_argument(
         "--signal",
         choices=["recording-finished", "refined", "final"],
         default="recording-finished",
@@ -143,6 +153,16 @@ def main() -> int:
                 ev = stream_pb2.RefinedEvent()
                 ev.ParseFromString(payload)
                 if ev.session_id == session_id:
+                    if args.expect_speaker:
+                        if ev.speaker != args.expect_speaker:
+                            # not good enough yet; keep waiting for a matching label
+                            continue
+                        print(
+                            f"[tier4] PASS(signal=refined): got RefinedEvent "
+                            f"for session={session_id} speaker={ev.speaker!r} text_len={len(ev.text)}"
+                        )
+                        return 0
+
                     print(
                         f"[tier4] PASS(signal=refined): got RefinedEvent "
                         f"for session={session_id} text_len={len(ev.text)}"
@@ -153,15 +173,33 @@ def main() -> int:
                 ev = stream_pb2.SessionTranscript()
                 ev.ParseFromString(payload)
                 if ev.session_id == session_id:
+                    if args.expect_speaker:
+                        speakers = {s.speaker for s in ev.segments if s.speaker}
+                        if args.expect_speaker not in speakers:
+                            # keep waiting; final transcript for this session may be emitted multiple times
+                            # (at-least-once semantics) or refined may arrive first.
+                            continue
+                        print(
+                            f"[tier4] PASS(signal=final): got SessionTranscript "
+                            f"for session={session_id} segments={len(ev.segments)} speakers={sorted(speakers)}"
+                        )
+                        return 0
+
                     print(
                         f"[tier4] PASS(signal=final): got SessionTranscript "
                         f"for session={session_id} segments={len(ev.segments)}"
                     )
                     return 0
 
-        print(
-            f"[tier4] FAIL(signal={args.signal}): did not observe expected event within {args.timeout:.0f}s"
-        )
+        if args.expect_speaker:
+            print(
+                f"[tier4] FAIL(signal={args.signal}): did not observe expected event with speaker="
+                f"{args.expect_speaker!r} within {args.timeout:.0f}s"
+            )
+        else:
+            print(
+                f"[tier4] FAIL(signal={args.signal}): did not observe expected event within {args.timeout:.0f}s"
+            )
         return 1
 
     finally:

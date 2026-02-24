@@ -155,13 +155,16 @@ Implemented in:
 - `tests/test_whisperx_worker_unit.py`
 
 Notes:
-- Diarization is best-effort and requires `HF_TOKEN` (pyannote models). If missing, the worker falls back to speaker="".
-- In Kubernetes, make sure `HF_TOKEN` is provided not only to `rtservice`, but also to `whisperx_worker` and `finalizer_worker`.
-  If you use a Secret via Helm (`rtservice.hfTokenSecret`), the chart must propagate it to those pods.
-- Enrollment mapping supports both legacy local dir (dev) and manifest-based backends via `ENROLL_BACKEND`.
-- Dev/testing:
-  - lightweight unit tests run in `drsynth-bff` (no WhisperX installed)
-  - full integration/E2E should run in `drsynth-whisperx` (or the Docker image)
+ - Diarization is best-effort and requires `HF_TOKEN` (pyannote models). If missing, the worker falls back to speaker="".
+ - In Kubernetes, make sure `HF_TOKEN` is provided not only to `rtservice`, but also to `whisperx_worker` and `finalizer_worker`.
+   If you use a Secret via Helm (`rtservice.hfTokenSecret`), the chart must propagate it to those pods.
+ - In Docker Compose, `HF_TOKEN` must also be present in `whisperx_worker` and `finalizer_worker` for diarization/enrollment.
+ - Enrollment mapping supports both legacy local dir (dev) and manifest-based backends via `ENROLL_BACKEND`.
+ - Compatibility note: we support both pyannote.audio 3.x and 4.x APIs for model loading (`token=` vs `use_auth_token=`)
+   and pipeline outputs (`.speaker_diarization` vs direct Annotation). This is to avoid silent diarization disablement.
+ - Dev/testing:
+   - lightweight unit tests run in `drsynth-bff` (no WhisperX installed)
+   - full integration/E2E should run in `drsynth-whisperx` (or the Docker image)
 
 ---
 
