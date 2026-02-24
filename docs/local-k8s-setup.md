@@ -404,7 +404,7 @@ Notes:
   kubectl exec -it deploy/nanosamurai-stack-whisperx-worker -- sh -lc "getent hosts host.minikube.internal"
   ```
 
-## Note: an easy wway to pause local setup without losing HF cache and data:
+## Note: an easy way to pause local setup without losing HF cache and data:
 #### Option A (safest): scale only this stack via label selector
 
 This avoids accidentally scaling other unrelated deployments:
