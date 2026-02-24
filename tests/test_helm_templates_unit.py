@@ -40,3 +40,17 @@ def test_nanosamurai_chart_renders_enrollment_env_when_backend_s3_manifest() -> 
     assert "- name: ENROLL_BACKEND" in rendered
     assert "- name: ENROLL_S3_ENDPOINT" in rendered
     assert "- name: ENROLL_S3_BUCKET" in rendered
+
+
+def test_nanosamurai_chart_renders_bff_guest_tenant_id_env() -> None:
+    rendered = _render(
+        "-f",
+        "./charts/nanosamurai-stack/values.local.docker-desktop.yaml",
+        "--set",
+        "bff.auth.required=false",
+        "--set",
+        "bff.auth.guestTenantId=00000000-0000-0000-0000-000000000000",
+    )
+
+    assert "- name: SAMURAIBFF_AUTH_GUEST_TENANT_ID" in rendered
+    assert "00000000-0000-0000-0000-000000000000" in rendered

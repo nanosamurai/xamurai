@@ -451,8 +451,12 @@ def _diarize_audio(audio: np.ndarray) -> List[DiarizationSegment]:
 
         # pyannote output compatibility:
         # - pyannote.audio 3.x: returns an Annotation directly
-        # - pyannote.audio 4.x: returns an object with `.speaker_diarization: Annotation`
-        diar = getattr(out, "speaker_diarization", None) or out
+        # - pyannote.audio 4.x: returns a DiarizeOutput with `.speaker_diarization: Annotation`
+        #
+        # IMPORTANT: Annotation is falsy when empty, so we must not use `or` here.
+        diar = getattr(out, "speaker_diarization", None)
+        if diar is None:
+            diar = out
 
         segs: List[DiarizationSegment] = []
         for turn, _, spk in diar.itertracks(yield_label=True):

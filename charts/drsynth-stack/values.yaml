@@ -46,6 +46,9 @@ bff:
   auth:
     required: false
     issuer: "https://auth.nanosamur.ai/realms/nanosamurai"
+    # Dev-only: used when required=false so unauthenticated sessions are still multi-tenant.
+    # Must exist in DB tenants table.
+    guestTenantId: "00000000-0000-0000-0000-000000000000"
 
 persistor:
   replicas: 1

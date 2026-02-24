@@ -19,7 +19,9 @@ services:
       # host.minikube.internal in metadata (unresolvable in Docker Desktop) -> consumers fail.
       # Therefore we expose a dedicated listener that advertises host.docker.internal.
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,MINIKUBE://0.0.0.0:39092,DOCKERDESKTOP://0.0.0.0:49092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://broker:29092,EXTERNAL://localhost:9092,MINIKUBE://host.minikube.internal:39092,DOCKERDESKTOP://host.docker.internal:49092
+      # IMPORTANT: use 127.0.0.1 for EXTERNAL to avoid client resolving localhost to ::1
+      # (we've seen confluent-kafka on Windows try ipv6 first and fail).
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://broker:29092,EXTERNAL://127.0.0.1:9092,MINIKUBE://host.minikube.internal:39092,DOCKERDESKTOP://host.docker.internal:49092
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,MINIKUBE:PLAINTEXT,DOCKERDESKTOP:PLAINTEXT
@@ -343,6 +345,9 @@ services:
       # Auth disabled by default for local stack testing.
       # If you want auth locally, point issuer to your Keycloak dev profile.
       SAMURAIBFF_AUTH_REQUIRED: ${SAMURAIBFF_AUTH_REQUIRED:-false}
+      # When auth is disabled, we still want tenant isolation + enrollment lookup.
+      # This value is ONLY used when SAMURAIBFF_AUTH_REQUIRED=false.
+      SAMURAIBFF_AUTH_GUEST_TENANT_ID: ${SAMURAIBFF_AUTH_GUEST_TENANT_ID:-00000000-0000-0000-0000-000000000000}
       # Default to the shared dev Keycloak running in ECS.
       # Override in your environment/.env if needed.
       SAMURAIBFF_AUTH_ISSUER: ${SAMURAIBFF_AUTH_ISSUER:-https://auth.nanosamur.ai/realms/nanosamurai}

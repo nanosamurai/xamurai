@@ -48,7 +48,8 @@ RUN pip install \
       faster-whisper \
       pyannote-audio \
       omegaconf \
-      hydra-core
+      hydra-core \
+      boto3
 
 # Copy monorepo
 COPY . /app

@@ -19,6 +19,11 @@ dependencies:
       - soundfile
       - omegaconf
       - pytest
+      - grpcio
+      - grpcio-tools
+      - protobuf>=5.29
+      - confluent-kafka>=2.5
+      - boto3
 # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 # pip install torch==2.9.0 torchaudio==2.9.0 --extra-index-url https://download.pytorch.org/whl/cu128
 # pip install torchcodec

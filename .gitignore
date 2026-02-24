@@ -29,6 +29,9 @@ MANIFEST
 
 # Virtual environment (if not already ignored above)
 venv/
+.venv/
+.venv-smoke/
+.venv_k8s_smoke/
 
 # Jupyter Notebook
 .ipynb_checkpoints
