@@ -45,6 +45,8 @@ spec:
 
             - name: SAMURAIBFF_AUTH_REQUIRED
               value: {{ ternary "true" "false" .Values.bff.auth.required | quote }}
+            - name: SAMURAIBFF_AUTH_GUEST_TENANT_ID
+              value: {{ .Values.bff.auth.guestTenantId | default "" | quote }}
             - name: SAMURAIBFF_AUTH_ISSUER
               value: {{ .Values.bff.auth.issuer | quote }}
             - name: SAMURAIBFF_AUTH_AUDIENCE
