@@ -63,8 +63,18 @@ def main() -> int:
         default="",
         help=(
             "Optional strict check: require that at least one emitted transcript segment "
-            "contains this exact speaker label (e.g. 'Miro-cz'). "
+            "contains this exact speaker label (e.g. 'Miro (cz)'). "
             "Useful to catch cases where the speaker field exists but is always empty."
+        ),
+    )
+
+    ap.add_argument(
+        "--expect-speaker-alias",
+        action="append",
+        default=[],
+        help=(
+            "Optional additional accepted speaker label(s). Can be provided multiple times. "
+            "Useful when local dev data uses e.g. 'Miro (cz)' but tests expect 'Miro-cz'."
         ),
     )
 
@@ -159,7 +169,8 @@ def main() -> int:
                     observed_speakers[spk] = observed_speakers.get(spk, 0) + 1
 
                     if args.expect_speaker:
-                        if ev.speaker != args.expect_speaker:
+                        accepted = [args.expect_speaker] + list(args.expect_speaker_alias or [])
+                        if ev.speaker not in accepted:
                             # not good enough yet; keep waiting for a matching label
                             continue
                         print(
@@ -185,7 +196,8 @@ def main() -> int:
 
                     if args.expect_speaker:
                         speakers = {s.speaker for s in ev.segments if s.speaker}
-                        if args.expect_speaker not in speakers:
+                        accepted = {args.expect_speaker, *list(args.expect_speaker_alias or [])}
+                        if not (accepted & speakers):
                             # keep waiting; final transcript for this session may be emitted multiple times
                             # (at-least-once semantics) or refined may arrive first.
                             continue
