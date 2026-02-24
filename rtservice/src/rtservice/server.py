@@ -94,7 +94,7 @@ def create_realtime_asr_server(
     )
 
     server.add_insecure_port(f"[::]:{port}")
-    logger.info("Creating a RealtimeASR gRPC server on port: %d", port)
+    logger.info("Creating a RealtimeASR gRPC server on port: %s", port)
     return server
 
 

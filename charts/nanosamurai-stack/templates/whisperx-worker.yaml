@@ -34,6 +34,21 @@ spec:
             - name: HF_HOME
               value: {{ .Values.hfCache.mountPath | quote }}
             {{- end }}
+
+            {{- if .Values.rtservice.hfTokenSecret.name }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.rtservice.hfTokenSecret.name | quote }}
+                  key: {{ .Values.rtservice.hfTokenSecret.key | default "HF_TOKEN" | quote }}
+            {{- else if .Values.rtservice.hfToken }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nanosamurai-stack.fullname" . }}-secrets
+                  key: HF_TOKEN
+            {{- end }}
+
             - name: KAFKA_GROUP_ID
               value: "whisperx-async"
             - name: WHISPERX_SLICE_SECONDS

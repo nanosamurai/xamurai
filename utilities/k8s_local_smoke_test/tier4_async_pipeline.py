@@ -59,6 +59,16 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=90.0)
 
     ap.add_argument(
+        "--expect-speaker",
+        default="",
+        help=(
+            "Optional strict check: require that at least one emitted transcript segment "
+            "contains this exact speaker label (e.g. 'Miro-cz'). "
+            "Useful to catch cases where the speaker field exists but is always empty."
+        ),
+    )
+
+    ap.add_argument(
         "--signal",
         choices=["recording-finished", "refined", "final"],
         default="recording-finished",
@@ -114,6 +124,8 @@ def main() -> int:
     audio_ws = _lib.connect_audio_ws(audio_url)
 
     try:
+        observed_speakers: dict[str, int] = {}
+
         print(f"[tier4] streaming {args.stream_seconds:.1f}s audio")
         _lib.stream_audio(audio_ws, pcm, frame_ms=20, max_seconds=args.stream_seconds)
         print("[tier4] waiting for async pipeline events (stop sending audio to allow idle)...")
@@ -143,6 +155,19 @@ def main() -> int:
                 ev = stream_pb2.RefinedEvent()
                 ev.ParseFromString(payload)
                 if ev.session_id == session_id:
+                    spk = ev.speaker or ""
+                    observed_speakers[spk] = observed_speakers.get(spk, 0) + 1
+
+                    if args.expect_speaker:
+                        if ev.speaker != args.expect_speaker:
+                            # not good enough yet; keep waiting for a matching label
+                            continue
+                        print(
+                            f"[tier4] PASS(signal=refined): got RefinedEvent "
+                            f"for session={session_id} speaker={ev.speaker!r} text_len={len(ev.text)}"
+                        )
+                        return 0
+
                     print(
                         f"[tier4] PASS(signal=refined): got RefinedEvent "
                         f"for session={session_id} text_len={len(ev.text)}"
@@ -153,15 +178,47 @@ def main() -> int:
                 ev = stream_pb2.SessionTranscript()
                 ev.ParseFromString(payload)
                 if ev.session_id == session_id:
+                    # track observed speaker labels for debug (including empty)
+                    for s in ev.segments:
+                        spk = s.speaker or ""
+                        observed_speakers[spk] = observed_speakers.get(spk, 0) + 1
+
+                    if args.expect_speaker:
+                        speakers = {s.speaker for s in ev.segments if s.speaker}
+                        if args.expect_speaker not in speakers:
+                            # keep waiting; final transcript for this session may be emitted multiple times
+                            # (at-least-once semantics) or refined may arrive first.
+                            continue
+                        print(
+                            f"[tier4] PASS(signal=final): got SessionTranscript "
+                            f"for session={session_id} segments={len(ev.segments)} speakers={sorted(speakers)}"
+                        )
+                        return 0
+
                     print(
                         f"[tier4] PASS(signal=final): got SessionTranscript "
                         f"for session={session_id} segments={len(ev.segments)}"
                     )
                     return 0
 
-        print(
-            f"[tier4] FAIL(signal={args.signal}): did not observe expected event within {args.timeout:.0f}s"
-        )
+        if args.expect_speaker:
+            if observed_speakers:
+                # sort by frequency desc for compact debug output
+                observed = sorted(observed_speakers.items(), key=lambda kv: (-kv[1], kv[0]))
+                observed_str = ", ".join([f"{k!r}:{v}" for (k, v) in observed[:10]])
+                more = "" if len(observed) <= 10 else f" (+{len(observed) - 10} more)"
+                print(f"[tier4] observed speakers (top): {observed_str}{more}")
+            else:
+                print("[tier4] observed speakers: <none>")
+
+            print(
+                f"[tier4] FAIL(signal={args.signal}): did not observe expected event with speaker="
+                f"{args.expect_speaker!r} within {args.timeout:.0f}s"
+            )
+        else:
+            print(
+                f"[tier4] FAIL(signal={args.signal}): did not observe expected event within {args.timeout:.0f}s"
+            )
         return 1
 
     finally:

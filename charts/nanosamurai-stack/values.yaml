@@ -141,9 +141,21 @@ rtservice:
   enabled: true
 
   replicas: 1
+
+  # rtservice can take a long time to start on cold caches (model downloads / initialization).
+  # The default deployment progress deadline (600s) can be too short for local clusters.
+  progressDeadlineSeconds: 600
+
   service:
     type: ClusterIP
     port: 50052
+
+  # rtservice can take a long time to start (model downloads / initialization).
+  # Use a startupProbe to prevent the liveness probe from killing it during warmup.
+  startupProbe:
+    periodSeconds: 10
+    failureThreshold: 120 # ~20 minutes
+    timeoutSeconds: 1
 
   # HF token is required for pyannote downloads.
   #

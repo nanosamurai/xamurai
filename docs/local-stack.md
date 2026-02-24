@@ -65,6 +65,38 @@ Open:
 
 > Windows note: `localhost` may resolve to IPv6 first (`::1`). If something fails, try `127.0.0.1` explicitly.
 
+### Quick E2E verification (speaker labeling)
+
+If you have an enrollment sample in LocalStack (e.g. speaker label `Miro-cz` / `Miro (cz)`), you can validate that
+the async pipeline actually *labels* speakers (not just emits an empty `speaker` field) using the Tier4 smoke test.
+
+Create a small venv (Windows):
+
+```bat
+py -m venv .venv-smoke
+.venv-smoke\Scripts\pip install -r utilities/k8s_local_smoke_test/requirements.txt -r utilities/k8s_local_smoke_test/requirements.kafka.txt
+```
+
+Run Tier4 and require a specific speaker label:
+
+```bat
+.venv-smoke\Scripts\python utilities/k8s_local_smoke_test/tier4_async_pipeline.py \
+  --base-url http://localhost:8000 \
+  --wav tests/data/test_cs.wav --lang cs --stream-seconds 6.0 \
+  --kafka-bootstrap 127.0.0.1:9092 \
+  --timeout 420 --signal final \
+  --expect-speaker Miro-cz
+```
+
+If this fails, check logs for `whisperx_worker` and `finalizer_worker`:
+
+```bat
+docker compose logs -f whisperx_worker
+docker compose logs -f finalizer_worker
+```
+
+Important: diarization/enrollment requires **HF_TOKEN** in those workers.
+
 ---
 
 ## 3) Auth notes (Keycloak)

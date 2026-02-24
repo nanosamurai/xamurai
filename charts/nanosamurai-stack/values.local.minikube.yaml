@@ -47,6 +47,10 @@ recordings:
 rtservice:
   hfToken: ""
 
+  progressDeadlineSeconds: 3600
+  startupProbe:
+    failureThreshold: 360
+
   gpu:
     enabled: false
 
@@ -57,3 +61,6 @@ whisperxWorker:
 finalizerWorker:
   gpu:
     enabled: false
+
+hfCache:
+  enabled: true

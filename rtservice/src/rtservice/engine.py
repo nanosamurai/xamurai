@@ -14,6 +14,10 @@ from proto_gen import stream_pb2
 
 logger = logging.getLogger(__name__)
 
+
+def _bool_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "y")
+
 # ---------------------------------------------------------------------------
 # Constants / defaults
 # ---------------------------------------------------------------------------
@@ -349,6 +353,7 @@ class RealtimeModelBundle:
         self._legacy_enrolled_speakers: Dict[str, np.ndarray] = {}
         self._load_legacy_enrolled_speakers_flat_dir()
 
+        # Startup diagnostics (make it obvious what is enabled and how enrollment is configured)
         logger.info(
             "RealtimeModelBundle ready: SR=%d WINDOW=%.2fs HOP=%.2fs USE_VAD=%s ENROLL=%s",
             cfg.sr,
@@ -357,6 +362,35 @@ class RealtimeModelBundle:
             USE_SILERO_VAD,
             USE_SPEAKER_ENROLLMENT,
         )
+
+        try:
+            import importlib.metadata as _md
+
+            logger.info(
+                "rtservice versions: torch=%s pyannote-audio=%s faster-whisper=%s",
+                getattr(torch, "__version__", "unknown"),
+                _md.version("pyannote-audio"),
+                _md.version("faster-whisper"),
+            )
+        except Exception:
+            logger.debug("rtservice versions: torch=%s", getattr(torch, "__version__", "unknown"))
+
+        logger.info(
+            "rtservice enrollment config: backend=%s cache_ttl_s=%s max_tenants=%s sim_threshold=%.3f",
+            os.getenv("ENROLL_BACKEND", "legacy_dir"),
+            os.getenv("ENROLL_CACHE_TTL_S", "300"),
+            os.getenv("ENROLL_CACHE_MAX_TENANTS", "128"),
+            ENROLL_SIM_THRESHOLD,
+        )
+
+        if os.getenv("ENROLL_BACKEND", "legacy_dir").strip().lower() == "s3_manifest":
+            logger.info(
+                "rtservice enrollment s3: endpoint=%s bucket=%s prefix=%s force_path_style=%s",
+                os.getenv("ENROLL_S3_ENDPOINT", ""),
+                os.getenv("ENROLL_S3_BUCKET", ""),
+                os.getenv("ENROLL_S3_PREFIX", "enrollment"),
+                os.getenv("ENROLL_S3_FORCE_PATH_STYLE", os.getenv("S3_FORCE_PATH_STYLE", "true")),
+            )
 
     # ---------------- VAD / diarization / ASR ----------------
 
@@ -587,6 +621,11 @@ class RealtimeModelBundle:
             enrolled = self._legacy_enrolled_speakers
 
         if not enrolled:
+            logger.debug(
+                "rtservice speaker mapping skipped: no enrolled speakers tenant=%s diar_label=%s",
+                tenant_id,
+                diar_label,
+            )
             return diar_label
 
         emb = self._embed_wave(wave_chunk)
@@ -600,6 +639,16 @@ class RealtimeModelBundle:
             if sim > best_sim:
                 best_sim = sim
                 best_name = name
+
+        logger.debug(
+            "rtservice enrollment mapping: tenant=%s diar_label=%s best=%s sim=%.3f threshold=%.3f candidates=%d",
+            tenant_id,
+            diar_label,
+            best_name,
+            best_sim,
+            ENROLL_SIM_THRESHOLD,
+            len(enrolled),
+        )
 
         if best_name is not None and best_sim >= ENROLL_SIM_THRESHOLD:
             return best_name

@@ -35,6 +35,11 @@ rtservice:
   # Example: helm ... --set rtservice.hfToken="$HF_TOKEN"
   hfToken: ""
 
+  # rtservice warmup can be very slow on cold caches (HF downloads). Keep rollout healthy in local dev.
+  progressDeadlineSeconds: 3600
+  startupProbe:
+    failureThreshold: 360 # ~60 minutes
+
   gpu:
     enabled: false
 
@@ -89,3 +94,7 @@ whisperxWorker:
 finalizerWorker:
   gpu:
     enabled: false
+
+# Optional shared HuggingFace cache is strongly recommended for local clusters.
+hfCache:
+  enabled: true
