@@ -39,6 +39,7 @@ RUN pip install \
       soundfile \
       confluent-kafka \
       protobuf \
+      boto3 \
       whisperx
 
 COPY . /app
