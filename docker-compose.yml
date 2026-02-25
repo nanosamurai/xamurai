@@ -65,7 +65,7 @@ services:
   # -------------------- Postgres --------------------
   postgres:
     image: postgres:18.1-alpine
-    container_name: drsynth-postgres
+    container_name: nanosamurai-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: drsynth
@@ -74,7 +74,7 @@ services:
     ports:
       - "${COMPOSE_BIND_IP:-127.0.0.1}:5432:5432"
     volumes:
-      - drsynth_pgdata:/var/lib/postgresql/data
+      - nanosamurai_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U drsynth -d drsynth"]
       interval: 10s
@@ -118,7 +118,7 @@ services:
   #   docker/postgres/migrations/
   db_migrate:
     image: postgres:18.1-alpine
-    container_name: drsynth-db-migrate
+    container_name: nanosamurai-db-migrate
     restart: "no"
     depends_on:
       postgres:
@@ -146,7 +146,7 @@ services:
 
   db_seed:
     image: postgres:18.1-alpine
-    container_name: drsynth-db-seed
+    container_name: nanosamurai-db-seed
     restart: "no"
     depends_on:
       postgres:
@@ -173,14 +173,14 @@ services:
         psql -h postgres -U drsynth -d drsynth -v ON_ERROR_STOP=1 -f /seed.sql
         echo "Seed complete."
 
-  # --------- drsynth services (built from this monorepo) ---------
+  # --------- xamurai services (built from this monorepo) ---------
 
   rtservice:
     build:
       context: .
       dockerfile: rtservice/Dockerfile
     image: xamurai-rtservice:local
-    container_name: drsynth-rtservice
+    container_name: xamurai-rtservice
     restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP: broker:29092
@@ -206,7 +206,7 @@ services:
       FW_LANG_DEFAULT: ""
     # Persist HF caches so the *first* startup is slow, subsequent restarts are fast.
     volumes:
-      - drsynth_hf_cache:/data/hf_cache
+      - nanosamurai_hf_cache:/data/hf_cache
     ports:
       - "${COMPOSE_BIND_IP:-127.0.0.1}:50052:50052"
     depends_on:
@@ -218,7 +218,7 @@ services:
       context: .
       dockerfile: whisperx_worker/Dockerfile
     image: xamurai-whisperx-worker:local
-    container_name: drsynth-whisperx-worker
+    container_name: xamurai-whisperx-worker
     restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP: broker:29092
@@ -243,7 +243,7 @@ services:
       ENROLL_S3_SECRET_KEY: test
       ENROLL_S3_FORCE_PATH_STYLE: "true"
     volumes:
-      - drsynth_hf_cache:/data/hf_cache
+      - nanosamurai_hf_cache:/data/hf_cache
     depends_on:
       kafka_init:
         condition: service_completed_successfully
@@ -253,7 +253,7 @@ services:
       context: .
       dockerfile: recorder_worker/Dockerfile
     image: xamurai-recorder-worker:local
-    container_name: drsynth-recorder-worker
+    container_name: xamurai-recorder-worker
     restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP: broker:29092
@@ -272,7 +272,7 @@ services:
       S3_FORCE_PATH_STYLE: "true"
       S3_PREFIX: ""
     volumes:
-      - drsynth_recordings:/data/recordings
+      - nanosamurai_recordings:/data/recordings
     depends_on:
       kafka_init:
         condition: service_completed_successfully
@@ -282,7 +282,7 @@ services:
       context: .
       dockerfile: finalizer_worker/Dockerfile
     image: xamurai-finalizer-worker:local
-    container_name: drsynth-finalizer-worker
+    container_name: xamurai-finalizer-worker
     restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP: broker:29092
@@ -309,8 +309,8 @@ services:
       # Allow long processing time per message (full session + model downloads)
       FINALIZER_MAX_POLL_INTERVAL_MS: "3600000"
     volumes:
-      - drsynth_recordings:/data/recordings
-      - drsynth_hf_cache:/data/hf_cache
+      - nanosamurai_recordings:/data/recordings
+      - nanosamurai_hf_cache:/data/hf_cache
     depends_on:
       kafka_init:
         condition: service_completed_successfully
@@ -406,9 +406,9 @@ services:
         condition: service_completed_successfully
 
 volumes:
-  drsynth_pgdata:
-  drsynth_recordings:
-  drsynth_hf_cache:
+  nanosamurai_pgdata:
+  nanosamurai_recordings:
+  nanosamurai_hf_cache:
   nanosamurai_localstack:
 
 # Within the Kafka image, for testing create following topics:
