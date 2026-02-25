@@ -70,13 +70,13 @@ services:
     environment:
       POSTGRES_USER: drsynth
       POSTGRES_PASSWORD: drsynth
-      POSTGRES_DB: drsynth
+      POSTGRES_DB: nanosamurai
     ports:
       - "${COMPOSE_BIND_IP:-127.0.0.1}:5432:5432"
     volumes:
       - nanosamurai_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U drsynth -d drsynth"]
+      test: ["CMD-SHELL", "pg_isready -U drsynth -d nanosamurai"]
       interval: 10s
       timeout: 30s
       retries: 5
@@ -134,14 +134,14 @@ services:
         set -e
 
         # Idempotency: if schema already exists, do nothing.
-        if psql -h postgres -U drsynth -d drsynth -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='tenants'" | grep -q 1; then
+        if psql -h postgres -U drsynth -d nanosamurai -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='tenants'" | grep -q 1; then
           echo "Schema already initialized; skipping migrations."
           exit 0
         fi
 
         echo "Applying SQL migrations..."
-        psql -h postgres -U drsynth -d drsynth -v ON_ERROR_STOP=1 -f /migrations/001-create-core-schema.up.sql
-        psql -h postgres -U drsynth -d drsynth -v ON_ERROR_STOP=1 -f /migrations/002-transcript-records-append-only.up.sql
+        psql -h postgres -U drsynth -d nanosamurai -v ON_ERROR_STOP=1 -f /migrations/001-create-core-schema.up.sql
+        psql -h postgres -U drsynth -d nanosamurai -v ON_ERROR_STOP=1 -f /migrations/002-transcript-records-append-only.up.sql
         echo "Migrations complete."
 
   db_seed:
@@ -164,13 +164,13 @@ services:
         set -e
 
         # Idempotency: if dev tenant exists, do nothing.
-        if psql -h postgres -U drsynth -d drsynth -tAc "SELECT 1 FROM tenants WHERE id='00000000-0000-0000-0000-000000000000'" | grep -q 1; then
+        if psql -h postgres -U drsynth -d nanosamurai -tAc "SELECT 1 FROM tenants WHERE id='00000000-0000-0000-0000-000000000000'" | grep -q 1; then
           echo "Dev tenant already seeded; skipping."
           exit 0
         fi
 
         echo "Seeding dev tenant/user..."
-        psql -h postgres -U drsynth -d drsynth -v ON_ERROR_STOP=1 -f /seed.sql
+        psql -h postgres -U drsynth -d nanosamurai -v ON_ERROR_STOP=1 -f /seed.sql
         echo "Seed complete."
 
   # --------- xamurai services (built from this monorepo) ---------
@@ -339,7 +339,7 @@ services:
       SAMURAIBFF_S3_SECRET_KEY: test
       SAMURAIBFF_S3_FORCE_PATH_STYLE: "true"
 
-      SAMURAIBFF_DB_JDBC_URL: jdbc:postgresql://postgres:5432/drsynth
+      SAMURAIBFF_DB_JDBC_URL: jdbc:postgresql://postgres:5432/nanosamurai
       SAMURAIBFF_DB_USERNAME: drsynth
       SAMURAIBFF_DB_PASSWORD: drsynth
 
@@ -388,7 +388,7 @@ services:
       SP_HTTP_HOST: 0.0.0.0
       SP_HTTP_PORT: 8010
 
-      SP_DB_JDBC_URL: jdbc:postgresql://postgres:5432/drsynth
+      SP_DB_JDBC_URL: jdbc:postgresql://postgres:5432/nanosamurai
       SP_DB_USERNAME: drsynth
       SP_DB_PASSWORD: drsynth
 
