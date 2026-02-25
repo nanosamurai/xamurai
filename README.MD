@@ -1,4 +1,4 @@
-# drsynth
+# xamurai
 
 Speach-to-text and speaker diarization service that provides both real-time transcription as well as near-real-time refinement. It also persists the recording session and performs a final transcript when the session finishes.
 
@@ -119,7 +119,7 @@ Test commands (Windows):
   * `conda run -n drsynth-bff python -m pytest -q tests/test_recorder_worker_integration.py`
 
 * rtservice gRPC integration (heavy; requires `HF_TOKEN`):
-  * `conda run -n drsynth-rtservice python -m pytest -q tests/test_realtime_asr_grpc.py`
+  * `conda run -n xamurai-rtservice python -m pytest -q tests/test_realtime_asr_grpc.py`
 
 * WhisperX worker tests (GPU/heavy):
   * `conda run -n drsynth-whisperx python -m pytest -q tests/test_whisperx_worker_unit.py tests/test_whisperx_worker_integration.py`
@@ -131,7 +131,7 @@ Test commands (Windows):
 Notes:
 * Kafka integration tests use **Testcontainers Kafka** by default. To run against a real Kafka,
   set `KAFKA_BOOTSTRAP=localhost:9092`.
-* `HF_TOKEN` must be visible in the conda env for `drsynth-rtservice` tests.
+* `HF_TOKEN` must be visible in the conda env for `xamurai-rtservice` tests.
 
 ---
 
@@ -144,10 +144,10 @@ This repo is intended to run on Kubernetes. Each service has its own **Dockerfil
 From repo root:
 
 ```bash
-docker build -t drsynth-rtservice:dev -f rtservice/Dockerfile .
-docker build -t drsynth-whisperx-worker:dev -f whisperx_worker/Dockerfile .
-docker build -t drsynth-recorder-worker:dev -f recorder_worker/Dockerfile .
-docker build -t drsynth-finalizer-worker:dev -f finalizer_worker/Dockerfile .
+docker build -t xamurai-rtservice:dev -f rtservice/Dockerfile .
+docker build -t xamurai-whisperx-worker:dev -f whisperx_worker/Dockerfile .
+docker build -t xamurai-recorder-worker:dev -f recorder_worker/Dockerfile .
+docker build -t xamurai-finalizer-worker:dev -f finalizer_worker/Dockerfile .
 ```
 
 Note: WhisperX pins `torch~=2.8.0`, so the Dockerfiles align Torch/Torchaudio to `2.8.0+cu128` to avoid resolver downgrades/conflicts.
@@ -166,7 +166,7 @@ Prereqs:
 - Docker installed
 - `HF_TOKEN` exported in your environment (needed by **rtservice** / pyannote)
 - Repos checked out side-by-side (defaults can be overridden in `.env`):
-  - `C:/Users/miros/PycharmProjects/drsynth`
+  - `C:/Users/miros/PycharmProjects/xamurai`
   - `C:/Users/miros/IdeaProjects/samuraibff`
   - `C:/Users/miros/IdeaProjects/samuraipersistor`
 
@@ -340,7 +340,7 @@ conda run -n drsynth-whisperx python -m pytest -q -m integration \
 
 Run rtservice strict S3 enrollment gRPC test:
 ```bat
-conda run -n drsynth-rtservice python -m pytest -q -m integration \
+conda run -n xamurai-rtservice python -m pytest -q -m integration \
   tests/test_realtime_asr_grpc.py::test_realtime_asr_stream_s3_enrollment
 ```
 

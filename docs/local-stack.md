@@ -5,7 +5,7 @@ This runbook describes the **fastest local end-to-end workflow**: run the full s
 If you want the more production-like topology (**Compose infra + Kubernetes apps**), see: **`docs/local-k8s-setup.md`**.
 
 > Repo layout assumption on your machine (defaults used in `.env.example`):
-> - `C:/Users/miros/PycharmProjects/drsynth`
+> - `C:/Users/miros/PycharmProjects/xamurai`
 > - `C:/Users/miros/IdeaProjects/samuraibff`
 > - `C:/Users/miros/IdeaProjects/samuraipersistor`
 
@@ -20,7 +20,7 @@ If you want the more production-like topology (**Compose infra + Kubernetes apps
 
 ## 1) Create `.env`
 
-From repo root (`drsynth/`):
+From repo root (`xamurai/`):
 
 ```bash
 copy .env.example .env

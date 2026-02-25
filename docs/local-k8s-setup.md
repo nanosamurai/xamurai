@@ -142,11 +142,11 @@ minikube start --driver=docker
 Build images (recommended local tag: `:local`):
 
 ```bash
-# drsynth images
-docker build -t drsynth-rtservice:local -f rtservice/Dockerfile .
-docker build -t drsynth-whisperx-worker:local -f whisperx_worker/Dockerfile .
-docker build -t drsynth-recorder-worker:local -f recorder_worker/Dockerfile .
-docker build -t drsynth-finalizer-worker:local -f finalizer_worker/Dockerfile .
+# xamurai images
+docker build -t xamurai-rtservice:local -f rtservice/Dockerfile .
+docker build -t xamurai-whisperx-worker:local -f whisperx_worker/Dockerfile .
+docker build -t xamurai-recorder-worker:local -f recorder_worker/Dockerfile .
+docker build -t xamurai-finalizer-worker:local -f finalizer_worker/Dockerfile .
 
 # other repos (run in their directories)
 # samuraibff: docker build -t samuraibff:local .
@@ -176,10 +176,10 @@ In that case, **import the image into the node’s containerd**:
 
 ```bat
 REM --- core services ---
-docker save drsynth-rtservice:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
-docker save drsynth-recorder-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
-docker save drsynth-finalizer-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
-docker save drsynth-whisperx-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save xamurai-rtservice:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save xamurai-recorder-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save xamurai-finalizer-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
+docker save xamurai-whisperx-worker:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
 
 REM --- optional (only if you also built local tags) ---
 docker save samuraibff:local | docker exec -i desktop-control-plane sh -lc "ctr -n k8s.io images import -"
@@ -200,10 +200,10 @@ kubectl rollout restart deploy/nanosamurai-stack-whisperx-worker
 Load images into minikube:
 
 ```bash
-minikube image load drsynth-rtservice:local
-minikube image load drsynth-whisperx-worker:local
-minikube image load drsynth-recorder-worker:local
-minikube image load drsynth-finalizer-worker:local
+minikube image load xamurai-rtservice:local
+minikube image load xamurai-whisperx-worker:local
+minikube image load xamurai-recorder-worker:local
+minikube image load xamurai-finalizer-worker:local
 minikube image load samuraibff:local
 minikube image load samuraipersistor:local
 ```
