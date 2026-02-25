@@ -30,19 +30,19 @@ images:
     tag: "local"
 
   rtservice:
-    repository: "drsynth-rtservice"
+    repository: "xamurai-rtservice"
     tag: "dev"
 
   whisperxWorker:
-    repository: "drsynth-whisperx-worker"
+    repository: "xamurai-whisperx-worker"
     tag: "dev"
 
   recorderWorker:
-    repository: "drsynth-recorder-worker"
+    repository: "xamurai-recorder-worker"
     tag: "dev"
 
   finalizerWorker:
-    repository: "drsynth-finalizer-worker"
+    repository: "xamurai-finalizer-worker"
     tag: "dev"
 
 # Enrollment reader configuration (rtservice/whisperx/finalizer)

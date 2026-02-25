@@ -13,16 +13,16 @@ infra:
 # match the repo's suggested local build commands.
 images:
   rtservice:
-    repository: "drsynth-rtservice"
+    repository: "xamurai-rtservice"
     tag: "local"
   whisperxWorker:
-    repository: "drsynth-whisperx-worker"
+    repository: "xamurai-whisperx-worker"
     tag: "local"
   recorderWorker:
-    repository: "drsynth-recorder-worker"
+    repository: "xamurai-recorder-worker"
     tag: "local"
   finalizerWorker:
-    repository: "drsynth-finalizer-worker"
+    repository: "xamurai-finalizer-worker"
     tag: "local"
 
 recordings:
