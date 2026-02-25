@@ -179,6 +179,7 @@ services:
     build:
       context: .
       dockerfile: rtservice/Dockerfile
+    image: xamurai-rtservice:local
     container_name: drsynth-rtservice
     restart: unless-stopped
     environment:
@@ -216,6 +217,7 @@ services:
     build:
       context: .
       dockerfile: whisperx_worker/Dockerfile
+    image: xamurai-whisperx-worker:local
     container_name: drsynth-whisperx-worker
     restart: unless-stopped
     environment:
@@ -250,6 +252,7 @@ services:
     build:
       context: .
       dockerfile: recorder_worker/Dockerfile
+    image: xamurai-recorder-worker:local
     container_name: drsynth-recorder-worker
     restart: unless-stopped
     environment:
@@ -278,6 +281,7 @@ services:
     build:
       context: .
       dockerfile: finalizer_worker/Dockerfile
+    image: xamurai-finalizer-worker:local
     container_name: drsynth-finalizer-worker
     restart: unless-stopped
     environment:
