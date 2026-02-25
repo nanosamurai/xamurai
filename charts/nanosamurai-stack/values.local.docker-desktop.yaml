@@ -7,7 +7,7 @@
 infra:
   # IMPORTANT: must match Kafka advertised listener for Docker Desktop Kubernetes.
   kafkaBootstrapServers: "host.docker.internal:49092"
-  postgresJdbcUrl: "jdbc:postgresql://host.docker.internal:5432/drsynth"
+  postgresJdbcUrl: "jdbc:postgresql://host.docker.internal:5432/nanosamurai"
 
 # Images must exist in the Docker Desktop engine (no registry pull). These tags
 # match the repo's suggested local build commands.

@@ -7,7 +7,7 @@
 
 infra:
   kafkaBootstrapServers: "host.minikube.internal:39092"
-  postgresJdbcUrl: "jdbc:postgresql://host.minikube.internal:5432/drsynth"
+  postgresJdbcUrl: "jdbc:postgresql://host.minikube.internal:5432/nanosamurai"
 
 rtservice:
   hfToken: "${HF_TOKEN}"
