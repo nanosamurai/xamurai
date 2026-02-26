@@ -42,7 +42,8 @@ grafana:
     - name: Tempo
       type: tempo
       access: proxy
-      url: http://tempo.observability.svc.cluster.local:3100
+      # Tempo query frontend is exposed on the Service as port 3200 (NOT 3100).
+      url: http://tempo.observability.svc.cluster.local:3200
       isDefault: false
       jsonData:
         tracesToLogsV2:
