@@ -170,17 +170,46 @@ Windows note:
 
 In Grafana Explore → Prometheus:
 - query: `up`
+- query: `kube_pod_info{namespace="default"}`
 
 ### 3.2 Logs (Loki)
 
 In Grafana Explore → Loki:
-- query for a pod label (exact label keys depend on Alloy relabeling):
-  - start with `{namespace="default"}`
+- start with: `{job="loki.source.kubernetes.pods"}`
+- narrow down to a specific service/pod via the `instance` label, e.g.
+  - `{instance=~"default/nanosamurai-stack-bff.*"}`
+
+Tip: you can also verify logs directly via Loki API:
+
+```bash
+kubectl -n observability port-forward svc/loki 3100:3100
+curl.exe -s "http://127.0.0.1:3100/loki/api/v1/query_range?query=%7Bservice_name%3D%22loki.source.kubernetes.pods%22%7D&limit=1"
+```
 
 ### 3.3 Traces (Tempo)
 
-In Grafana Explore → Tempo:
-- search by `service.name`
+Traces arrive via OTLP:
+- `samuraibff` + `samuraipersistor` via the OTEL Java agent
+- (optionally) other services via OTEL SDKs
+
+Quick verification without touching application code (generate sample traces):
+
+```bash
+docker run --rm ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest \
+  traces --otlp-endpoint host.docker.internal:4317 --otlp-insecure \
+  --rate 5 --duration 3s --service telemetrygen-local
+```
+
+Then in Grafana Explore → Tempo, search by `service.name = telemetrygen-local`.
+
+If you want to hit a real trace from the system, run Tier2 smoke test and search by:
+- `service.name = samuraibff`
+- or use the Tempo HTTP API through Grafana proxy:
+
+```bash
+# Tempo datasource id is typically 4 in this setup (confirm via /api/datasources)
+curl.exe -s -u admin:admin "http://127.0.0.1:3001/api/datasources/proxy/4/api/search?service.name=samuraibff&limit=5"
+```
 
 ---
 
