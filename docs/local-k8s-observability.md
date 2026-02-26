@@ -150,12 +150,17 @@ Notes:
 ## 2) Access Grafana
 
 ```bash
-kubectl -n observability port-forward svc/kube-prometheus-stack-grafana 3000:80
+# If 3000 is already taken on your machine, change it (example uses 3001).
+kubectl -n observability port-forward svc/kube-prometheus-stack-grafana 3001:80
 ```
 
-Grafana: http://localhost:3000
+Grafana: http://localhost:3001
 
 Default credentials are set in `observability/kube-prometheus-stack.values.local.yaml`.
+
+Windows note:
+- In PowerShell, `curl` is an alias for `Invoke-WebRequest` (different flags).
+- Use `curl.exe` for real curl.
 
 ---
 
