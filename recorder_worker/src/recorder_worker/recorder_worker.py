@@ -2,7 +2,6 @@ import logging
 import os
 import time
 import wave
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, Optional, Protocol
 
@@ -10,6 +9,14 @@ import numpy as np
 from confluent_kafka import Consumer, Producer, KafkaException
 
 from proto_gen import stream_pb2
+
+from drsynth_common.otel_setup import setup_otel
+from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
+
+try:
+    from opentelemetry import trace
+except Exception:  # pragma: no cover
+    trace = None  # type: ignore[assignment]
 
 
 # --------------------------------------------------------------------------- #
@@ -37,7 +44,12 @@ S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
 S3_REGION = os.getenv("S3_REGION", "").strip()  # optional for some providers
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "").strip()
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "").strip()
-S3_FORCE_PATH_STYLE = os.getenv("S3_FORCE_PATH_STYLE", "true").strip().lower() in ("1", "true", "yes", "y")
+S3_FORCE_PATH_STYLE = os.getenv("S3_FORCE_PATH_STYLE", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "y",
+)
 
 # Optional prefix (not in the standardized list, but useful for multi-env layouts)
 S3_PREFIX = os.getenv("S3_PREFIX", os.getenv("RECORDING_S3_PREFIX", "")).strip()  # e.g. "prod/"
@@ -72,25 +84,29 @@ logger = logging.getLogger("recorder_worker")
 
 def make_consumer() -> Consumer:
     logger.info("Creating Kafka consumer for recorder_worker")
-    return Consumer({
-        "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "group.id": GROUP_ID,
-        "enable.auto.commit": False,
-        "auto.offset.reset": "earliest",
-        "max.partition.fetch.bytes": 5_000_000,
-        "fetch.wait.max.ms": 50,
-    })
+    return Consumer(
+        {
+            "bootstrap.servers": KAFKA_BOOTSTRAP,
+            "group.id": GROUP_ID,
+            "enable.auto.commit": False,
+            "auto.offset.reset": "earliest",
+            "max.partition.fetch.bytes": 5_000_000,
+            "fetch.wait.max.ms": 50,
+        }
+    )
 
 
 def make_producer() -> Producer:
     logger.info("Creating Kafka producer for recorder_worker")
-    return Producer({
-        "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "client.id": "recorder-worker",
-        "compression.type": "zstd",
-        "linger.ms": 10,
-        "batch.size": 131072,
-    })
+    return Producer(
+        {
+            "bootstrap.servers": KAFKA_BOOTSTRAP,
+            "client.id": "recorder-worker",
+            "compression.type": "zstd",
+            "linger.ms": 10,
+            "batch.size": 131072,
+        }
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -101,6 +117,7 @@ class BaseRecordingWriter(Protocol):
     """Simple interface for “append PCM16 samples” + “close & return URL”."""
 
     def append_pcm16(self, pcm16: bytes) -> None: ...
+
     def close_and_get_url(self) -> str: ...
 
 
@@ -129,8 +146,7 @@ class LocalFileWriter:
 
 
 class S3FileWriter:
-    """
-    Write to a local temp WAV, then upload to S3 on close.
+    """Write to a local temp WAV, then upload to S3 on close.
 
     URL format: s3://<bucket>/<key>
     """
@@ -185,8 +201,13 @@ class S3FileWriter:
             client_kwargs["endpoint_url"] = S3_ENDPOINT
 
         s3 = boto3.client("s3", **session_kwargs, **client_kwargs)
-        logger.info("Uploading recording to s3://%s/%s (endpoint=%s, path_style=%s)",
-                    self._bucket, self._key, S3_ENDPOINT or "aws", addressing_style)
+        logger.info(
+            "Uploading recording to s3://%s/%s (endpoint=%s, path_style=%s)",
+            self._bucket,
+            self._key,
+            S3_ENDPOINT or "aws",
+            addressing_style,
+        )
         s3.upload_file(self._tmp_path, self._bucket, self._key)
 
         try:
@@ -209,6 +230,11 @@ class SessionRecording:
     lang: str
     writer: BaseRecordingWriter
 
+    # Kafka trace context headers captured from the last consumed AudioChunk.
+    # We store them so finalization can publish RecordingFinished with the
+    # *same* traceparent even if it happens later (idle timeout).
+    trace_headers: Optional[list[tuple[str, Optional[bytes]]]] = None
+
     total_samples: int = 0
     last_activity: float = 0.0
 
@@ -227,9 +253,7 @@ class SessionRecording:
         return self.writer.close_and_get_url()
 
 
-def make_writer_for_session(session_id: str,
-                            tenant_id: str,
-                            sample_rate: int) -> BaseRecordingWriter:
+def make_writer_for_session(session_id: str, tenant_id: str, sample_rate: int) -> BaseRecordingWriter:
     if RECORDING_STORAGE_BACKEND == "s3":
         # Build an S3 key like: <prefix>/<tenant>/<YYYY>/<MM>/<DD>/<session>/audio.wav
         from datetime import datetime, timezone
@@ -247,8 +271,7 @@ def make_writer_for_session(session_id: str,
         base = f"{prefix}/{tenant}/{y:04d}/{m:02d}/{d:02d}/{session_id}".strip("/")
 
         key = f"{base}/audio.wav"
-        logger.info("Using S3 backend for session %s → s3://%s/%s",
-                    session_id, S3_BUCKET, key)
+        logger.info("Using S3 backend for session %s → s3://%s/%s", session_id, S3_BUCKET, key)
         return S3FileWriter(S3_BUCKET, key, sample_rate)
 
     # Default: local
@@ -264,13 +287,16 @@ def make_writer_for_session(session_id: str,
 # Finalization
 # --------------------------------------------------------------------------- #
 
-def finalize_session(session_id: str,
-                     rec: SessionRecording,
-                     producer: Producer) -> None:
+def finalize_session(session_id: str, rec: SessionRecording, producer: Producer) -> None:
     url = rec.close_and_get_url()
     logger.info(
         "Finalized session %s: url=%s dur=%.2fs sr=%d lang=%s tenant=%s",
-        session_id, url, rec.duration_s, rec.sample_rate, rec.lang, rec.tenant_id
+        session_id,
+        url,
+        rec.duration_s,
+        rec.sample_rate,
+        rec.lang,
+        rec.tenant_id,
     )
 
     event = stream_pb2.RecordingFinished(
@@ -283,12 +309,28 @@ def finalize_session(session_id: str,
         created_at_ns=time.time_ns(),
     )
 
-    producer.produce(
-        topic=TOPIC_RECORDING_FINISHED,
-        key=session_id.encode("utf-8"),
-        value=event.SerializeToString(),
-    )
-    producer.poll(0)
+    # Re-attach trace context captured from audio.raw consumption.
+    with extracted_context_from_headers(rec.trace_headers):
+        if trace is not None:
+            tracer = trace.get_tracer("recorder_worker")
+            span_cm = tracer.start_as_current_span(f"kafka.produce {TOPIC_RECORDING_FINISHED}")
+        else:
+            span_cm = None
+
+        if span_cm is not None:
+            span_cm.__enter__()
+
+        try:
+            producer.produce(
+                topic=TOPIC_RECORDING_FINISHED,
+                key=session_id.encode("utf-8"),
+                value=event.SerializeToString(),
+                headers=with_current_trace_context(),
+            )
+            producer.poll(0)
+        finally:
+            if span_cm is not None:
+                span_cm.__exit__(None, None, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -296,14 +338,13 @@ def finalize_session(session_id: str,
 # --------------------------------------------------------------------------- #
 
 def main():
-    logger.info(
-        "Starting recorder_worker with backend=%s", RECORDING_STORAGE_BACKEND
-    )
+    # Initialize OTEL SDK (no-op if deps missing)
+    setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "recorder-worker"))
+
+    logger.info("Starting recorder_worker with backend=%s", RECORDING_STORAGE_BACKEND)
 
     if RECORDING_STORAGE_BACKEND == "s3" and not S3_BUCKET:
-        raise RuntimeError(
-            "RECORDING_STORAGE_BACKEND=s3 but S3_BUCKET is not set"
-        )
+        raise RuntimeError("RECORDING_STORAGE_BACKEND=s3 but S3_BUCKET is not set")
 
     consumer = make_consumer()
     producer = make_producer()
@@ -319,8 +360,7 @@ def main():
 
             # 1) Idle session finalization
             idle_sessions = [
-                sid for sid, rec in sessions.items()
-                if now - rec.last_activity > SESSION_IDLE_SEC
+                sid for sid, rec in sessions.items() if now - rec.last_activity > SESSION_IDLE_SEC
             ]
             for sid in idle_sessions:
                 rec = sessions.pop(sid, None)
@@ -334,39 +374,57 @@ def main():
                 logger.error("Kafka error: %s", msg.error())
                 raise KafkaException(msg.error())
 
-            audio_chunk = stream_pb2.AudioChunk()
-            audio_chunk.ParseFromString(msg.value())
+            # Extract upstream context (if present) from Kafka headers.
+            with extracted_context_from_headers(msg.headers()):
+                if trace is not None:
+                    tracer = trace.get_tracer("recorder_worker")
+                    span_cm = tracer.start_as_current_span(f"kafka.consume {TOPIC_AUDIO}")
+                else:
+                    span_cm = None
 
-            session_id = audio_chunk.session_id or ""
-            if not session_id:
-                logger.warning("AudioChunk without session_id, skipping.")
-                consumer.commit(msg, asynchronous=True)
-                continue
+                if span_cm is not None:
+                    span_cm.__enter__()
 
-            sr = getattr(audio_chunk, "sample_rate", DEFAULT_SR) or DEFAULT_SR
-            lang = getattr(audio_chunk, "lang", "") or ""
-            tenant_id = getattr(audio_chunk, "tenant_id", "") or "default"
+                try:
+                    audio_chunk = stream_pb2.AudioChunk()
+                    audio_chunk.ParseFromString(msg.value())
 
-            rec = sessions.get(session_id)
-            if rec is None:
-                writer = make_writer_for_session(session_id, tenant_id, sr)
-                rec = SessionRecording(
-                    session_id=session_id,
-                    tenant_id=tenant_id,
-                    sample_rate=sr,
-                    lang=lang,
-                    writer=writer,
-                    last_activity=time.time(),
-                )
-                sessions[session_id] = rec
+                    session_id = audio_chunk.session_id or ""
+                    if not session_id:
+                        logger.warning("AudioChunk without session_id, skipping.")
+                        consumer.commit(msg, asynchronous=True)
+                        continue
 
-            pcm_bytes = audio_chunk.pcm16_le
-            if not pcm_bytes:
-                logger.debug("Empty pcm16_le for session %s; skipping.", session_id)
-            else:
-                rec.append_pcm16(pcm_bytes)
+                    sr = getattr(audio_chunk, "sample_rate", DEFAULT_SR) or DEFAULT_SR
+                    lang = getattr(audio_chunk, "lang", "") or ""
+                    tenant_id = getattr(audio_chunk, "tenant_id", "") or "default"
 
-            consumer.commit(msg, asynchronous=True)
+                    rec = sessions.get(session_id)
+                    if rec is None:
+                        writer = make_writer_for_session(session_id, tenant_id, sr)
+                        rec = SessionRecording(
+                            session_id=session_id,
+                            tenant_id=tenant_id,
+                            sample_rate=sr,
+                            lang=lang,
+                            writer=writer,
+                            last_activity=time.time(),
+                        )
+                        sessions[session_id] = rec
+
+                    # Keep latest kafka headers for end-to-end propagation.
+                    rec.trace_headers = msg.headers() or rec.trace_headers
+
+                    pcm_bytes = audio_chunk.pcm16_le
+                    if not pcm_bytes:
+                        logger.debug("Empty pcm16_le for session %s; skipping.", session_id)
+                    else:
+                        rec.append_pcm16(pcm_bytes)
+
+                    consumer.commit(msg, asynchronous=True)
+                finally:
+                    if span_cm is not None:
+                        span_cm.__exit__(None, None, None)
 
     except KeyboardInterrupt:
         logger.info("Stopping recorder_worker (KeyboardInterrupt)")
