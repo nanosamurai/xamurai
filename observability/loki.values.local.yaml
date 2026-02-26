@@ -31,6 +31,18 @@ singleBinary:
       cpu: 100m
       memory: 256Mi
 
+# IMPORTANT:
+# grafana/loki chart defaults to deploymentMode=SimpleScalable and keeps non-zero
+# replicas for read/write/backend unless explicitly overridden. Even when we set
+# deploymentMode=SingleBinary, the chart validation requires the other target
+# replicas to be 0.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
 # No persistence for local; OK to lose logs on restart.
 persistence:
   enabled: false
