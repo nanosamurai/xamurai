@@ -30,15 +30,15 @@ config:
         insecure: true
 
     # Useful during initial bring-up; can be removed later.
-    logging:
-      verbosity: normal
+    debug:
+      verbosity: detailed
 
   service:
     pipelines:
       traces:
         receivers: [otlp]
         processors: [batch]
-        exporters: [otlp/tempo, logging]
+        exporters: [otlp/tempo, debug]
 
 ports:
   otlp:
