@@ -1,0 +1,38 @@
+# Local dev values for Grafana Tempo
+# Namespace: observability
+
+# Single-binary mode, local storage.
+
+tempo:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+# Store traces locally inside the pod (fine for local dev).
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+
+persistence:
+  enabled: false
+
+service:
+  type: ClusterIP
+  port: 3100
+
+# Expose OTLP ports via a Service (so apps can send OTLP directly to Tempo if desired).
+extraPorts:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: 4317
+    protocol: TCP
+  - name: otlp-http
+    port: 4318
+    targetPort: 4318
+    protocol: TCP
