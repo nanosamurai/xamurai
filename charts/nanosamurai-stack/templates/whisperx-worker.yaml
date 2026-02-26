@@ -30,6 +30,12 @@ spec:
             - name: KAFKA_TOPIC_REFINED
               value: "transcripts.refined"
 
+            {{- if .Values.observability.enabled }}
+            - name: OTEL_SERVICE_NAME
+              value: "whisperx-worker"
+            {{- include "nanosamurai-stack.otelCommonEnv" . | nindent 12 }}
+            {{- end }}
+
             {{- if .Values.hfCache.enabled }}
             - name: HF_HOME
               value: {{ .Values.hfCache.mountPath | quote }}

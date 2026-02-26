@@ -19,6 +19,87 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
 {{/*
+Common OpenTelemetry env vars.
+
+Enabled when `.Values.observability.enabled` is true.
+
+This helper is intentionally small and generic so it can be reused across
+multiple Deployments.
+
+Notes:
+- `OTEL_SERVICE_NAME` is set by the caller (service-specific).
+- For local dev we default to always_on sampling.
+*/}}
+{{- define "nanosamurai-stack.otelCommonEnv" }}
+{{- if .Values.observability.enabled }}
+- name: OTEL_EXPORTER_OTLP_ENDPOINT
+  value: {{ .Values.observability.otlpEndpoint | default "" | quote }}
+- name: OTEL_TRACES_SAMPLER
+  value: {{ .Values.observability.tracesSampler | default "always_on" | quote }}
+- name: OTEL_TRACES_SAMPLER_ARG
+  value: {{ .Values.observability.tracesSamplerArg | default "" | quote }}
+- name: OTEL_RESOURCE_ATTRIBUTES
+  value: {{ .Values.observability.resourceAttributes | default "" | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
+InitContainer + volume mounts for OpenTelemetry Java agent.
+
+- Downloads the agent jar into an emptyDir volume.
+- Adds JAVA_TOOL_OPTIONS to include -javaagent.
+
+This is designed for JVM services (samuraibff + samuraipersistor) and is enabled
+when `.Values.observability.javaAgent.enabled` is true.
+
+Security note:
+- This downloads from GitHub release URL; requires cluster egress.
+- For prod, prefer baking the jar into the image or using an internal artifact.
+*/}}
+{{- define "nanosamurai-stack.otelJavaAgentInit" }}
+{{- if and .Values.observability.enabled .Values.observability.javaAgent.enabled }}
+initContainers:
+  - name: otel-java-agent
+    image: {{ .Values.observability.javaAgent.downloadImage | quote }}
+    command:
+      - sh
+      - -lc
+      - |
+        set -euo pipefail
+        AGENT_DIR={{ .Values.observability.javaAgent.mountPath }}
+        AGENT_JAR=$AGENT_DIR/opentelemetry-javaagent.jar
+        mkdir -p $AGENT_DIR
+        echo "Downloading otel java agent → $AGENT_JAR"
+        curl -fsSL {{ .Values.observability.javaAgent.downloadUrl | quote }} -o $AGENT_JAR
+        ls -lh $AGENT_DIR
+    volumeMounts:
+      - name: otel-java-agent
+        mountPath: {{ .Values.observability.javaAgent.mountPath | quote }}
+{{- end }}
+{{- end }}
+
+{{- define "nanosamurai-stack.otelJavaAgentVolume" }}
+{{- if and .Values.observability.enabled .Values.observability.javaAgent.enabled }}
+- name: otel-java-agent
+  emptyDir: {}
+{{- end }}
+{{- end }}
+
+{{- define "nanosamurai-stack.otelJavaAgentVolumeMount" }}
+{{- if and .Values.observability.enabled .Values.observability.javaAgent.enabled }}
+- name: otel-java-agent
+  mountPath: {{ .Values.observability.javaAgent.mountPath | quote }}
+{{- end }}
+{{- end }}
+
+{{- define "nanosamurai-stack.otelJavaAgentEnv" }}
+{{- if and .Values.observability.enabled .Values.observability.javaAgent.enabled }}
+- name: JAVA_TOOL_OPTIONS
+  value: {{ printf "-javaagent:%s/opentelemetry-javaagent.jar" .Values.observability.javaAgent.mountPath | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
 Enrollment reader env vars (rtservice/whisperx_worker/finalizer_worker)
 
 This helper emits ENROLL_* env vars depending on `.Values.enrollment.backend`.

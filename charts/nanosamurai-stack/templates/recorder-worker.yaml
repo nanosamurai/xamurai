@@ -29,6 +29,12 @@ spec:
               value: "audio.raw"
             - name: KAFKA_TOPIC_RECORDING_FINISHED
               value: "recordings.finished"
+
+            {{- if .Values.observability.enabled }}
+            - name: OTEL_SERVICE_NAME
+              value: "recorder-worker"
+            {{- include "nanosamurai-stack.otelCommonEnv" . | nindent 12 }}
+            {{- end }}
             - name: KAFKA_GROUP_ID_RECORDER
               value: "recorder-worker"
             - name: RECORDER_IDLE_SECONDS

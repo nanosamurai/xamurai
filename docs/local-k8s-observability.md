@@ -122,6 +122,31 @@ helm upgrade --install otel-collector open-telemetry/opentelemetry-collector \
 
 ---
 
+## 1.8 Enable OTEL in nanosamurai-stack Helm chart
+
+The `charts/nanosamurai-stack` chart now supports optional OTEL wiring.
+
+Recommended local settings:
+
+- enable OTEL env vars for all pods
+- enable Java agent for JVM services (`samuraibff`, `samuraipersistor`)
+
+Example (Docker Desktop k8s):
+
+```bash
+helm upgrade --install nanosamurai-stack ./charts/nanosamurai-stack \
+  -f ./charts/nanosamurai-stack/values.local.docker-desktop.yaml \
+  --set observability.enabled=true \
+  --set observability.otlpEndpoint=http://otel-collector.observability.svc.cluster.local:4317 \
+  --set observability.javaAgent.enabled=true
+```
+
+Notes:
+- Java agent is downloaded by an initContainer (requires cluster egress to GitHub).
+- For local dev, this is acceptable; for staging/prod, bake it into the image or use an internal artifact.
+
+---
+
 ## 2) Access Grafana
 
 ```bash

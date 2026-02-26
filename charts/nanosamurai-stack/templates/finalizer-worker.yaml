@@ -26,6 +26,12 @@ spec:
             - name: KAFKA_BOOTSTRAP
               value: {{ .Values.infra.kafkaBootstrapServers | quote }}
 
+            {{- if .Values.observability.enabled }}
+            - name: OTEL_SERVICE_NAME
+              value: "finalizer-worker"
+            {{- include "nanosamurai-stack.otelCommonEnv" . | nindent 12 }}
+            {{- end }}
+
             {{- if .Values.hfCache.enabled }}
             - name: HF_HOME
               value: {{ .Values.hfCache.mountPath | quote }}
