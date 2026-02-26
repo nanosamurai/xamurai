@@ -11,6 +11,14 @@ from confluent_kafka import Consumer, Producer, KafkaException
 from proto_gen import stream_pb2
 from whisperx_worker.whisperx_worker import run_whisperx_diarized
 
+from drsynth_common.otel_setup import setup_otel
+from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
+
+try:
+    from opentelemetry import trace
+except Exception:  # pragma: no cover
+    trace = None  # type: ignore[assignment]
+
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -96,21 +104,19 @@ def make_producer() -> Producer:
 # --------------------------------------------------------------------------- #
 
 def _load_local_wav_from_url(url: str) -> str:
-    """
-    For file:// URLs, return local path.
+    """For file:// URLs, return local path.
 
     For now we only support local file recordings. S3 etc. can be added later.
     """
+
     if url.startswith("file://"):
         return url[len("file://") :]
     raise RuntimeError(f"Unsupported recording_url scheme for finalizer: {url}")
 
 
 def _save_transcript_json(transcript: stream_pb2.SessionTranscript) -> Optional[str]:
-    """
-    Persist a JSON representation of the transcript next to the WAV file
-    (only for file:// URLs). Returns path to the JSON file, or None if skipped.
-    """
+    """Persist transcript JSON next to WAV for file:// URLs."""
+
     url = transcript.recording_url
     if not url.startswith("file://"):
         logger.info(
@@ -156,6 +162,7 @@ def _produce_with_ack(
     topic: str,
     key: bytes,
     value: bytes,
+    headers: Optional[list[tuple[str, Optional[bytes]]]],
     timeout_s: float,
     retries: int,
     base_backoff_s: float,
@@ -187,6 +194,7 @@ def _produce_with_ack(
                     topic=topic,
                     key=key,
                     value=value,
+                    headers=headers,
                     on_delivery=_on_delivery,
                 )
                 break
@@ -243,6 +251,9 @@ def _produce_with_ack(
 # --------------------------------------------------------------------------- #
 
 def main():
+    # Initialize OTEL SDK (no-op if deps missing)
+    setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "finalizer-worker"))
+
     logger.info("Starting finalizer_worker")
 
     import torch
@@ -273,91 +284,110 @@ def main():
                 logger.error("Kafka error: %s", msg.error())
                 raise KafkaException(msg.error())
 
-            rf = stream_pb2.RecordingFinished()
-            rf.ParseFromString(msg.value())
+            # Extract upstream trace context from recordings.finished.
+            with extracted_context_from_headers(msg.headers()):
+                if trace is not None:
+                    tracer = trace.get_tracer("finalizer_worker")
+                    span_cm = tracer.start_as_current_span(
+                        f"kafka.consume {TOPIC_RECORDING_FINISHED}"
+                    )
+                else:
+                    span_cm = None
 
-            logger.info(
-                "Processing RecordingFinished: session=%s url=%s dur=%.2fs sr=%d lang=%s tenant=%s",
-                rf.session_id,
-                rf.recording_url,
-                rf.duration_s,
-                rf.sample_rate,
-                rf.lang,
-                rf.tenant_id,
-            )
+                if span_cm is not None:
+                    span_cm.__enter__()
 
-            try:
-                wav_path = _load_local_wav_from_url(rf.recording_url)
-            except Exception as e:
-                logger.exception(
-                    "Cannot resolve recording_url=%s, skipping: %s",
-                    rf.recording_url,
-                    e,
-                )
-                # Bad event is not retriable, commit and move on.
-                consumer.commit(msg, asynchronous=True)
-                continue
+                try:
+                    rf = stream_pb2.RecordingFinished()
+                    rf.ParseFromString(msg.value())
 
-            # Full-session WhisperX with alignment + optional diarization/enrollment.
-            # Enrollment backend is configured via env (ENROLL_BACKEND=...).
-            full_text, segments = run_whisperx_diarized(
-                wav_path,
-                tenant=(rf.tenant_id or None),
-                lang=(rf.lang or None),
-                use_alignment=True,
-            )
+                    logger.info(
+                        "Processing RecordingFinished: session=%s url=%s dur=%.2fs sr=%d lang=%s tenant=%s",
+                        rf.session_id,
+                        rf.recording_url,
+                        rf.duration_s,
+                        rf.sample_rate,
+                        rf.lang,
+                        rf.tenant_id,
+                    )
 
-            transcript = stream_pb2.SessionTranscript(
-                session_id=rf.session_id,
-                recording_url=rf.recording_url,
-                lang=rf.lang,
-                duration_s=rf.duration_s,
-                full_text=full_text,
-                tenant_id=rf.tenant_id,
-                created_at_ns=rf.created_at_ns,
-            )
+                    try:
+                        wav_path = _load_local_wav_from_url(rf.recording_url)
+                    except Exception as e:
+                        logger.exception(
+                            "Cannot resolve recording_url=%s, skipping: %s",
+                            rf.recording_url,
+                            e,
+                        )
+                        # Bad event is not retriable, commit and move on.
+                        consumer.commit(msg, asynchronous=True)
+                        continue
 
-            for (s0, s1, text, speaker) in segments:
-                seg = transcript.segments.add()
-                seg.start_s = s0
-                seg.end_s = s1
-                seg.text = text
-                seg.speaker = speaker or ""
+                    # Full-session WhisperX with alignment + optional diarization/enrollment.
+                    # Enrollment backend is configured via env (ENROLL_BACKEND=...).
+                    full_text, segments = run_whisperx_diarized(
+                        wav_path,
+                        tenant=(rf.tenant_id or None),
+                        lang=(rf.lang or None),
+                        use_alignment=True,
+                    )
 
-            # 1) Persist JSON next to WAV
-            _ = _save_transcript_json(transcript)
+                    transcript = stream_pb2.SessionTranscript(
+                        session_id=rf.session_id,
+                        recording_url=rf.recording_url,
+                        lang=rf.lang,
+                        duration_s=rf.duration_s,
+                        full_text=full_text,
+                        tenant_id=rf.tenant_id,
+                        created_at_ns=rf.created_at_ns,
+                    )
 
-            # 2) Publish to Kafka for downstream consumers (persistence handled by samuraipersistor)
-            # IMPORTANT: commit the input offset only after Kafka acked this publish.
-            try:
-                _produce_with_ack(
-                    producer,
-                    topic=TOPIC_TRANSCRIPTS_FINAL,
-                    key=rf.session_id.encode("utf-8"),
-                    value=transcript.SerializeToString(),
-                    timeout_s=FINALIZER_PRODUCE_ACK_TIMEOUT_S,
-                    retries=FINALIZER_PRODUCE_RETRIES,
-                    base_backoff_s=FINALIZER_PRODUCE_RETRY_BACKOFF_S,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to publish final transcript for session=%s; will NOT commit input offset.",
-                    rf.session_id,
-                )
-                # Avoid a hot loop if Kafka is down.
-                time.sleep(1.0)
-                continue
+                    for (s0, s1, text, speaker) in segments:
+                        seg = transcript.segments.add()
+                        seg.start_s = s0
+                        seg.end_s = s1
+                        seg.text = text
+                        seg.speaker = speaker or ""
 
-            # If commit fails, we may reprocess (at-least-once). That's preferred over
-            # committing before the output exists.
-            try:
-                consumer.commit(msg, asynchronous=False)
-            except Exception:
-                logger.exception(
-                    "Offset commit failed after successful publish (session=%s). "
-                    "Worker may reprocess this RecordingFinished.",
-                    rf.session_id,
-                )
+                    # 1) Persist JSON next to WAV
+                    _ = _save_transcript_json(transcript)
+
+                    # 2) Publish to Kafka for downstream consumers (persistence handled by samuraipersistor)
+                    # IMPORTANT: commit the input offset only after Kafka acked this publish.
+                    try:
+                        _produce_with_ack(
+                            producer,
+                            topic=TOPIC_TRANSCRIPTS_FINAL,
+                            key=rf.session_id.encode("utf-8"),
+                            value=transcript.SerializeToString(),
+                            headers=with_current_trace_context(),
+                            timeout_s=FINALIZER_PRODUCE_ACK_TIMEOUT_S,
+                            retries=FINALIZER_PRODUCE_RETRIES,
+                            base_backoff_s=FINALIZER_PRODUCE_RETRY_BACKOFF_S,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to publish final transcript for session=%s; will NOT commit input offset.",
+                            rf.session_id,
+                        )
+                        # Avoid a hot loop if Kafka is down.
+                        time.sleep(1.0)
+                        continue
+
+                    # If commit fails, we may reprocess (at-least-once). That's preferred over
+                    # committing before the output exists.
+                    try:
+                        consumer.commit(msg, asynchronous=False)
+                    except Exception:
+                        logger.exception(
+                            "Offset commit failed after successful publish (session=%s). "
+                            "Worker may reprocess this RecordingFinished.",
+                            rf.session_id,
+                        )
+
+                finally:
+                    if span_cm is not None:
+                        span_cm.__exit__(None, None, None)
 
     except KeyboardInterrupt:
         logger.info("Stopping finalizer_worker (KeyboardInterrupt)")
