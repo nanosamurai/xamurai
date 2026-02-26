@@ -34,6 +34,20 @@ Notes:
 {{- if .Values.observability.enabled }}
 - name: OTEL_EXPORTER_OTLP_ENDPOINT
   value: {{ .Values.observability.otlpEndpoint | default "" | quote }}
+
+# Explicitly use OTLP/gRPC to avoid protocol ambiguity.
+- name: OTEL_EXPORTER_OTLP_PROTOCOL
+  value: "grpc"
+
+# We ship logs via Grafana Alloy → Loki, so disable OTEL log export by default.
+# (Keeps the Java agent from trying to send OTLP logs.)
+- name: OTEL_LOGS_EXPORTER
+  value: "none"
+
+# For now we also keep OTEL metrics export off; Prometheus handles metrics.
+- name: OTEL_METRICS_EXPORTER
+  value: "none"
+
 - name: OTEL_TRACES_SAMPLER
   value: {{ .Values.observability.tracesSampler | default "always_on" | quote }}
 - name: OTEL_TRACES_SAMPLER_ARG
