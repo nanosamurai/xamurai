@@ -161,6 +161,7 @@ Default credentials are set in `observability/kube-prometheus-stack.values.local
 Windows note:
 - In PowerShell, `curl` is an alias for `Invoke-WebRequest` (different flags).
 - Use `curl.exe` for real curl.
+- On Windows, the `python` shim might not exist (Store alias). Use `py ...` instead.
 
 ---
 
