@@ -6,6 +6,11 @@
 
 mode: deployment
 
+image:
+  repository: "otel/opentelemetry-collector-k8s"
+  # Leave tag empty to use chart default.
+  tag: ""
+
 config:
   receivers:
     otlp:
