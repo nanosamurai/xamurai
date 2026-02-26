@@ -39,7 +39,10 @@ RUN pip install \
       confluent-kafka \
       protobuf \
       boto3 \
-      whisperx
+      whisperx \
+      opentelemetry-api \
+      opentelemetry-sdk \
+      opentelemetry-exporter-otlp
 
 COPY . /app
 
