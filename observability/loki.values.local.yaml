@@ -47,6 +47,15 @@ backend:
 persistence:
   enabled: false
 
-# Keep gateway enabled because many agents default to pushing through it.
+# Disable optional components that add extra images (canary, caches) to pull.
+# For local Docker Desktop clusters this reduces flakiness due to image pull issues.
+lokiCanary:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+# Keep gateway enabled; Alloy pushes through it by default.
 gateway:
   enabled: true
