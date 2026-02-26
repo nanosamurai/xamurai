@@ -41,8 +41,13 @@ def setup_otel(*, service_name: Optional[str] = None) -> None:
     resource = Resource.create({"service.name": sn})
 
     provider = TracerProvider(resource=resource)
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not endpoint:
+        # OTEL not configured.
+        return
+
     exporter = OTLPSpanExporter(
-        endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        endpoint=endpoint,
         insecure=True,
     )
     provider.add_span_processor(BatchSpanProcessor(exporter))

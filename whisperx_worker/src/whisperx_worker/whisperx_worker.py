@@ -15,6 +15,14 @@ import time
 
 import torch
 
+from drsynth_common.otel_setup import setup_otel
+from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
+
+try:
+    from opentelemetry import trace
+except Exception:  # pragma: no cover
+    trace = None  # type: ignore[assignment]
+
 # -------------------- PyTorch checkpoint loading compatibility --------------------
 #
 # Recent PyTorch versions (2.6+) introduced safer defaults for torch.load() that can
@@ -897,6 +905,9 @@ def make_producer() -> Producer:
     )
 
 def main():
+    # Initialize OTEL SDK (no-op if deps missing)
+    setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "whisperx-worker"))
+
     logger.info("Starting whisperx_worker")
 
     if not torch.cuda.is_available():
@@ -971,113 +982,134 @@ def main():
                 logger.error("Kafka error: %s", msg.error())
                 raise KafkaException(msg.error())
 
-            key_bytes = msg.key()
-            key = key_bytes.decode("utf-8") if key_bytes else ""
-            logger.debug("Processing message with key=%s, offset=%i", key, msg.offset())
+            # Extract upstream context (if present) from Kafka headers.
+            with extracted_context_from_headers(msg.headers()):
+                if trace is not None:
+                    tracer = trace.get_tracer("whisperx_worker")
+                else:
+                    tracer = None
 
-            audio = stream_pb2.AudioChunk()
-            audio.ParseFromString(msg.value())
-
-            session_id = audio.session_id
-            lang = getattr(audio, "lang", "") or None
-            bff_uri = getattr(audio, "bff_origin_uri", "") or None
-            tenant = getattr(audio, "tenant_id", "") or None
-
-            # Track lang hint & activity
-            if lang:
-                session_lang[session_id] = lang
-            if bff_uri:
-                bff_origin_uri[session_id] = bff_uri
-            if tenant:
-                tenant_id[session_id] = tenant
-            last_activity[session_id] = now
-
-            # Append to buffer
-            arr = np.frombuffer(audio.pcm16_le, dtype="<i2")
-            buffers[session_id].append(arr)
-            buf_samples[session_id] += arr.size
-
-            logger.debug(
-                "Buffer size for session %s: %d samples",
-                session_id,
-                buf_samples[session_id],
-            )
-
-            # --- 3) Full-slice processing as before ---
-            if buf_samples[session_id] >= int(SLICE_SECONDS * SR):
-                need = int(SLICE_SECONDS * SR)
-                parts: List[np.ndarray] = []
-                while need > 0 and buffers[session_id]:
-                    ch = buffers[session_id][0]
-                    if ch.size <= need:
-                        parts.append(buffers[session_id].popleft())
-                        need -= ch.size
-                        buf_samples[session_id] -= ch.size
-                    else:
-                        parts.append(ch[:need])
-                        buffers[session_id][0] = ch[need:]
-                        buf_samples[session_id] -= need
-                        need = 0
-
-                pcm = np.concatenate(parts).astype("<i2")
-
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                    wav_path = tmp.name
-
-                x = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
-                sf.write(wav_path, x, SR, subtype="PCM_16")
-
-                base_start = slice_index[session_id] * SLICE_SECONDS
-                slice_index[session_id] += 1
-
-                logger.info(
-                    "Session %s: built %0.1fs slice → %s",
-                    session_id,
-                    SLICE_SECONDS,
-                    wav_path,
+                span_cm = (
+                    tracer.start_as_current_span(f"kafka.consume {TOPIC_AUDIO}")
+                    if tracer is not None
+                    else None
                 )
 
-                text, segments = run_whisperx_diarized(
-                    wav_path,
-                    tenant=tenant_id.get(session_id),
-                    lang=session_lang.get(session_id),
-                    use_alignment=False,
-                )
-                logger.debug("Ran WhisperX inference, entire text is: %s", text)
-
-                for (s0, s1, seg_text, speaker) in segments:
-                    abs_start = base_start + s0
-                    abs_end = base_start + s1
-                    ev = stream_pb2.RefinedEvent(
-                        session_id=session_id,
-                        start_s=abs_start,
-                        end_s=abs_end,
-                        text=seg_text,
-                        speaker=speaker,
-                        supersedes_seq=[],
-                        lang=session_lang.get(session_id),
-                        bff_origin_uri=bff_origin_uri.get(session_id),
-                        tenant_id=tenant_id.get(session_id),
-                    )
-                    logger.debug(
-                        "Sending refined message start_s=%.1f, speaker=%s, text=%s",
-                        abs_start,
-                        speaker,
-                        seg_text,
-                    )
-                    p.produce(
-                        topic=TOPIC_REFINED,
-                        key=session_id.encode("utf-8"),
-                        value=ev.SerializeToString(),
-                    )
-                p.poll(0)
+                if span_cm is not None:
+                    span_cm.__enter__()
 
                 try:
-                    os.unlink(wav_path)
-                except Exception:
-                    pass
+                    key_bytes = msg.key()
+                    key = key_bytes.decode("utf-8") if key_bytes else ""
+                    logger.debug("Processing message with key=%s, offset=%i", key, msg.offset())
 
-            c.commit(msg, asynchronous=True)
+                    audio = stream_pb2.AudioChunk()
+                    audio.ParseFromString(msg.value())
+
+                    session_id = audio.session_id
+                    lang = getattr(audio, "lang", "") or None
+                    bff_uri = getattr(audio, "bff_origin_uri", "") or None
+                    tenant = getattr(audio, "tenant_id", "") or None
+
+                    # Track lang hint & activity
+                    if lang:
+                        session_lang[session_id] = lang
+                    if bff_uri:
+                        bff_origin_uri[session_id] = bff_uri
+                    if tenant:
+                        tenant_id[session_id] = tenant
+                    last_activity[session_id] = now
+
+                    # Append to buffer
+                    arr = np.frombuffer(audio.pcm16_le, dtype="<i2")
+                    buffers[session_id].append(arr)
+                    buf_samples[session_id] += arr.size
+
+                    logger.debug(
+                        "Buffer size for session %s: %d samples",
+                        session_id,
+                        buf_samples[session_id],
+                    )
+
+                    # --- 3) Full-slice processing as before ---
+                    if buf_samples[session_id] >= int(SLICE_SECONDS * SR):
+                        need = int(SLICE_SECONDS * SR)
+                        parts: List[np.ndarray] = []
+                        while need > 0 and buffers[session_id]:
+                            ch = buffers[session_id][0]
+                            if ch.size <= need:
+                                parts.append(buffers[session_id].popleft())
+                                need -= ch.size
+                                buf_samples[session_id] -= ch.size
+                            else:
+                                parts.append(ch[:need])
+                                buffers[session_id][0] = ch[need:]
+                                buf_samples[session_id] -= need
+                                need = 0
+
+                        pcm = np.concatenate(parts).astype("<i2")
+
+                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                            wav_path = tmp.name
+
+                        x = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
+                        sf.write(wav_path, x, SR, subtype="PCM_16")
+
+                        base_start = slice_index[session_id] * SLICE_SECONDS
+                        slice_index[session_id] += 1
+
+                        logger.info(
+                            "Session %s: built %0.1fs slice → %s",
+                            session_id,
+                            SLICE_SECONDS,
+                            wav_path,
+                        )
+
+                        text, segments = run_whisperx_diarized(
+                            wav_path,
+                            tenant=tenant_id.get(session_id),
+                            lang=session_lang.get(session_id),
+                            use_alignment=False,
+                        )
+                        logger.debug("Ran WhisperX inference, entire text is: %s", text)
+
+                        for (s0, s1, seg_text, speaker) in segments:
+                            abs_start = base_start + s0
+                            abs_end = base_start + s1
+                            ev = stream_pb2.RefinedEvent(
+                                session_id=session_id,
+                                start_s=abs_start,
+                                end_s=abs_end,
+                                text=seg_text,
+                                speaker=speaker,
+                                supersedes_seq=[],
+                                lang=session_lang.get(session_id),
+                                bff_origin_uri=bff_origin_uri.get(session_id),
+                                tenant_id=tenant_id.get(session_id),
+                            )
+                            logger.debug(
+                                "Sending refined message start_s=%.1f, speaker=%s, text=%s",
+                                abs_start,
+                                speaker,
+                                seg_text,
+                            )
+                            p.produce(
+                                topic=TOPIC_REFINED,
+                                key=session_id.encode("utf-8"),
+                                value=ev.SerializeToString(),
+                                headers=with_current_trace_context(),
+                            )
+                        p.poll(0)
+
+                        try:
+                            os.unlink(wav_path)
+                        except Exception:
+                            pass
+
+                    c.commit(msg, asynchronous=True)
+                finally:
+                    if span_cm is not None:
+                        span_cm.__exit__(None, None, None)
 
     except KeyboardInterrupt:
         logger.info("Stopping whisperx_worker (KeyboardInterrupt)")
