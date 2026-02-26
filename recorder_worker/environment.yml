@@ -11,3 +11,8 @@ dependencies:
       - confluent-kafka>=2.6
       - protobuf>=5.29
       - boto3>=1.35    # only actually needed if we use the S3 backend
+
+      # Observability (Kafka trace context propagation)
+      - opentelemetry-api>=1.30
+      - opentelemetry-sdk>=1.30
+      - opentelemetry-exporter-otlp>=1.30

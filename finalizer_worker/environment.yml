@@ -24,4 +24,9 @@ dependencies:
       - boto3
       - testcontainers[kafka,localstack]
       - psycopg_pool
+
+      # Observability (Kafka trace context propagation)
+      - opentelemetry-api>=1.30
+      - opentelemetry-sdk>=1.30
+      - opentelemetry-exporter-otlp>=1.30
 # pip install "torch==2.8.0+cu128" "torchaudio==2.8.0+cu128" --index-url https://download.pytorch.org/whl/cu128
