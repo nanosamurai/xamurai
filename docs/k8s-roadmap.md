@@ -134,7 +134,7 @@ Also:
 ## 7) Storage strategy
 
 ### Recordings
-Current local dev uses a shared volume (`drsynth_recordings`) and file:// URLs.
+Current local dev uses a shared volume (`nanosamurai_recordings`) and file:// URLs.
 
 Production recommendation:
 - Move to S3-backed recordings and artifacts.

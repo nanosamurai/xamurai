@@ -228,7 +228,7 @@ The first startup of these services can be slow because they download and initia
 On CPU-only machines (or when CUDA isn’t available), initialization and inference can be **unbearably slow**.
 For local “it feels like prod” dev, prefer running them with GPU where possible.
 
-Compose mounts a persistent HuggingFace cache volume (`drsynth_hf_cache`) to avoid re-downloading models on restarts.
+Compose mounts a persistent HuggingFace cache volume (`nanosamurai_hf_cache`) to avoid re-downloading models on restarts.
 
 Also: until `rtservice` finishes initialization, BFF `/ready` may return `503` with `grpc.up?=false`.
 

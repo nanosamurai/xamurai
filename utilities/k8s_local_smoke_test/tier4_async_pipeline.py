@@ -122,6 +122,15 @@ def main() -> int:
     consumer = _make_consumer(args.kafka_bootstrap, group_id=f"tier4-{int(time.time())}")
     consumer.subscribe(topics)
 
+    # Kafka subscription assignment is async; poll until partitions are assigned.
+    # Otherwise a short audio stream can complete before the consumer is ready,
+    # and with auto.offset.reset=latest we'd miss the messages.
+    t0 = time.time()
+    while time.time() - t0 < 5.0:
+        consumer.poll(0.1)
+        if consumer.assignment():
+            break
+
     events_q: queue.Queue[str] = queue.Queue()
     events_url = f"{ws_base}/ws/events?session_id={urllib.parse.quote(session_id)}"
     audio_url = (

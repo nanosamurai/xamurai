@@ -376,6 +376,17 @@ Notes:
 - WhisperX refined emits per-slice (default `WHISPERX_SLICE_SECONDS=60`).
 - Final transcript can be slow on CPU; treat Tier 4 strict mode (`--signal final`) as opt-in locally.
 
+Run Tier4 and require a specific speaker label (with an alias accepted for local data):
+
+```bat
+.venv-smoke\Scripts\python utilities/k8s_local_smoke_test/tier4_async_pipeline.py \
+  --base-url http://localhost:8000 \
+  --wav tests/data/test_cs.wav --lang cs --stream-seconds 6.0 \
+  --kafka-bootstrap 127.0.0.1:9092 \
+  --timeout 420 --signal final \
+  --expect-speaker Miro-cz --expect-speaker-alias "Miro (cz)"
+```
+
 ---
 
 ## 8) Debugging cheatsheet

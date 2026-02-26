@@ -65,18 +65,18 @@ services:
   # -------------------- Postgres --------------------
   postgres:
     image: postgres:18.1-alpine
-    container_name: drsynth-postgres
+    container_name: nanosamurai-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: drsynth
       POSTGRES_PASSWORD: drsynth
-      POSTGRES_DB: drsynth
+      POSTGRES_DB: nanosamurai
     ports:
       - "${COMPOSE_BIND_IP:-127.0.0.1}:5432:5432"
     volumes:
-      - drsynth_pgdata:/var/lib/postgresql/data
+      - nanosamurai_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U drsynth -d drsynth"]
+      test: ["CMD-SHELL", "pg_isready -U drsynth -d nanosamurai"]
       interval: 10s
       timeout: 30s
       retries: 5
@@ -118,7 +118,7 @@ services:
   #   docker/postgres/migrations/
   db_migrate:
     image: postgres:18.1-alpine
-    container_name: drsynth-db-migrate
+    container_name: nanosamurai-db-migrate
     restart: "no"
     depends_on:
       postgres:
@@ -134,19 +134,19 @@ services:
         set -e
 
         # Idempotency: if schema already exists, do nothing.
-        if psql -h postgres -U drsynth -d drsynth -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='tenants'" | grep -q 1; then
+        if psql -h postgres -U drsynth -d nanosamurai -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='tenants'" | grep -q 1; then
           echo "Schema already initialized; skipping migrations."
           exit 0
         fi
 
         echo "Applying SQL migrations..."
-        psql -h postgres -U drsynth -d drsynth -v ON_ERROR_STOP=1 -f /migrations/001-create-core-schema.up.sql
-        psql -h postgres -U drsynth -d drsynth -v ON_ERROR_STOP=1 -f /migrations/002-transcript-records-append-only.up.sql
+        psql -h postgres -U drsynth -d nanosamurai -v ON_ERROR_STOP=1 -f /migrations/001-create-core-schema.up.sql
+        psql -h postgres -U drsynth -d nanosamurai -v ON_ERROR_STOP=1 -f /migrations/002-transcript-records-append-only.up.sql
         echo "Migrations complete."
 
   db_seed:
     image: postgres:18.1-alpine
-    container_name: drsynth-db-seed
+    container_name: nanosamurai-db-seed
     restart: "no"
     depends_on:
       postgres:
@@ -164,22 +164,23 @@ services:
         set -e
 
         # Idempotency: if dev tenant exists, do nothing.
-        if psql -h postgres -U drsynth -d drsynth -tAc "SELECT 1 FROM tenants WHERE id='00000000-0000-0000-0000-000000000000'" | grep -q 1; then
+        if psql -h postgres -U drsynth -d nanosamurai -tAc "SELECT 1 FROM tenants WHERE id='00000000-0000-0000-0000-000000000000'" | grep -q 1; then
           echo "Dev tenant already seeded; skipping."
           exit 0
         fi
 
         echo "Seeding dev tenant/user..."
-        psql -h postgres -U drsynth -d drsynth -v ON_ERROR_STOP=1 -f /seed.sql
+        psql -h postgres -U drsynth -d nanosamurai -v ON_ERROR_STOP=1 -f /seed.sql
         echo "Seed complete."
 
-  # --------- drsynth services (built from this monorepo) ---------
+  # --------- xamurai services (built from this monorepo) ---------
 
   rtservice:
     build:
       context: .
       dockerfile: rtservice/Dockerfile
-    container_name: drsynth-rtservice
+    image: xamurai-rtservice:local
+    container_name: xamurai-rtservice
     restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP: broker:29092
@@ -205,7 +206,7 @@ services:
       FW_LANG_DEFAULT: ""
     # Persist HF caches so the *first* startup is slow, subsequent restarts are fast.
     volumes:
-      - drsynth_hf_cache:/data/hf_cache
+      - nanosamurai_hf_cache:/data/hf_cache
     ports:
       - "${COMPOSE_BIND_IP:-127.0.0.1}:50052:50052"
     depends_on:
@@ -216,7 +217,8 @@ services:
     build:
       context: .
       dockerfile: whisperx_worker/Dockerfile
-    container_name: drsynth-whisperx-worker
+    image: xamurai-whisperx-worker:local
+    container_name: xamurai-whisperx-worker
     restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP: broker:29092
@@ -241,7 +243,7 @@ services:
       ENROLL_S3_SECRET_KEY: test
       ENROLL_S3_FORCE_PATH_STYLE: "true"
     volumes:
-      - drsynth_hf_cache:/data/hf_cache
+      - nanosamurai_hf_cache:/data/hf_cache
     depends_on:
       kafka_init:
         condition: service_completed_successfully
@@ -250,7 +252,8 @@ services:
     build:
       context: .
       dockerfile: recorder_worker/Dockerfile
-    container_name: drsynth-recorder-worker
+    image: xamurai-recorder-worker:local
+    container_name: xamurai-recorder-worker
     restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP: broker:29092
@@ -269,7 +272,7 @@ services:
       S3_FORCE_PATH_STYLE: "true"
       S3_PREFIX: ""
     volumes:
-      - drsynth_recordings:/data/recordings
+      - nanosamurai_recordings:/data/recordings
     depends_on:
       kafka_init:
         condition: service_completed_successfully
@@ -278,7 +281,8 @@ services:
     build:
       context: .
       dockerfile: finalizer_worker/Dockerfile
-    container_name: drsynth-finalizer-worker
+    image: xamurai-finalizer-worker:local
+    container_name: xamurai-finalizer-worker
     restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP: broker:29092
@@ -305,8 +309,8 @@ services:
       # Allow long processing time per message (full session + model downloads)
       FINALIZER_MAX_POLL_INTERVAL_MS: "3600000"
     volumes:
-      - drsynth_recordings:/data/recordings
-      - drsynth_hf_cache:/data/hf_cache
+      - nanosamurai_recordings:/data/recordings
+      - nanosamurai_hf_cache:/data/hf_cache
     depends_on:
       kafka_init:
         condition: service_completed_successfully
@@ -335,7 +339,7 @@ services:
       SAMURAIBFF_S3_SECRET_KEY: test
       SAMURAIBFF_S3_FORCE_PATH_STYLE: "true"
 
-      SAMURAIBFF_DB_JDBC_URL: jdbc:postgresql://postgres:5432/drsynth
+      SAMURAIBFF_DB_JDBC_URL: jdbc:postgresql://postgres:5432/nanosamurai
       SAMURAIBFF_DB_USERNAME: drsynth
       SAMURAIBFF_DB_PASSWORD: drsynth
 
@@ -384,7 +388,7 @@ services:
       SP_HTTP_HOST: 0.0.0.0
       SP_HTTP_PORT: 8010
 
-      SP_DB_JDBC_URL: jdbc:postgresql://postgres:5432/drsynth
+      SP_DB_JDBC_URL: jdbc:postgresql://postgres:5432/nanosamurai
       SP_DB_USERNAME: drsynth
       SP_DB_PASSWORD: drsynth
 
@@ -402,9 +406,9 @@ services:
         condition: service_completed_successfully
 
 volumes:
-  drsynth_pgdata:
-  drsynth_recordings:
-  drsynth_hf_cache:
+  nanosamurai_pgdata:
+  nanosamurai_recordings:
+  nanosamurai_hf_cache:
   nanosamurai_localstack:
 
 # Within the Kafka image, for testing create following topics:
