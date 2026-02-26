@@ -225,6 +225,70 @@ See `docs/local-k8s-setup.md`.
 
 ---
 
+## 5) Roadmap to **end-to-end** tracing (hybrid approach → B)
+
+You said you ultimately want **B** (single, connected trace across all services), but we’ll phase it in to keep debugging manageable.
+
+### Phase 0 (already done): stack + “first traces”
+- Grafana OSS + Prometheus + Loki + Tempo installed in `observability`
+- JVM services (`samuraibff`, `samuraipersistor`) traced via OTEL Java agent → OTEL Collector → Tempo
+- Logs shipped via Alloy → Loki
+
+### Phase 1: lock in the **propagation contract** (even before Python emits spans)
+Goal: make sure the trace context *can* cross boundaries.
+
+1) **Kafka**: use W3C Trace Context header
+- Header key: `traceparent`
+- Producer MUST inject it into Kafka headers
+- Consumer MUST extract it and set it as parent
+
+2) **gRPC**: use W3C trace context in gRPC metadata
+- Java agent typically injects/extracts automatically for gRPC clients/servers.
+- For Python gRPC server we’ll add an interceptor to extract parent context from metadata.
+
+3) Correlation key
+- Add `session_id` to spans as an attribute (recommended key: `nanosamurai.session_id`) and to logs.
+
+### Phase 2: instrument `rtservice` (Python gRPC) with OTEL SDK
+Goal: BFF → gRPC → rtservice shows as one connected trace.
+
+Implementation outline:
+- Add OTLP exporter (grpc) → `OTEL_EXPORTER_OTLP_ENDPOINT` already provided by Helm
+- Add gRPC server instrumentation:
+  - easiest: `opentelemetry-instrumentation-grpc`
+  - or manual interceptor + `tracer.start_as_current_span(...)`
+- Add span attributes:
+  - `service.name=rtservice`
+  - `nanosamurai.session_id` (from incoming `AudioChunk.session_id`)
+
+### Phase 3: instrument Kafka workers (Python, confluent_kafka)
+Target services here:
+- `whisperx_worker`
+- `recorder_worker`
+- `finalizer_worker`
+
+Goal: the trace continues across Kafka hops.
+
+Implementation outline:
+- When consuming:
+  - read `msg.headers()`
+  - extract `traceparent`
+  - create a span like `kafka.consume audio.raw` (parent = extracted ctx)
+- When producing:
+  - inject current context to outgoing headers
+  - produce as usual with `headers=[(...)]`
+
+Note: we currently do **not** have any OTEL code in these workers, so this will be new code (small shared helper recommended).
+
+### Phase 4: log ↔ trace correlation
+Once Phase 2/3 is in, we can correlate logs and traces cleanly.
+
+- JVM: enable trace/span id injection into logs (Logback/SLF4J MDC via agent settings)
+- Python: use `opentelemetry-instrumentation-logging` or a logging Filter to append `trace_id` / `span_id`
+- Loki: query logs by `trace_id` and jump to the trace in Tempo
+
+---
+
 ## Decisions & change log
 
 - 2026-02-26: Use **Grafana Alloy** (not Promtail) for log shipping.
