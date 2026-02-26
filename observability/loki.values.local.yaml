@@ -47,8 +47,13 @@ backend:
 persistence:
   enabled: false
 
-# Disable optional components that add extra images (canary, caches) to pull.
+# Disable Helm test (it requires the canary) + optional components that add extra
+# images to pull.
+#
 # For local Docker Desktop clusters this reduces flakiness due to image pull issues.
+test:
+  enabled: false
+
 lokiCanary:
   enabled: false
 chunksCache:
