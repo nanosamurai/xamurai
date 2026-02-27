@@ -300,6 +300,60 @@ curl.exe -s -u admin:admin "http://127.0.0.1:3001/api/datasources/proxy/4/api/se
 
 ---
 
+## 3.4 End-to-end tracing by `session_id` (async pipeline)
+
+For the async pipeline we intentionally make the **trace id deterministic**:
+
+- `trace_id` = `session_id` without dashes (32 hex chars)
+
+This means you can jump to a full end-to-end trace for a session without relying
+on Tempo tag indexing.
+
+### 3.4.1 Generate a session (Tier4)
+
+```bash
+py -3 utilities/k8s_local_smoke_test/tier4_async_pipeline.py \
+  --base-url http://localhost:8001 \
+  --kafka-bootstrap 127.0.0.1:9092 \
+  --timeout 600 \
+  --signal final
+```
+
+The smoke test prints `session_id=...`.
+
+### 3.4.2 Open the trace in Grafana (Tempo)
+
+1) Remove dashes:
+
+```
+019ca15a-818e-777e-928d-fe8dc22f2816
+→ 019ca15a818e777e928dfe8dc22f2816
+```
+
+2) In **Grafana → Explore → Tempo**, use **TraceID** lookup and paste the 32-hex id.
+
+Alternatively, call Tempo directly:
+
+```bash
+kubectl -n observability port-forward svc/tempo 3200:3200
+
+curl.exe -s -o NUL -w "%{http_code}\n" \
+  http://127.0.0.1:3200/api/traces/019ca15a818e777e928dfe8dc22f2816
+```
+
+### 3.4.3 What you should see
+
+One connected trace containing spans across multiple services, e.g.:
+
+- `samuraibff` (root)
+- `recorder-worker` (consume audio.raw, recorder.session, publish recordings.finished)
+- `whisperx-worker` (consume audio.raw, whisperx.slice, publish transcripts.refined)
+- `finalizer-worker` (finalizer.session, publish transcripts.final)
+
+All these spans should share the same `trace_id` derived from the session.
+
+---
+
 ## 4) Generate real traffic (existing smoke tests)
 
 Use the existing local-k8s smoke tests:

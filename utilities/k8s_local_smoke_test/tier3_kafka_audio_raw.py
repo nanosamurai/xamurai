@@ -39,6 +39,9 @@ def _make_consumer(bootstrap: str, group_id: str) -> Consumer:
             "group.id": group_id,
             "auto.offset.reset": "latest",
             "enable.auto.commit": False,
+            # Windows: prefer IPv4. Otherwise confluent-kafka may try ::1 first and fail
+            # even when 127.0.0.1 works.
+            "broker.address.family": "v4",
         }
     )
 
@@ -100,7 +103,24 @@ def main() -> int:
             chunk = stream_pb2.AudioChunk()
             chunk.ParseFromString(msg.value())
             if chunk.session_id == session_id:
+                hdrs = msg.headers() or []
+                # Extract traceparent if present (W3C Trace Context).
+                tp = None
+                for (k, v) in hdrs:
+                    if (k or "").lower() == "traceparent" and v:
+                        try:
+                            tp = v.decode("utf-8")
+                        except Exception:
+                            tp = str(v)
+                        break
+
                 print(f"[tier3] PASS: observed AudioChunk in Kafka topic={args.topic} session_id={session_id}")
+                if tp:
+                    print(f"[tier3] traceparent={tp}")
+                else:
+                    # Keep this compact; just show header keys.
+                    keys = [str(k) for (k, _v) in hdrs]
+                    print(f"[tier3] WARN: no traceparent header found. headers={keys}")
                 return 0
 
         print("[tier3] FAIL: did not observe matching AudioChunk on audio.raw")

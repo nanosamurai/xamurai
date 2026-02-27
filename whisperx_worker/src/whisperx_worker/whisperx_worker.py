@@ -604,6 +604,25 @@ def _flush_session_partial(
 
     # Re-attach trace context captured from kafka consume.
     with extracted_context_from_headers(session_trace_headers.get(session_id)):
+        span_cm = None
+        if trace is not None:
+            tracer = trace.get_tracer("whisperx_worker")
+            span_cm = tracer.start_as_current_span("whisperx.slice")
+            span_cm.__enter__()
+
+            try:
+                span = trace.get_current_span()
+                if hasattr(span, "set_attribute"):
+                    span.set_attribute("nanosamurai.session_id", session_id)
+                    if tenant_id.get(session_id):
+                        span.set_attribute("nanosamurai.tenant_id", tenant_id.get(session_id))
+                    span.set_attribute("nanosamurai.slice_index", slice_index.get(session_id, 0))
+                    span.set_attribute("nanosamurai.slice_start_s", float(base_start))
+                    span.set_attribute("nanosamurai.slice_duration_s", float(len(pcm) / SR))
+                    span.set_attribute("nanosamurai.flush_reason", "idle")
+            except Exception:
+                pass
+
         try:
             text, segments = run_whisperx_diarized(
                 wav_path,
@@ -612,6 +631,16 @@ def _flush_session_partial(
                 use_alignment=False,
             )
             logger.debug("Idle WhisperX result (session=%s): %s", session_id, text)
+
+            # Add summary attributes (best-effort)
+            if trace is not None:
+                try:
+                    span = trace.get_current_span()
+                    if hasattr(span, "set_attribute"):
+                        span.set_attribute("nanosamurai.segments_count", int(len(segments)))
+                        span.set_attribute("nanosamurai.text_len", int(len(text or "")))
+                except Exception:
+                    pass
 
             for (s0, s1, seg_text, speaker) in segments:
                 abs_start = base_start + s0
@@ -635,6 +664,11 @@ def _flush_session_partial(
                 )
             producer.poll(0)
         finally:
+            if span_cm is not None:
+                try:
+                    span_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
             try:
                 os.unlink(wav_path)
             except Exception:
@@ -916,15 +950,6 @@ def main():
                 raise KafkaException(msg.error())
 
             with extracted_context_from_headers(msg.headers()):
-                if trace is not None:
-                    tracer = trace.get_tracer("whisperx_worker")
-                    span_cm = tracer.start_as_current_span(f"kafka.consume {TOPIC_AUDIO}")
-                else:
-                    span_cm = None
-
-                if span_cm is not None:
-                    span_cm.__enter__()
-
                 try:
                     audio = stream_pb2.AudioChunk()
                     audio.ParseFromString(msg.value())
@@ -988,41 +1013,76 @@ def main():
                             wav_path,
                         )
 
-                        text, segments = run_whisperx_diarized(
-                            wav_path,
-                            tenant=tenant_id.get(session_id),
-                            lang=session_lang.get(session_id),
-                            use_alignment=False,
-                        )
-                        logger.debug("Ran WhisperX inference, entire text is: %s", text)
+                        # Only span per slice (not per chunk).
+                        span_cm = None
+                        if trace is not None:
+                            tracer = trace.get_tracer("whisperx_worker")
+                            span_cm = tracer.start_as_current_span("whisperx.slice")
+                            span_cm.__enter__()
+                            try:
+                                span = trace.get_current_span()
+                                if hasattr(span, "set_attribute"):
+                                    span.set_attribute("nanosamurai.session_id", session_id)
+                                    if tenant_id.get(session_id):
+                                        span.set_attribute("nanosamurai.tenant_id", tenant_id.get(session_id))
+                                    span.set_attribute("nanosamurai.slice_index", int(slice_index[session_id] - 1))
+                                    span.set_attribute("nanosamurai.slice_start_s", float(base_start))
+                                    span.set_attribute("nanosamurai.slice_duration_s", float(SLICE_SECONDS))
+                                    span.set_attribute("nanosamurai.flush_reason", "slice")
+                            except Exception:
+                                pass
 
-                        for (s0, s1, seg_text, speaker) in segments:
-                            abs_start = base_start + s0
-                            abs_end = base_start + s1
-                            ev = stream_pb2.RefinedEvent(
-                                session_id=session_id,
-                                start_s=abs_start,
-                                end_s=abs_end,
-                                text=seg_text,
-                                speaker=speaker,
-                                supersedes_seq=[],
+                        try:
+                            text, segments = run_whisperx_diarized(
+                                wav_path,
+                                tenant=tenant_id.get(session_id),
                                 lang=session_lang.get(session_id),
-                                bff_origin_uri=bff_origin_uri.get(session_id),
-                                tenant_id=tenant_id.get(session_id),
+                                use_alignment=False,
                             )
-                            logger.debug(
-                                "Sending refined message start_s=%.1f, speaker=%s, text=%s",
-                                abs_start,
-                                speaker,
-                                seg_text,
-                            )
-                            p.produce(
-                                topic=TOPIC_REFINED,
-                                key=session_id.encode("utf-8"),
-                                value=ev.SerializeToString(),
-                                headers=with_current_trace_context(),
-                            )
-                        p.poll(0)
+                            logger.debug("Ran WhisperX inference, entire text is: %s", text)
+
+                            if trace is not None:
+                                try:
+                                    span = trace.get_current_span()
+                                    if hasattr(span, "set_attribute"):
+                                        span.set_attribute("nanosamurai.segments_count", int(len(segments)))
+                                        span.set_attribute("nanosamurai.text_len", int(len(text or "")))
+                                except Exception:
+                                    pass
+
+                            for (s0, s1, seg_text, speaker) in segments:
+                                abs_start = base_start + s0
+                                abs_end = base_start + s1
+                                ev = stream_pb2.RefinedEvent(
+                                    session_id=session_id,
+                                    start_s=abs_start,
+                                    end_s=abs_end,
+                                    text=seg_text,
+                                    speaker=speaker,
+                                    supersedes_seq=[],
+                                    lang=session_lang.get(session_id),
+                                    bff_origin_uri=bff_origin_uri.get(session_id),
+                                    tenant_id=tenant_id.get(session_id),
+                                )
+                                logger.debug(
+                                    "Sending refined message start_s=%.1f, speaker=%s, text=%s",
+                                    abs_start,
+                                    speaker,
+                                    seg_text,
+                                )
+                                p.produce(
+                                    topic=TOPIC_REFINED,
+                                    key=session_id.encode("utf-8"),
+                                    value=ev.SerializeToString(),
+                                    headers=with_current_trace_context(),
+                                )
+                            p.poll(0)
+                        finally:
+                            if span_cm is not None:
+                                try:
+                                    span_cm.__exit__(None, None, None)
+                                except Exception:
+                                    pass
 
                         try:
                             os.unlink(wav_path)
@@ -1031,8 +1091,7 @@ def main():
 
                     c.commit(msg, asynchronous=True)
                 finally:
-                    if span_cm is not None:
-                        span_cm.__exit__(None, None, None)
+                    pass
 
     except KeyboardInterrupt:
         logger.info("Stopping whisperx_worker (KeyboardInterrupt)")
