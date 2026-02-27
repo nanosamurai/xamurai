@@ -15,8 +15,10 @@ from drsynth_common.otel_kafka import extracted_context_from_headers, with_curre
 
 try:
     from opentelemetry import trace
+    from opentelemetry.trace import SpanKind
 except Exception:  # pragma: no cover
     trace = None  # type: ignore[assignment]
+    SpanKind = None  # type: ignore[assignment]
 
 
 # --------------------------------------------------------------------------- #
@@ -395,6 +397,21 @@ def main():
 
             # Extract upstream context (if present) from Kafka headers.
             with extracted_context_from_headers(msg.headers()):
+                span_cm = None
+                span_obj = None
+                if trace is not None and SpanKind is not None:
+                    try:
+                        tracer = trace.get_tracer("recorder_worker")
+                        span_cm = tracer.start_as_current_span(
+                            "kafka.consume audio.raw",
+                            kind=SpanKind.CONSUMER,
+                        )
+                        span_cm.__enter__()
+                        span_obj = trace.get_current_span()
+                    except Exception:
+                        span_cm = None
+                        span_obj = None
+
                 try:
                     audio_chunk = stream_pb2.AudioChunk()
                     audio_chunk.ParseFromString(msg.value())
@@ -404,6 +421,16 @@ def main():
                         logger.warning("AudioChunk without session_id, skipping.")
                         consumer.commit(msg, asynchronous=True)
                         continue
+
+                    # Add chunk-level info for tracing (best-effort).
+                    try:
+                        if span_obj is not None and hasattr(span_obj, "set_attribute"):
+                            span_obj.set_attribute("nanosamurai.session_id", session_id)
+                            if getattr(audio_chunk, "tenant_id", ""):
+                                span_obj.set_attribute("nanosamurai.tenant_id", str(audio_chunk.tenant_id))
+                            span_obj.set_attribute("nanosamurai.audio_bytes", int(len(audio_chunk.pcm16_le or b"")))
+                    except Exception:
+                        pass
 
                     sr = getattr(audio_chunk, "sample_rate", DEFAULT_SR) or DEFAULT_SR
                     lang = getattr(audio_chunk, "lang", "") or ""
@@ -451,7 +478,11 @@ def main():
 
                     consumer.commit(msg, asynchronous=True)
                 finally:
-                    pass
+                    if span_cm is not None:
+                        try:
+                            span_cm.__exit__(None, None, None)
+                        except Exception:
+                            pass
 
     except KeyboardInterrupt:
         logger.info("Stopping recorder_worker (KeyboardInterrupt)")
