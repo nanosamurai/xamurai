@@ -320,51 +320,60 @@ You said you ultimately want **B** (single, connected trace across all services)
 - JVM services (`samuraibff`, `samuraipersistor`) traced via OTEL Java agent → OTEL Collector → Tempo
 - Logs shipped via Alloy → Loki
 
-### Phase 1: lock in the **propagation contract** (even before Python emits spans)
-Goal: make sure the trace context *can* cross boundaries.
+### Phase 1: propagation contract (Kafka + gRPC)
 
-1) **Kafka**: use W3C Trace Context header
+Status:
+- **Kafka contract: implemented** (trace context propagation via W3C `traceparent` in Kafka headers)
+- **gRPC contract: not yet implemented/verified** for Python (`rtservice`)
+
+Details:
+
+1) **Kafka**: W3C Trace Context header
 - Header key: `traceparent`
-- Producer MUST inject it into Kafka headers
-- Consumer MUST extract it and set it as parent
+- Producer injects into Kafka headers
+- Consumer extracts and uses it as the parent context
 
-2) **gRPC**: use W3C trace context in gRPC metadata
-- Java agent typically injects/extracts automatically for gRPC clients/servers.
-- For Python gRPC server we’ll add an interceptor to extract parent context from metadata.
+**Implemented** in workers:
+- `whisperx_worker`, `recorder_worker`, `finalizer_worker`
+
+What’s still missing/next:
+- Confirm that worker-side traces/spans are visible/searchable in Tempo and that the trace continues across hops end-to-end.
+
+2) **gRPC**: W3C trace context in gRPC metadata
+- Java agent typically injects/extracts automatically for JVM gRPC.
+- For Python gRPC server (`rtservice`) we still need server instrumentation or an interceptor to extract parent context.
 
 3) Correlation key
-- Add `session_id` to spans as an attribute (recommended key: `nanosamurai.session_id`) and to logs.
+- Recommended: add `nanosamurai.session_id` to spans and logs.
 
-### Phase 2: instrument `rtservice` (Python gRPC) with OTEL SDK
+### Phase 2: instrument `rtservice` (Python gRPC)
+
+Status: **not implemented** (beyond basic OTEL env wiring)
+
 Goal: BFF → gRPC → rtservice shows as one connected trace.
 
 Implementation outline:
-- Add OTLP exporter (grpc) → `OTEL_EXPORTER_OTLP_ENDPOINT` already provided by Helm
+- Add OTEL SDK setup + OTLP exporter (grpc)
 - Add gRPC server instrumentation:
   - easiest: `opentelemetry-instrumentation-grpc`
   - or manual interceptor + `tracer.start_as_current_span(...)`
-- Add span attributes:
-  - `service.name=rtservice`
-  - `nanosamurai.session_id` (from incoming `AudioChunk.session_id`)
 
-### Phase 3: instrument Kafka workers (Python, confluent_kafka)
-Target services here:
-- `whisperx_worker`
-- `recorder_worker`
-- `finalizer_worker`
+### Phase 3: Kafka workers tracing (beyond propagation)
 
-Goal: the trace continues across Kafka hops.
+Status:
+- **Propagation: implemented** (Kafka `traceparent` header extraction/injection)
+- **Spans/trace exporting + discoverability in Tempo: not yet verified**
 
-Implementation outline:
-- When consuming:
-  - read `msg.headers()`
-  - extract `traceparent`
-  - create a span like `kafka.consume audio.raw` (parent = extracted ctx)
-- When producing:
-  - inject current context to outgoing headers
-  - produce as usual with `headers=[(...)]`
+Implementation outline for next iteration:
+- Add explicit spans:
+  - `kafka.consume <topic>` (parent = extracted ctx)
+  - per-service processing spans (`whisperx.process`, `recorder.write_wav`, `finalizer.process`)
+  - `kafka.produce <topic>` (inject ctx)
+- Ensure spans include attributes: `nanosamurai.session_id`, `nanosamurai.tenant_id`.
 
-Note: we currently do **not** have any OTEL code in these workers, so this will be new code (small shared helper recommended).
+Note:
+- We **do** have OTEL helper modules in this repo (`drsynth_common.otel_setup` + `drsynth_common.otel_kafka`).
+- What remains is to verify traces show up in Tempo for Python services and then connect them end-to-end.
 
 ### Phase 4: log ↔ trace correlation
 Once Phase 2/3 is in, we can correlate logs and traces cleanly.
