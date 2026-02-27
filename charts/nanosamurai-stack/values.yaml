@@ -235,3 +235,41 @@ recordings:
       - ReadWriteOnce
 
   mountPath: "/data/recordings"
+
+# Observability (Prometheus/Loki/Tempo/Grafana) wiring
+#
+# This section is intentionally optional and safe by default.
+#
+# Notes:
+# - Metrics scraping is handled separately (kube-prometheus-stack + ServiceMonitor/PodMonitor).
+# - Logs are collected by Grafana Alloy from stdout/stderr.
+# - Traces are exported via OTLP to the OpenTelemetry Collector (recommended) or directly to Tempo.
+observability:
+  enabled: false
+
+  # OTLP endpoint (Collector). Examples:
+  # - http://otel-collector.observability.svc.cluster.local:4317 (grpc)
+  # - http://otel-collector.observability.svc.cluster.local:4318 (http)
+  otlpEndpoint: ""
+
+  # Sampling is intentionally set to always_on for local when enabled.
+  tracesSampler: "always_on"
+  tracesSamplerArg: ""
+
+  # Extra resource attributes (comma-separated key=value pairs).
+  # Example: "deployment.environment=local-k8s,service.namespace=nanosamurai"
+  resourceAttributes: ""
+
+  # JVM OpenTelemetry Java Agent injection (for samuraibff + samuraipersistor)
+  javaAgent:
+    enabled: false
+
+    # Where the agent jar is mounted inside the application container.
+    mountPath: "/otel"
+
+    # URL of the agent jar to download in an initContainer.
+    # Note: requires cluster egress to GitHub.
+    downloadUrl: "https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v2.11.0/opentelemetry-javaagent.jar"
+
+    # Image used by initContainer to download the jar.
+    downloadImage: "curlimages/curl:8.5.0"

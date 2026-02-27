@@ -18,6 +18,7 @@ spec:
         {{- include "nanosamurai-stack.labels" . | nindent 8 }}
         app.kubernetes.io/component: bff
     spec:
+      {{- include "nanosamurai-stack.otelJavaAgentInit" . | nindent 6 }}
       containers:
         - name: samuraibff
           image: "{{ .Values.images.samuraibff.repository }}:{{ .Values.images.samuraibff.tag }}"
@@ -30,6 +31,13 @@ spec:
               value: "0.0.0.0"
             - name: SAMURAIBFF_HTTP_PORT
               value: "8000"
+
+            {{- if .Values.observability.enabled }}
+            - name: OTEL_SERVICE_NAME
+              value: "samuraibff"
+            {{- include "nanosamurai-stack.otelCommonEnv" . | nindent 12 }}
+            {{- include "nanosamurai-stack.otelJavaAgentEnv" . | nindent 12 }}
+            {{- end }}
 
             - name: SAMURAIBFF_DB_JDBC_URL
               value: {{ .Values.infra.postgresJdbcUrl | quote }}
@@ -81,6 +89,11 @@ spec:
             - name: SAMURAIBFF_S3_FORCE_PATH_STYLE
               value: {{ ternary "true" "false" (.Values.bff.s3.forcePathStyle | default true) | quote }}
 
+          {{- if and .Values.observability.enabled .Values.observability.javaAgent.enabled }}
+          volumeMounts:
+            {{- include "nanosamurai-stack.otelJavaAgentVolumeMount" . | nindent 12 }}
+          {{- end }}
+
           readinessProbe:
             httpGet:
               path: {{ .Values.bff.probes.readinessPath | default "/ready" | quote }}
@@ -93,6 +106,11 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+
+      {{- if and .Values.observability.enabled .Values.observability.javaAgent.enabled }}
+      volumes:
+        {{- include "nanosamurai-stack.otelJavaAgentVolume" . | nindent 8 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

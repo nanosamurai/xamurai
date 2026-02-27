@@ -1,0 +1,66 @@
+# Local dev values for kube-prometheus-stack
+# Namespace: observability
+
+# Keep this lightweight; local clusters are resource constrained.
+
+prometheus:
+  prometheusSpec:
+    retention: 12h
+    scrapeInterval: 15s
+
+# Disable some heavy collectors for local; can be re-enabled later.
+alertmanager:
+  enabled: false
+
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: true
+
+grafana:
+  enabled: true
+
+  # Local-only convenience.
+  adminUser: admin
+  adminPassword: admin
+
+  service:
+    type: ClusterIP
+
+  # Pre-provision Tempo + Loki datasources.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki-gateway.observability.svc.cluster.local
+      isDefault: false
+
+    - name: Tempo
+      type: tempo
+      access: proxy
+      # Tempo query frontend is exposed on the Service as port 3200 (NOT 3100).
+      url: http://tempo.observability.svc.cluster.local:3200
+      isDefault: false
+      jsonData:
+        tracesToLogsV2:
+          datasourceUid: Loki
+          spanStartTimeShift: "-1m"
+          spanEndTimeShift: "1m"
+          tags:
+            - key: "service.name"
+              value: "${__span.tags.service.name}"
+            - key: "pod"
+              value: "${__span.tags.k8s.pod.name}"
+          filterByTraceID: true
+          filterBySpanID: false
+
+# Sidecars are convenient for ConfigMaps with dashboards/datasources.
+grafanaSidecar:
+  datasources:
+    enabled: true
+  dashboards:
+    enabled: true

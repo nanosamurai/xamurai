@@ -1,0 +1,66 @@
+# Local dev values for Grafana Loki
+# Namespace: observability
+
+loki:
+  auth_enabled: false
+
+  commonConfig:
+    replication_factor: 1
+
+  storage:
+    type: filesystem
+
+  schemaConfig:
+    configs:
+      - from: 2024-01-01
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+
+# Run Loki as a single binary deployment.
+deploymentMode: SingleBinary
+
+singleBinary:
+  replicas: 1
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+# IMPORTANT:
+# grafana/loki chart defaults to deploymentMode=SimpleScalable and keeps non-zero
+# replicas for read/write/backend unless explicitly overridden. Even when we set
+# deploymentMode=SingleBinary, the chart validation requires the other target
+# replicas to be 0.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+# No persistence for local; OK to lose logs on restart.
+persistence:
+  enabled: false
+
+# Disable Helm test (it requires the canary) + optional components that add extra
+# images to pull.
+#
+# For local Docker Desktop clusters this reduces flakiness due to image pull issues.
+test:
+  enabled: false
+
+lokiCanary:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+# Keep gateway enabled; Alloy pushes through it by default.
+gateway:
+  enabled: true

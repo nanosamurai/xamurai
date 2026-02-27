@@ -18,6 +18,7 @@ spec:
         {{- include "nanosamurai-stack.labels" . | nindent 8 }}
         app.kubernetes.io/component: persistor
     spec:
+      {{- include "nanosamurai-stack.otelJavaAgentInit" . | nindent 6 }}
       containers:
         - name: samuraipersistor
           image: "{{ .Values.images.samuraipersistor.repository }}:{{ .Values.images.samuraipersistor.tag }}"
@@ -30,6 +31,13 @@ spec:
               value: "0.0.0.0"
             - name: SP_HTTP_PORT
               value: "8010"
+
+            {{- if .Values.observability.enabled }}
+            - name: OTEL_SERVICE_NAME
+              value: "samuraipersistor"
+            {{- include "nanosamurai-stack.otelCommonEnv" . | nindent 12 }}
+            {{- include "nanosamurai-stack.otelJavaAgentEnv" . | nindent 12 }}
+            {{- end }}
 
             - name: SP_DB_JDBC_URL
               value: {{ .Values.infra.postgresJdbcUrl | quote }}
@@ -68,6 +76,16 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+
+          {{- if and .Values.observability.enabled .Values.observability.javaAgent.enabled }}
+          volumeMounts:
+            {{- include "nanosamurai-stack.otelJavaAgentVolumeMount" . | nindent 12 }}
+          {{- end }}
+
+      {{- if and .Values.observability.enabled .Values.observability.javaAgent.enabled }}
+      volumes:
+        {{- include "nanosamurai-stack.otelJavaAgentVolume" . | nindent 8 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

@@ -28,7 +28,10 @@ RUN pip install \
       soundfile \
       confluent-kafka \
       protobuf \
-      boto3
+      boto3 \
+      opentelemetry-api \
+      opentelemetry-sdk \
+      opentelemetry-exporter-otlp
 
 COPY . /app
 

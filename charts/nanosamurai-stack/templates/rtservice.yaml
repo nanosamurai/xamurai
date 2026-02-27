@@ -33,6 +33,12 @@ spec:
               value: "audio.raw"
             - name: RT_GRPC_PORT
               value: "50052"
+
+            {{- if .Values.observability.enabled }}
+            - name: OTEL_SERVICE_NAME
+              value: "rtservice"
+            {{- include "nanosamurai-stack.otelCommonEnv" . | nindent 12 }}
+            {{- end }}
             {{- include "nanosamurai-stack.enrollmentEnv" . | nindent 12 }}
             - name: FW_LANG_DEFAULT
               value: ""
