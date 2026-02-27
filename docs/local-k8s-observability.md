@@ -32,6 +32,19 @@ This runbook adds an **observability stack** to the local k8s topology documente
 - **Tempo contains traces** for `service.name=samuraibff` (queried via Grafana Tempo datasource proxy).
 - **rtservice**: verified that it starts successfully once `HF_TOKEN` is provided via Secret wiring.
 
+Commands used for verification (examples):
+
+```bash
+# Verify Grafana is reachable
+curl.exe -s -o NUL -w "%{http_code}\n" http://127.0.0.1:3001/login
+
+# List datasources (Prometheus/Loki/Tempo)
+curl.exe -s -u admin:admin http://127.0.0.1:3001/api/datasources
+
+# Verify Tempo has traces from samuraibff (Grafana datasource proxy)
+curl.exe -s -u admin:admin "http://127.0.0.1:3001/api/datasources/proxy/4/api/search?service.name=samuraibff&limit=5"
+```
+
 > Note: end-to-end, single-trace continuity across Kafka hops is the next verification milestone.
 
 ### Roadmap / not fully verified yet
