@@ -1,9 +1,44 @@
 # Local Kubernetes observability (Grafana OSS + Prometheus + Loki + Tempo)
 
-Status: **WIP** (branch: `add-observability`)
-
 This runbook adds an **observability stack** to the local k8s topology documented in:
 - `docs/local-k8s-setup.md` (Compose infra + k8s apps)
+
+## What is implemented vs. roadmap
+
+### Implemented in this repo (Helm + code)
+
+**Observability stack (namespace `observability`)**
+- Grafana OSS (via `kube-prometheus-stack`)
+- Prometheus (via `kube-prometheus-stack`)
+- Loki (via `grafana/loki`)
+- Tempo (via `grafana/tempo`)
+- Grafana Alloy (log shipping from k8s pods → Loki)
+- OpenTelemetry Collector (central OTLP receiver → Tempo)
+
+**App chart wiring (`charts/nanosamurai-stack`)**
+- Optional OTEL env wiring for all pods (when `observability.enabled=true`)
+- Optional OTEL Java agent injection for JVM pods (`samuraibff`, `samuraipersistor`)
+
+**Python tracing foundation**
+- Shared Python helper modules:
+  - `shared/src/drsynth_common/otel_setup.py` (minimal OTEL SDK bootstrap)
+  - `shared/src/drsynth_common/otel_kafka.py` (W3C `traceparent` Kafka header propagation helpers)
+- Kafka traceparent propagation implemented in workers:
+  - `whisperx_worker`, `recorder_worker`, `finalizer_worker`
+
+### Tested / verified (how)
+
+- **Grafana reachable** via port-forward and API works (`/api/datasources`).
+- **Tempo contains traces** for `service.name=samuraibff` (queried via Grafana Tempo datasource proxy).
+- **rtservice**: verified that it starts successfully once `HF_TOKEN` is provided via Secret wiring.
+
+> Note: end-to-end, single-trace continuity across Kafka hops is the next verification milestone.
+
+### Roadmap / not fully verified yet
+
+- Python services exporting spans to Tempo (SDK setup is present, but full end-to-end trace visibility + indexing needs verification)
+- gRPC trace propagation and server-side spans in `rtservice` (requires instrumentation/interceptors)
+- Logs ↔ traces correlation (trace_id/span_id added to logs and Grafana “trace to logs” navigation)
 
 ## Goals (what “done” means)
 
@@ -48,6 +83,44 @@ Key decision (v1): **trace context propagates via Kafka headers** (`traceparent`
   ```bash
   docker compose up -d broker kafka_init postgres db_migrate db_seed localstack
   ```
+
+## 0.1) Expected port-forwards (single place)
+
+If you restarted your laptop, you likely need to re-run port-forwards.
+
+### App stack
+
+```bash
+# BFF (UI + HTTP/WS)
+kubectl -n default port-forward svc/nanosamurai-stack-bff 8000:8000
+
+# Persistor (optional)
+kubectl -n default port-forward svc/nanosamurai-stack-persistor 8010:8010
+
+# rtservice gRPC (optional; mostly for debugging)
+kubectl -n default port-forward svc/nanosamurai-stack-rtservice 50052:50052
+```
+
+### Observability stack
+
+```bash
+# Grafana
+kubectl -n observability port-forward svc/kube-prometheus-stack-grafana 3001:80
+
+# Loki API (optional; for direct queries)
+kubectl -n observability port-forward svc/loki 3100:3100
+
+# OTEL Collector OTLP (optional; for sending telemetrygen from the host)
+kubectl -n observability port-forward svc/otel-collector-opentelemetry-collector 4317:4317
+
+# Tempo API (optional; for direct calls outside of Grafana)
+kubectl -n observability port-forward svc/tempo 3200:3200
+```
+
+Notes:
+- Prefer keeping `8000` for the BFF.
+- Use `3001` for Grafana if `3000` is already taken.
+- When possible, query Tempo/Loki through the Grafana datasource proxy (`/api/datasources/proxy/...`) to avoid extra forwards.
 
 ---
 

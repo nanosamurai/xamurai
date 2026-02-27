@@ -46,6 +46,14 @@ def setup_otel(*, service_name: Optional[str] = None) -> None:
         # OTEL not configured.
         return
 
+    # The Python gRPC exporter expects a gRPC target (host:port) or a URL.
+    # In our Helm chart we set OTEL_EXPORTER_OTLP_ENDPOINT to an HTTP URL
+    # (e.g. http://otel-collector...:4317) for compatibility with other SDKs.
+    # Normalize it here to avoid gRPC channel target parsing issues.
+    if endpoint.startswith("http://") or endpoint.startswith("https://"):
+        endpoint = endpoint.split("://", 1)[1]
+        endpoint = endpoint.split("/", 1)[0]
+
     exporter = OTLPSpanExporter(
         endpoint=endpoint,
         insecure=True,

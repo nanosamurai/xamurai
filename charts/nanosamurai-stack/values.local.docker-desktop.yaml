@@ -32,8 +32,19 @@ recordings:
 
 rtservice:
   # Required: set this before installing the chart.
-  # Example: helm ... --set rtservice.hfToken="$HF_TOKEN"
+  #
+  # Preferred: reference an existing Secret so you don't pass tokens via Helm CLI:
+  #   kubectl -n default create secret generic nanosamurai-hf --from-literal=HF_TOKEN="$HF_TOKEN"
+  #   helm ... --set rtservice.hfTokenSecret.name=nanosamurai-hf
+  #
+  # Fallback (less secure):
+  #   helm ... --set rtservice.hfToken="$HF_TOKEN"
   hfToken: ""
+
+  # Recommended for local clusters: use the existing Secret created above.
+  hfTokenSecret:
+    name: "nanosamurai-hf"
+    key: "HF_TOKEN"
 
   # rtservice warmup can be very slow on cold caches (HF downloads). Keep rollout healthy in local dev.
   progressDeadlineSeconds: 3600
