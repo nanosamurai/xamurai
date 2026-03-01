@@ -45,6 +45,9 @@ def _make_consumer(bootstrap: str, group_id: str) -> Consumer:
             "group.id": group_id,
             "auto.offset.reset": "latest",
             "enable.auto.commit": False,
+            # Windows: prefer IPv4. Otherwise confluent-kafka may try ::1 first and fail
+            # even when 127.0.0.1 works.
+            "broker.address.family": "v4",
         }
     )
 
@@ -107,6 +110,9 @@ def main() -> int:
 
     session_id = _lib.create_session(base_url)
     print(f"[tier4] session_id={session_id}")
+    trace_id = session_id.replace("-", "")
+    if len(trace_id) == 32:
+        print(f"[tier4] trace_id={trace_id} (Tempo TraceID lookup)")
 
     pcm = _lib.read_wav_as_pcm16le(args.wav, target_sr=16000)
 

@@ -286,15 +286,10 @@ def main():
 
             # Extract upstream trace context from recordings.finished.
             with extracted_context_from_headers(msg.headers()):
+                span_cm = None
                 if trace is not None:
                     tracer = trace.get_tracer("finalizer_worker")
-                    span_cm = tracer.start_as_current_span(
-                        f"kafka.consume {TOPIC_RECORDING_FINISHED}"
-                    )
-                else:
-                    span_cm = None
-
-                if span_cm is not None:
+                    span_cm = tracer.start_as_current_span("finalizer.session")
                     span_cm.__enter__()
 
                 try:
@@ -310,6 +305,21 @@ def main():
                         rf.lang,
                         rf.tenant_id,
                     )
+
+                    # Add consistent attributes for Tempo/Grafana filtering.
+                    if trace is not None:
+                        try:
+                            span = trace.get_current_span()
+                            if hasattr(span, "set_attribute"):
+                                span.set_attribute("nanosamurai.session_id", rf.session_id)
+                                if rf.tenant_id:
+                                    span.set_attribute("nanosamurai.tenant_id", rf.tenant_id)
+                                span.set_attribute("nanosamurai.duration_s", float(rf.duration_s))
+                                span.set_attribute("nanosamurai.sample_rate", int(rf.sample_rate))
+                                if rf.lang:
+                                    span.set_attribute("nanosamurai.lang", rf.lang)
+                        except Exception:
+                            pass
 
                     try:
                         wav_path = _load_local_wav_from_url(rf.recording_url)
@@ -355,6 +365,13 @@ def main():
                     # 2) Publish to Kafka for downstream consumers (persistence handled by samuraipersistor)
                     # IMPORTANT: commit the input offset only after Kafka acked this publish.
                     try:
+                        if trace is not None:
+                            try:
+                                span = trace.get_current_span()
+                                if hasattr(span, "add_event"):
+                                    span.add_event("kafka.produce transcripts.final")
+                            except Exception:
+                                pass
                         _produce_with_ack(
                             producer,
                             topic=TOPIC_TRANSCRIPTS_FINAL,

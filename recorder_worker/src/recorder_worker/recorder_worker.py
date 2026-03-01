@@ -15,8 +15,10 @@ from drsynth_common.otel_kafka import extracted_context_from_headers, with_curre
 
 try:
     from opentelemetry import trace
+    from opentelemetry.trace import SpanKind
 except Exception:  # pragma: no cover
     trace = None  # type: ignore[assignment]
+    SpanKind = None  # type: ignore[assignment]
 
 
 # --------------------------------------------------------------------------- #
@@ -238,6 +240,10 @@ class SessionRecording:
     total_samples: int = 0
     last_activity: float = 0.0
 
+    # Optional long-lived span for the whole recording session.
+    # This reduces span explosion vs per-audio-chunk spans.
+    session_span_cm: object = None
+
     def append_pcm16(self, pcm16: bytes) -> None:
         self.writer.append_pcm16(pcm16)
         self.last_activity = time.time()
@@ -288,6 +294,14 @@ def make_writer_for_session(session_id: str, tenant_id: str, sample_rate: int) -
 # --------------------------------------------------------------------------- #
 
 def finalize_session(session_id: str, rec: SessionRecording, producer: Producer) -> None:
+    # Close long-lived recording span (best-effort) before producing finished event.
+    try:
+        if rec.session_span_cm is not None:
+            rec.session_span_cm.__exit__(None, None, None)
+            rec.session_span_cm = None
+    except Exception:
+        pass
+
     url = rec.close_and_get_url()
     logger.info(
         "Finalized session %s: url=%s dur=%.2fs sr=%d lang=%s tenant=%s",
@@ -311,14 +325,21 @@ def finalize_session(session_id: str, rec: SessionRecording, producer: Producer)
 
     # Re-attach trace context captured from audio.raw consumption.
     with extracted_context_from_headers(rec.trace_headers):
+        span_cm = None
         if trace is not None:
             tracer = trace.get_tracer("recorder_worker")
-            span_cm = tracer.start_as_current_span(f"kafka.produce {TOPIC_RECORDING_FINISHED}")
-        else:
-            span_cm = None
-
-        if span_cm is not None:
+            span_cm = tracer.start_as_current_span("recorder.publish_recording_finished")
             span_cm.__enter__()
+            try:
+                span = trace.get_current_span()
+                if hasattr(span, "set_attribute"):
+                    span.set_attribute("nanosamurai.session_id", session_id)
+                    if rec.tenant_id:
+                        span.set_attribute("nanosamurai.tenant_id", rec.tenant_id)
+                    span.set_attribute("nanosamurai.duration_s", float(rec.duration_s))
+                    span.set_attribute("nanosamurai.sample_rate", int(rec.sample_rate))
+            except Exception:
+                pass
 
         try:
             producer.produce(
@@ -376,14 +397,20 @@ def main():
 
             # Extract upstream context (if present) from Kafka headers.
             with extracted_context_from_headers(msg.headers()):
-                if trace is not None:
-                    tracer = trace.get_tracer("recorder_worker")
-                    span_cm = tracer.start_as_current_span(f"kafka.consume {TOPIC_AUDIO}")
-                else:
-                    span_cm = None
-
-                if span_cm is not None:
-                    span_cm.__enter__()
+                span_cm = None
+                span_obj = None
+                if trace is not None and SpanKind is not None:
+                    try:
+                        tracer = trace.get_tracer("recorder_worker")
+                        span_cm = tracer.start_as_current_span(
+                            "kafka.consume audio.raw",
+                            kind=SpanKind.CONSUMER,
+                        )
+                        span_cm.__enter__()
+                        span_obj = trace.get_current_span()
+                    except Exception:
+                        span_cm = None
+                        span_obj = None
 
                 try:
                     audio_chunk = stream_pb2.AudioChunk()
@@ -394,6 +421,16 @@ def main():
                         logger.warning("AudioChunk without session_id, skipping.")
                         consumer.commit(msg, asynchronous=True)
                         continue
+
+                    # Add chunk-level info for tracing (best-effort).
+                    try:
+                        if span_obj is not None and hasattr(span_obj, "set_attribute"):
+                            span_obj.set_attribute("nanosamurai.session_id", session_id)
+                            if getattr(audio_chunk, "tenant_id", ""):
+                                span_obj.set_attribute("nanosamurai.tenant_id", str(audio_chunk.tenant_id))
+                            span_obj.set_attribute("nanosamurai.audio_bytes", int(len(audio_chunk.pcm16_le or b"")))
+                    except Exception:
+                        pass
 
                     sr = getattr(audio_chunk, "sample_rate", DEFAULT_SR) or DEFAULT_SR
                     lang = getattr(audio_chunk, "lang", "") or ""
@@ -412,6 +449,24 @@ def main():
                         )
                         sessions[session_id] = rec
 
+                        # Start a single long-lived span for the whole recording session.
+                        if trace is not None:
+                            try:
+                                tracer = trace.get_tracer("recorder_worker")
+                                rec.session_span_cm = tracer.start_as_current_span("recorder.session")
+                                rec.session_span_cm.__enter__()
+                                span = trace.get_current_span()
+                                if hasattr(span, "set_attribute"):
+                                    span.set_attribute("nanosamurai.session_id", session_id)
+                                    if tenant_id:
+                                        span.set_attribute("nanosamurai.tenant_id", tenant_id)
+                                    span.set_attribute("nanosamurai.sample_rate", int(sr))
+                                    if lang:
+                                        span.set_attribute("nanosamurai.lang", str(lang))
+                                    span.set_attribute("nanosamurai.storage_backend", str(RECORDING_STORAGE_BACKEND))
+                            except Exception:
+                                rec.session_span_cm = None
+
                     # Keep latest kafka headers for end-to-end propagation.
                     rec.trace_headers = msg.headers() or rec.trace_headers
 
@@ -424,7 +479,10 @@ def main():
                     consumer.commit(msg, asynchronous=True)
                 finally:
                     if span_cm is not None:
-                        span_cm.__exit__(None, None, None)
+                        try:
+                            span_cm.__exit__(None, None, None)
+                        except Exception:
+                            pass
 
     except KeyboardInterrupt:
         logger.info("Stopping recorder_worker (KeyboardInterrupt)")
