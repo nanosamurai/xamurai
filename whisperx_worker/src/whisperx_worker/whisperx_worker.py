@@ -879,6 +879,9 @@ def make_consumer() -> Consumer:
             "group.id": GROUP_ID,
             "enable.auto.commit": False,
             "auto.offset.reset": "earliest",
+            # Windows + Docker Desktop k8s: prefer IPv4. Otherwise librdkafka may resolve
+            # host.docker.internal to IPv6 and fail with "Network is unreachable".
+            "broker.address.family": "v4",
             "max.partition.fetch.bytes": 5_000_000,
             "fetch.wait.max.ms": 50,
         }
@@ -894,6 +897,8 @@ def make_producer() -> Producer:
             "compression.type": "zstd",
             "linger.ms": 10,
             "batch.size": 131072,
+            # Same reasoning as consumer: force IPv4 to avoid Docker Desktop IPv6 pitfalls.
+            "broker.address.family": "v4",
         }
     )
 
