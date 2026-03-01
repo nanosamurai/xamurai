@@ -603,12 +603,15 @@ def _flush_session_partial(
     )
 
     # Re-attach trace context captured from kafka consume.
+    # IMPORTANT: we also want refined publishing to have a *real* in-trace parent span,
+    # otherwise downstream (samuraipersistor) spans will look "orphaned" in Grafana because
+    # their parentSpanId will refer to the deterministic remote-parent seed.
     with extracted_context_from_headers(session_trace_headers.get(session_id)):
-        span_cm = None
+        slice_span_cm = None
         if trace is not None:
             tracer = trace.get_tracer("whisperx_worker")
-            span_cm = tracer.start_as_current_span("whisperx.slice")
-            span_cm.__enter__()
+            slice_span_cm = tracer.start_as_current_span("whisperx.slice")
+            slice_span_cm.__enter__()
 
             try:
                 span = trace.get_current_span()
@@ -642,31 +645,52 @@ def _flush_session_partial(
                 except Exception:
                     pass
 
-            for (s0, s1, seg_text, speaker) in segments:
-                abs_start = base_start + s0
-                abs_end = base_start + s1
-                ev = stream_pb2.RefinedEvent(
-                    session_id=session_id,
-                    start_s=abs_start,
-                    end_s=abs_end,
-                    text=seg_text,
-                    speaker=speaker,
-                    supersedes_seq=[],
-                    lang=session_lang.get(session_id),
-                    bff_origin_uri=bff_origin_uri.get(session_id),
-                    tenant_id=tenant_id.get(session_id),
-                )
-                producer.produce(
-                    topic=TOPIC_REFINED,
-                    key=session_id.encode("utf-8"),
-                    value=ev.SerializeToString(),
-                    headers=with_current_trace_context(),
-                )
+            publish_span_cm = None
+            if trace is not None:
+                try:
+                    tracer = trace.get_tracer("whisperx_worker")
+                    publish_span_cm = tracer.start_as_current_span("kafka.produce transcripts.refined")
+                    publish_span_cm.__enter__()
+                    span = trace.get_current_span()
+                    if hasattr(span, "set_attribute"):
+                        span.set_attribute("messaging.system", "kafka")
+                        span.set_attribute("messaging.destination", TOPIC_REFINED)
+                        span.set_attribute("nanosamurai.session_id", session_id)
+                except Exception:
+                    publish_span_cm = None
+
+            try:
+                for (s0, s1, seg_text, speaker) in segments:
+                    abs_start = base_start + s0
+                    abs_end = base_start + s1
+                    ev = stream_pb2.RefinedEvent(
+                        session_id=session_id,
+                        start_s=abs_start,
+                        end_s=abs_end,
+                        text=seg_text,
+                        speaker=speaker,
+                        supersedes_seq=[],
+                        lang=session_lang.get(session_id),
+                        bff_origin_uri=bff_origin_uri.get(session_id),
+                        tenant_id=tenant_id.get(session_id),
+                    )
+                    producer.produce(
+                        topic=TOPIC_REFINED,
+                        key=session_id.encode("utf-8"),
+                        value=ev.SerializeToString(),
+                        headers=with_current_trace_context(),
+                    )
+            finally:
+                if publish_span_cm is not None:
+                    try:
+                        publish_span_cm.__exit__(None, None, None)
+                    except Exception:
+                        pass
             producer.poll(0)
         finally:
-            if span_cm is not None:
+            if slice_span_cm is not None:
                 try:
-                    span_cm.__exit__(None, None, None)
+                    slice_span_cm.__exit__(None, None, None)
                 except Exception:
                     pass
             try:
@@ -1014,11 +1038,11 @@ def main():
                         )
 
                         # Only span per slice (not per chunk).
-                        span_cm = None
+                        slice_span_cm = None
                         if trace is not None:
                             tracer = trace.get_tracer("whisperx_worker")
-                            span_cm = tracer.start_as_current_span("whisperx.slice")
-                            span_cm.__enter__()
+                            slice_span_cm = tracer.start_as_current_span("whisperx.slice")
+                            slice_span_cm.__enter__()
                             try:
                                 span = trace.get_current_span()
                                 if hasattr(span, "set_attribute"):
@@ -1050,37 +1074,58 @@ def main():
                                 except Exception:
                                     pass
 
-                            for (s0, s1, seg_text, speaker) in segments:
-                                abs_start = base_start + s0
-                                abs_end = base_start + s1
-                                ev = stream_pb2.RefinedEvent(
-                                    session_id=session_id,
-                                    start_s=abs_start,
-                                    end_s=abs_end,
-                                    text=seg_text,
-                                    speaker=speaker,
-                                    supersedes_seq=[],
-                                    lang=session_lang.get(session_id),
-                                    bff_origin_uri=bff_origin_uri.get(session_id),
-                                    tenant_id=tenant_id.get(session_id),
-                                )
-                                logger.debug(
-                                    "Sending refined message start_s=%.1f, speaker=%s, text=%s",
-                                    abs_start,
-                                    speaker,
-                                    seg_text,
-                                )
-                                p.produce(
-                                    topic=TOPIC_REFINED,
-                                    key=session_id.encode("utf-8"),
-                                    value=ev.SerializeToString(),
-                                    headers=with_current_trace_context(),
-                                )
+                            publish_span_cm = None
+                            if trace is not None:
+                                try:
+                                    tracer = trace.get_tracer("whisperx_worker")
+                                    publish_span_cm = tracer.start_as_current_span("kafka.produce transcripts.refined")
+                                    publish_span_cm.__enter__()
+                                    span = trace.get_current_span()
+                                    if hasattr(span, "set_attribute"):
+                                        span.set_attribute("messaging.system", "kafka")
+                                        span.set_attribute("messaging.destination", TOPIC_REFINED)
+                                        span.set_attribute("nanosamurai.session_id", session_id)
+                                except Exception:
+                                    publish_span_cm = None
+
+                            try:
+                                for (s0, s1, seg_text, speaker) in segments:
+                                    abs_start = base_start + s0
+                                    abs_end = base_start + s1
+                                    ev = stream_pb2.RefinedEvent(
+                                        session_id=session_id,
+                                        start_s=abs_start,
+                                        end_s=abs_end,
+                                        text=seg_text,
+                                        speaker=speaker,
+                                        supersedes_seq=[],
+                                        lang=session_lang.get(session_id),
+                                        bff_origin_uri=bff_origin_uri.get(session_id),
+                                        tenant_id=tenant_id.get(session_id),
+                                    )
+                                    logger.debug(
+                                        "Sending refined message start_s=%.1f, speaker=%s, text=%s",
+                                        abs_start,
+                                        speaker,
+                                        seg_text,
+                                    )
+                                    p.produce(
+                                        topic=TOPIC_REFINED,
+                                        key=session_id.encode("utf-8"),
+                                        value=ev.SerializeToString(),
+                                        headers=with_current_trace_context(),
+                                    )
+                            finally:
+                                if publish_span_cm is not None:
+                                    try:
+                                        publish_span_cm.__exit__(None, None, None)
+                                    except Exception:
+                                        pass
                             p.poll(0)
                         finally:
-                            if span_cm is not None:
+                            if slice_span_cm is not None:
                                 try:
-                                    span_cm.__exit__(None, None, None)
+                                    slice_span_cm.__exit__(None, None, None)
                                 except Exception:
                                     pass
 
