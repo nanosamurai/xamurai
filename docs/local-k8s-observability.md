@@ -49,8 +49,9 @@ curl.exe -s -u admin:admin "http://127.0.0.1:3001/api/datasources/proxy/4/api/se
 
 ### Roadmap / not fully verified yet
 
-- Python services exporting spans to Tempo (SDK setup is present, but full end-to-end trace visibility + indexing needs verification)
+- All Python services exporting spans to Tempo (SDK setup is present for some, but full end-to-end trace visibility + indexing needs verification)
 - gRPC trace propagation and server-side spans in `rtservice` (requires instrumentation/interceptors)
+- Currently, it seems from Grafana that the spans are there for the AsrEvents, but that the tracing is not there for RefinedEvent and FinalEvent etc. - also it seems that though we have tracing enabled in SamuraiBFF, we do not have it in SamuraiPersistor (https://github.com/mikub/samuraipersistor ; locally usually at `%USERPROFILE%\IdeaProjects\samuraipersistor` )
 - Logs ↔ traces correlation (trace_id/span_id added to logs and Grafana “trace to logs” navigation)
 
 ## Goals (what “done” means)
