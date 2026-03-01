@@ -491,3 +491,32 @@ Once Phase 2/3 is in, we can correlate logs and traces cleanly.
 - 2026-02-26: Use **Grafana Alloy** (not Promtail) for log shipping.
 - 2026-02-26: Use Kafka header propagation (`traceparent`) for tracing v1.
 - 2026-02-26: For Clojure/JVM services (`samuraibff`, `samuraipersistor`), prefer **OpenTelemetry Java Agent** over application code changes.
+
+### 2026-03-01: Fix refined tracing in local k8s (whisperx-worker → samuraipersistor)
+
+Symptoms (Grafana/Tempo):
+- `samuraipersistor` *did* persist refined (`INSERT session_transcripts` span exists)
+- but the refined persistor spans looked "orphaned" / not clearly connected to a Kafka hop
+
+Root cause:
+- `whisperx-worker` was exporting only `kafka.consume audio.raw` spans, but it produced
+  `transcripts.refined` without a real "produce" span, so downstream services could end up
+  parented by the deterministic remote-parent seed span id.
+
+Fix implemented:
+- `whisperx-worker` now wraps refined publishing in a real span:
+  - `kafka.produce transcripts.refined`
+- Additionally, on Docker Desktop k8s, `host.docker.internal` may resolve to IPv6 only in pods;
+  librdkafka then fails with `Network is unreachable`. We force IPv4 in Confluent Kafka configs:
+  - `broker.address.family=v4`
+
+Verification (example run):
+- Tier4 refined PASS:
+  - session_id: `019cab6a-0937-7b21-bbe0-57d4669a9f2d`
+  - trace_id:   `019cab6a09377b21bbe057d4669a9f2d`
+- Kafka audit confirms refined messages carry traceparent:
+  - `traceparent='00-019cab6a09377b21bbe057d4669a9f2d-9eb0194ccd14a352-01'`
+- Tempo trace now contains:
+  - `whisperx-worker / whisperx.slice`
+  - `whisperx-worker / kafka.produce transcripts.refined`
+  - `samuraipersistor` refined insert span parented by `kafka.produce transcripts.refined`
