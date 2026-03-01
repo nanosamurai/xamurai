@@ -1,14 +1,17 @@
-# xamurai
+# xamurai (Vox Samurai)
 
-Speach-to-text and speaker diarization service that provides both real-time transcription as well as near-real-time refinement. It also persists the recording session and performs a final transcript when the session finishes.
+Speach-to-text and speaker diarization services for Nanosamur.ai solution - provides both real-time transcription as well as near-real-time refinement. 
 
 Streaming audio → real-time transcript updates → session recording → session finalization (full-session transcript + optional alignment).
 
-This repo contains services that respond via gRPC and/or consume/produce on dedicated Kafka topics. Database persistence is handled by a separate service (**samuraipersistor**), which consumes from all relevant Kafka topics (`transcripts.refined`, `transcripts.final`) and stores the data in Postgres.
+This repo contains services that respond via gRPC and/or consume/produce on dedicated Kafka topics. Database persistence is handled by a separate service (**samuraipersistor** - https://github.com/mikub/samuraipersistor), which consumes from all relevant Kafka topics (`transcripts.refined`, `transcripts.final`) and stores the data in Postgres.
 
 The architecture is planned to support multiple layers of "refinement" workers (such as `whisperx_worker`) that might refine different windows of the audio (e.g., 60secs, 300secs) using different models (WhisperX, Voxstral, etc.)).
 
 This repo is a Python monorepo with multiple packages (realtime service + workers) and a shared library (`drsynth_common`). The system is Kafka-centric for dataflow between services, while realtime client interaction is done via gRPC (`RealtimeASR`).
+
+# About Nanosamur.ai
+Nanosamurai solution currently consists of **SamuraiBFF** (https://github.com/mikub/samuraibff), **xamurai** services connected via Kafka/gRPC and  **samuraipersistor** (https://github.com/mikub/samuraipersistor) for persistence.
 
 ---
 
