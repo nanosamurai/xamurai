@@ -10,6 +10,8 @@ The architecture is planned to support multiple layers of "refinement" workers (
 
 This repo is a Python monorepo with multiple packages (realtime service + workers) and a shared library (`drsynth_common`). The system is Kafka-centric for dataflow between services, while realtime client interaction is done via gRPC (`RealtimeASR`).
 
+Xamurai used to be called "drsynth", so do not be confused if you do see this name somewhere.
+
 # About Nanosamur.ai
 Nanosamurai solution currently consists of **SamuraiBFF** (https://github.com/mikub/samuraibff), **xamurai** services connected via Kafka/gRPC and  **samuraipersistor** (https://github.com/mikub/samuraipersistor) for persistence.
 
