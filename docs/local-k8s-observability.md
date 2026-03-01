@@ -310,6 +310,24 @@ For the async pipeline we intentionally make the **trace id deterministic**:
 This means you can jump to a full end-to-end trace for a session without relying
 on Tempo tag indexing.
 
+### 3.4.0 Important: deterministic TraceID requires *actual propagation*
+
+Even if the BFF derives a deterministic `traceparent` for a session, you will
+only see a single end-to-end trace if that W3C context is **propagated across all
+Kafka hops**:
+
+- `audio.raw` (produced by ingress)
+- `transcripts.refined` / `recordings.finished` (produced by workers)
+- `transcripts.final` (produced by finalizer)
+- and finally *consumed* by `samuraipersistor`
+
+If any hop drops the `traceparent` header, downstream services will either:
+- start a new trace, or
+- only emit unrelated spans (e.g. background JDBC spans).
+
+To debug this, verify the presence of Kafka `traceparent` headers for your
+`session_id` (see **3.4.4 Traceparent audit**).
+
 ### 3.4.1 Generate a session (Tier4)
 
 ```bash
@@ -340,6 +358,12 @@ kubectl -n observability port-forward svc/tempo 3200:3200
 
 curl.exe -s -o NUL -w "%{http_code}\n" \
   http://127.0.0.1:3200/api/traces/019ca15a818e777e928dfe8dc22f2816
+
+Tip: you can also search Tempo directly (bypasses Grafana datasource proxy):
+
+```bash
+curl.exe -s "http://127.0.0.1:3200/api/search?service.name=samuraipersistor&limit=5"
+```
 ```
 
 ### 3.4.3 What you should see
@@ -352,6 +376,29 @@ One connected trace containing spans across multiple services, e.g.:
 - `finalizer-worker` (finalizer.session, publish transcripts.final)
 
 All these spans should share the same `trace_id` derived from the session.
+
+### 3.4.4 Traceparent audit (Kafka headers)
+
+If a service is missing from the expected end-to-end trace (commonly
+`samuraipersistor`), first verify whether Kafka messages for the session carry
+the W3C `traceparent` header.
+
+Use the helper script:
+
+```bash
+py -3 utilities/k8s_local_smoke_test/kafka_traceparent_audit.py \
+  --kafka-bootstrap 127.0.0.1:9092 \
+  --session-id <SESSION_UUID> \
+  --topics audio.raw transcripts.refined recordings.finished transcripts.final \
+  --timeout 120
+```
+
+Expected:
+- For each matching message, you should see `traceparent='00-<traceid>-<spanid>-..'`.
+- If you see `traceparent=None` for refined/final topics, the context is being
+  dropped in the async pipeline.
+Windows note:
+- If you need to run `curl` examples, use `curl.exe` (PowerShell `curl` is an alias).
 
 ---
 
@@ -444,3 +491,32 @@ Once Phase 2/3 is in, we can correlate logs and traces cleanly.
 - 2026-02-26: Use **Grafana Alloy** (not Promtail) for log shipping.
 - 2026-02-26: Use Kafka header propagation (`traceparent`) for tracing v1.
 - 2026-02-26: For Clojure/JVM services (`samuraibff`, `samuraipersistor`), prefer **OpenTelemetry Java Agent** over application code changes.
+
+### 2026-03-01: Fix refined tracing in local k8s (whisperx-worker → samuraipersistor)
+
+Symptoms (Grafana/Tempo):
+- `samuraipersistor` *did* persist refined (`INSERT session_transcripts` span exists)
+- but the refined persistor spans looked "orphaned" / not clearly connected to a Kafka hop
+
+Root cause:
+- `whisperx-worker` was exporting only `kafka.consume audio.raw` spans, but it produced
+  `transcripts.refined` without a real "produce" span, so downstream services could end up
+  parented by the deterministic remote-parent seed span id.
+
+Fix implemented:
+- `whisperx-worker` now wraps refined publishing in a real span:
+  - `kafka.produce transcripts.refined`
+- Additionally, on Docker Desktop k8s, `host.docker.internal` may resolve to IPv6 only in pods;
+  librdkafka then fails with `Network is unreachable`. We force IPv4 in Confluent Kafka configs:
+  - `broker.address.family=v4`
+
+Verification (example run):
+- Tier4 refined PASS:
+  - session_id: `019cab6a-0937-7b21-bbe0-57d4669a9f2d`
+  - trace_id:   `019cab6a09377b21bbe057d4669a9f2d`
+- Kafka audit confirms refined messages carry traceparent:
+  - `traceparent='00-019cab6a09377b21bbe057d4669a9f2d-9eb0194ccd14a352-01'`
+- Tempo trace now contains:
+  - `whisperx-worker / whisperx.slice`
+  - `whisperx-worker / kafka.produce transcripts.refined`
+  - `samuraipersistor` refined insert span parented by `kafka.produce transcripts.refined`
