@@ -30,6 +30,12 @@ Notes
 
 from __future__ import annotations
 
+import pathlib
+import sys
+
+# Allow running this file directly (without `python -m ...`).
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
 import argparse
 import time
 from typing import Optional
