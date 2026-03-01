@@ -102,6 +102,15 @@ def main() -> int:
     ap.add_argument("--kafka-bootstrap", required=True)
     ap.add_argument("--session-id", required=True)
     ap.add_argument(
+        "--offset-reset",
+        choices=["latest", "earliest"],
+        default="latest",
+        help=(
+            "Where to start consuming if there is no committed offset for the group. "
+            "Use 'earliest' to debug already-produced messages (slower)."
+        ),
+    )
+    ap.add_argument(
         "--topics",
         nargs="+",
         default=["audio.raw", "transcripts.refined", "recordings.finished", "transcripts.final"],
@@ -116,6 +125,21 @@ def main() -> int:
         raise SystemExit("No topics provided")
 
     c = _make_consumer(args.kafka_bootstrap, group_id=f"traceparent-audit-{int(time.time())}")
+    # Apply offset reset policy (Consumer config is mutable via set() only at init, so rebuild).
+    # Simplest: close and re-create with desired setting.
+    try:
+        c.close()
+    except Exception:
+        pass
+    c = Consumer(
+        {
+            "bootstrap.servers": args.kafka_bootstrap,
+            "group.id": f"traceparent-audit-{int(time.time())}",
+            "auto.offset.reset": args.offset_reset,
+            "enable.auto.commit": False,
+            "broker.address.family": "v4",
+        }
+    )
     c.subscribe(topics)
 
     print(f"[audit] session_id={session_id}")
