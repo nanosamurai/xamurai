@@ -98,6 +98,13 @@ bff:
     readinessPath: "/ready"
     livenessPath: "/health"
 
+  tracing:
+    # Emit at most 1 `kafka.produce audio.raw` span per interval.
+    # 0 disables these spans entirely.
+    #
+    # Note: `traceparent` propagation continues for every message regardless.
+    audioRawProduceSpanEverySeconds: 2.0
+
   originUri: "http://localhost:8000"
 
   auth:
