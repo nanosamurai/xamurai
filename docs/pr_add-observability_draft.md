@@ -97,7 +97,7 @@ kubectl -n default create secret generic nanosamurai-hf --from-literal=HF_TOKEN=
 4) Deploy apps + enable OTEL:
 
 ```bash
-helm upgrade --install nanosamurai ./charts/nanosamurai-stack \
+helm upgrade --install nanosamurai-stack ./charts/nanosamurai-stack \
   -f ./charts/nanosamurai-stack/values.local.docker-desktop.yaml \
   --set observability.enabled=true \
   --set observability.otlpEndpoint=http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317 \

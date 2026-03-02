@@ -247,6 +247,31 @@ helm upgrade --install nanosamurai-stack ./charts/nanosamurai-stack \
   --set rtservice.hfToken="$env:HF_TOKEN"
 ```
 
+### Migration note (older release name `nanosamurai` → `nanosamurai-stack`)
+
+If you previously installed this chart with the **release name** `nanosamurai` (legacy), you may hit errors like:
+
+> PersistentVolumeClaim "nanosamurai-stack-hf-cache-pvc" exists and cannot be imported... meta.helm.sh/release-name must equal "nanosamurai-stack": current value is "nanosamurai"
+
+This happens because chart resource names are prefixed with `nanosamurai-stack-*`, but Helm tracks ownership by release name.
+
+To migrate cleanly (and preserve the PVCs), do:
+
+```bat
+REM Keep PVCs even when uninstalling (HF cache + recordings)
+kubectl annotate pvc nanosamurai-stack-hf-cache-pvc helm.sh/resource-policy=keep --overwrite
+kubectl annotate pvc nanosamurai-stack-recordings-pvc helm.sh/resource-policy=keep --overwrite
+
+REM Uninstall legacy release
+helm uninstall nanosamurai
+
+REM Install using the canonical release name
+helm upgrade --install nanosamurai-stack ./charts/nanosamurai-stack \
+  -f ./charts/nanosamurai-stack/values.local.docker-desktop.yaml
+```
+
+If the PVCs are already gone (e.g., due to a previous uninstall), Helm will recreate them on install.
+
 ### Minikube
 
 ```bash
