@@ -51,6 +51,11 @@ spec:
             - name: SAMURAIBFF_GRPC_RTSERVICE_ADDR
               value: {{ ternary (printf "%s-rtservice:50052" (include "nanosamurai-stack.fullname" .)) .Values.bff.rtservice.externalGrpcAddr .Values.bff.rtservice.inCluster | quote }}
 
+            # Span volume control: emit at most 1 `kafka.produce audio.raw` span per interval.
+            # 0 disables these spans entirely (traceparent propagation continues regardless).
+            - name: SAMURAIBFF_AUDIO_RAW_PRODUCE_SPAN_EVERY_S
+              value: {{ .Values.bff.tracing.audioRawProduceSpanEverySeconds | default 2.0 | toString | quote }}
+
             - name: SAMURAIBFF_AUTH_REQUIRED
               value: {{ ternary "true" "false" .Values.bff.auth.required | quote }}
             - name: SAMURAIBFF_AUTH_GUEST_TENANT_ID

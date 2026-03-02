@@ -391,6 +391,11 @@ Recorder worker supports this via:
   - `0` disables per-chunk consume spans
   - otherwise emits at most 1 consume span per interval
 
+For BFF (Kafka producer for `audio.raw`):
+- `SAMURAIBFF_AUDIO_RAW_PRODUCE_SPAN_EVERY_S` (float seconds)
+  - `0` disables `kafka.produce audio.raw` spans (still injects `traceparent`)
+  - otherwise emits at most 1 produce span per interval
+
 ### 3.4.4 Traceparent audit (Kafka headers)
 
 If a service is missing from the expected end-to-end trace (commonly

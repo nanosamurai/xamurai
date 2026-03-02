@@ -66,3 +66,15 @@ def test_nanosamurai_chart_exposes_recorder_consume_span_rate_limit_env() -> Non
 
     assert "- name: RECORDER_CONSUME_SPAN_EVERY_S" in rendered
     assert "value: \"2.5\"" in rendered
+
+
+def test_nanosamurai_chart_exposes_bff_audio_raw_produce_span_rate_limit_env() -> None:
+    rendered = _render(
+        "-f",
+        "./charts/nanosamurai-stack/values.local.docker-desktop.yaml",
+        "--set",
+        "bff.tracing.audioRawProduceSpanEverySeconds=2.0",
+    )
+
+    assert "- name: SAMURAIBFF_AUDIO_RAW_PRODUCE_SPAN_EVERY_S" in rendered
+    assert "value: \"2\"" in rendered or "value: \"2.0\"" in rendered
