@@ -383,3 +383,11 @@ Key test data:
 
 * Build DB-backed session APIs in BFF (list sessions, session detail, transcript detail).
 * Add diarization/speaker model later (speakers table already anticipated).
+
+---
+
+## CI/CD
+
+CI/CD scaffolding and the proposed repo split for the full **nanosamurai** stack is documented in:
+
+- `docs/ci-cd.md`
