@@ -109,3 +109,7 @@ finalizerWorker:
 # Optional shared HuggingFace cache is strongly recommended for local clusters.
 hfCache:
   enabled: true
+
+recorderWorker:
+  tracing:
+    consumeSpanEverySeconds: 2.0
