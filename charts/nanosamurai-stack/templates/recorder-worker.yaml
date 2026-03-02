@@ -39,6 +39,11 @@ spec:
               value: "recorder-worker"
             - name: RECORDER_IDLE_SECONDS
               value: "30.0"
+
+            # Span volume control: emit at most 1 consume span per interval.
+            # 0 disables per-chunk consume spans entirely.
+            - name: RECORDER_CONSUME_SPAN_EVERY_S
+              value: {{ .Values.recorderWorker.tracing.consumeSpanEverySeconds | default 1.0 | toString | quote }}
             - name: RECORDING_STORAGE_BACKEND
               value: "local"
             - name: RECORDING_DIR

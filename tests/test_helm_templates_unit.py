@@ -54,3 +54,15 @@ def test_nanosamurai_chart_renders_bff_guest_tenant_id_env() -> None:
 
     assert "- name: SAMURAIBFF_AUTH_GUEST_TENANT_ID" in rendered
     assert "00000000-0000-0000-0000-000000000000" in rendered
+
+
+def test_nanosamurai_chart_exposes_recorder_consume_span_rate_limit_env() -> None:
+    rendered = _render(
+        "-f",
+        "./charts/nanosamurai-stack/values.local.docker-desktop.yaml",
+        "--set",
+        "recorderWorker.tracing.consumeSpanEverySeconds=2.5",
+    )
+
+    assert "- name: RECORDER_CONSUME_SPAN_EVERY_S" in rendered
+    assert "value: \"2.5\"" in rendered

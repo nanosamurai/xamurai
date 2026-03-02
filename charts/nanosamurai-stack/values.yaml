@@ -190,6 +190,15 @@ recorderWorker:
 
   replicas: 1
 
+  # Tracing controls (Python OTEL)
+  tracing:
+    # Emit at most 1 `kafka.consume audio.raw` span per interval.
+    # 0 disables the per-chunk consume span entirely.
+    #
+    # Note: trace context propagation still happens for every message; this only
+    # reduces span *volume* in Tempo for long sessions.
+    consumeSpanEverySeconds: 1.0
+
 finalizerWorker:
   enabled: true
 

@@ -377,6 +377,20 @@ One connected trace containing spans across multiple services, e.g.:
 
 All these spans should share the same `trace_id` derived from the session.
 
+### 3.4.3.1 Trace size warning (audio.raw chunk volume)
+
+`audio.raw` can be very high volume (tens of messages per second). If you create a
+`kafka.consume audio.raw` span per chunk, long sessions can generate huge traces.
+
+Mitigation:
+- Keep propagating `traceparent` for every message (required for end-to-end continuity)
+- But **rate-limit** the *consume span* creation in workers.
+
+Recorder worker supports this via:
+- `RECORDER_CONSUME_SPAN_EVERY_S` (float seconds)
+  - `0` disables per-chunk consume spans
+  - otherwise emits at most 1 consume span per interval
+
 ### 3.4.4 Traceparent audit (Kafka headers)
 
 If a service is missing from the expected end-to-end trace (commonly

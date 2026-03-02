@@ -32,6 +32,17 @@ TOPIC_RECORDING_FINISHED = os.getenv(
 )
 GROUP_ID = os.getenv("KAFKA_GROUP_ID_RECORDER", "recorder-worker")
 
+# Span volume control
+#
+# By default recorder_worker creates one "kafka.consume audio.raw" span per AudioChunk.
+# This can explode trace size for longer sessions.
+#
+# We keep trace context propagation for every message, but rate-limit *span creation*.
+#
+# - Set to 0 to disable consume spans completely.
+# - Otherwise, we emit at most 1 span per interval.
+CONSUME_SPAN_EVERY_S = float(os.getenv("RECORDER_CONSUME_SPAN_EVERY_S", "1.0"))
+
 # Where to store recordings locally (if backend=local)
 # In containers/k8s, mount a volume to /data/recordings and set RECORDING_DIR accordingly.
 RECORDING_DIR = os.getenv("RECORDING_DIR", "recordings")
@@ -374,6 +385,8 @@ def main():
     # session_id -> SessionRecording
     sessions: Dict[str, SessionRecording] = {}
 
+    last_consume_span_ts = 0.0
+
     try:
         while True:
             msg = consumer.poll(timeout=1.0)
@@ -399,7 +412,14 @@ def main():
             with extracted_context_from_headers(msg.headers()):
                 span_cm = None
                 span_obj = None
-                if trace is not None and SpanKind is not None:
+
+                now_span = time.time()
+                emit_consume_span = False
+                if CONSUME_SPAN_EVERY_S > 0:
+                    if (now_span - last_consume_span_ts) >= CONSUME_SPAN_EVERY_S:
+                        emit_consume_span = True
+
+                if emit_consume_span and trace is not None and SpanKind is not None:
                     try:
                         tracer = trace.get_tracer("recorder_worker")
                         span_cm = tracer.start_as_current_span(
@@ -408,6 +428,7 @@ def main():
                         )
                         span_cm.__enter__()
                         span_obj = trace.get_current_span()
+                        last_consume_span_ts = now_span
                     except Exception:
                         span_cm = None
                         span_obj = None
