@@ -1,12 +1,19 @@
 name: Integration tests (fast-whisper / rtservice)
 
 on:
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
   schedule:
     - cron: "25 2 * * *" # nightly-ish; adjust as needed
 
 permissions:
   contents: read
+
+concurrency:
+  group: integration-fastwhisper-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   python-integration-fastwhisper:
