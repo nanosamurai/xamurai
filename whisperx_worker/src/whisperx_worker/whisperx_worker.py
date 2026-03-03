@@ -800,9 +800,19 @@ def run_whisperx(
     )
 
     if lang:
-        result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
+        try:
+            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
+        except IndexError:
+            # WhisperX can raise IndexError when VAD finds no active speech and
+            # returns an empty segment list. Treat as "no transcription".
+            logger.info("WhisperX: no active speech detected (lang=%s)", lang)
+            return "", []
     else:
-        result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
+        try:
+            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
+        except IndexError:
+            logger.info("WhisperX: no active speech detected")
+            return "", []
 
     detected_lang = result.get("language", lang or "unknown")
     logger.debug("WhisperX: detected language=%s", detected_lang)
