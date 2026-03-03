@@ -279,9 +279,10 @@ class RealtimeModelBundle:
                 getattr(getattr(torch, "version", None), "cuda", None),
             )
 
-        logger.info("Initializing Faster-Whisper 'medium' on %s", device)
+        asr_model = os.getenv("RT_ASR_MODEL", "medium").strip() or "medium"
+        logger.info("Initializing Faster-Whisper '%s' on %s", asr_model, device)
         self._asr = WhisperModel(
-            "medium",
+            asr_model,
             device=device,
             compute_type="float16" if torch.cuda.is_available() else "int8_float32",
         )

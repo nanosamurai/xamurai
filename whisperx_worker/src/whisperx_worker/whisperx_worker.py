@@ -730,14 +730,17 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     else:
         compute_type = "float16" if _WHISPERX_DEVICE == "cuda" else "int8"
 
+    asr_model = os.getenv("WHISPERX_MODEL", "medium").strip() or "medium"
+
     logger.info(
-        "Loading WhisperX ASR model (medium) on %s, compute_type=%s",
+        "Loading WhisperX ASR model (%s) on %s, compute_type=%s",
+        asr_model,
         _WHISPERX_DEVICE,
         compute_type,
     )
 
     _WHISPERX_MODEL = whisperx.load_model(
-        "medium",
+        asr_model,
         device=_WHISPERX_DEVICE,
         compute_type=compute_type,
     )
