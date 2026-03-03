@@ -87,6 +87,10 @@ jobs:
           WHISPERX_MODEL: "tiny"
           WHISPERX_COMPUTE_TYPE: "int8"
 
+          # WhisperX defaults to pyannote VAD, which is sensitive to pyannote-audio
+          # API versioning. In CI we prefer silero VAD for robustness.
+          WHISPERX_VAD_METHOD: "silero"
+
           # Optional: keep diarization enabled by default if HF_TOKEN exists.
           WHISPERX_ENABLE_DIARIZATION: "true"
         run: |

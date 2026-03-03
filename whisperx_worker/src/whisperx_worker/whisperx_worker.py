@@ -739,10 +739,18 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
         compute_type,
     )
 
+    # NOTE: `vad_method` is optional. Passing `None` can break on some whisperx
+    # versions (expects a valid string). Only pass it when explicitly set.
+    load_kwargs = {}
+    vad_method = os.getenv("WHISPERX_VAD_METHOD", "").strip()
+    if vad_method:
+        load_kwargs["vad_method"] = vad_method
+
     _WHISPERX_MODEL = whisperx.load_model(
         asr_model,
         device=_WHISPERX_DEVICE,
         compute_type=compute_type,
+        **load_kwargs,
     )
 
     _ALIGN_MODEL = None

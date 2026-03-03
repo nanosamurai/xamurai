@@ -15,8 +15,8 @@ class DummyWhisperXModule:
     def __init__(self):
         self._load_model_calls = []
 
-    def load_model(self, name, device, compute_type):
-        self._load_model_calls.append((name, device, compute_type))
+    def load_model(self, name, device, compute_type, vad_method=None):
+        self._load_model_calls.append((name, device, compute_type, vad_method))
         return DummyWhisperXModel([])
 
     def load_audio(self, path):
@@ -67,10 +67,11 @@ def test_init_whisperx_respects_env_compute_type(monkeypatch, tmp_path):
     """
     calls = {}
 
-    def fake_load_model(name, device, compute_type):
+    def fake_load_model(name, device, compute_type, vad_method=None):
         calls["name"] = name
         calls["device"] = device
         calls["compute_type"] = compute_type
+        calls["vad_method"] = vad_method
         return DummyWhisperXModel([])
 
     # Pretend we have no GPU so device="cpu"
@@ -84,6 +85,7 @@ def test_init_whisperx_respects_env_compute_type(monkeypatch, tmp_path):
     assert calls["name"] == "medium"
     assert calls["device"] == "cpu"
     assert calls["compute_type"] == "int8_float32"
+    assert calls["vad_method"] is None
 
 
 def test_run_whisperx_no_alignment(monkeypatch, tmp_path):
