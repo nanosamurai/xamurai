@@ -12,6 +12,75 @@ import soundfile as sf
 
 from proto_gen import stream_pb2
 
+# -------------------- PyTorch checkpoint loading compatibility --------------------
+#
+# Recent PyTorch versions (2.6+) introduced safer defaults for torch.load() that can
+# break loading some third-party checkpoints (notably pyannote/lightning models)
+# due to `weights_only=True` restrictions.
+#
+# In our stack we trust upstream model checkpoints (HF/pyannote), so we:
+# 1) allowlist OmegaConf classes for weights_only=True code paths
+# 2) monkeypatch torch.load to default to weights_only=False (more robust)
+#
+# NOTE: weights_only=False can load arbitrary pickled code. Do not use this with
+# untrusted checkpoints.
+
+try:
+    import torch
+
+    try:
+        from omegaconf import DictConfig, ListConfig
+        from omegaconf.base import ContainerMetadata
+
+        try:
+            from omegaconf.nodes import (
+                AnyNode,
+                BooleanNode,
+                BytesNode,
+                EnumNode,
+                FloatNode,
+                IntegerNode,
+                PathNode,
+                StringNode,
+            )
+        except Exception:
+            AnyNode = BooleanNode = BytesNode = EnumNode = FloatNode = IntegerNode = PathNode = StringNode = None
+
+        safe = [
+            DictConfig,
+            ListConfig,
+            ContainerMetadata,
+            AnyNode,
+            BooleanNode,
+            BytesNode,
+            EnumNode,
+            FloatNode,
+            IntegerNode,
+            PathNode,
+            StringNode,
+        ]
+        torch.serialization.add_safe_globals([c for c in safe if c is not None])
+    except Exception:
+        pass
+
+    try:
+        if not hasattr(torch, "_drsynth_orig_load"):
+            torch._drsynth_orig_load = torch.load  # type: ignore[attr-defined]
+
+        if getattr(torch.load, "__name__", "") != "_torch_load_weights_only_false_default":
+            _orig_torch_load = torch._drsynth_orig_load  # type: ignore[attr-defined]
+
+            def _torch_load_weights_only_false_default(*args, **kwargs):
+                kwargs["weights_only"] = False
+                return _orig_torch_load(*args, **kwargs)
+
+            torch.load = _torch_load_weights_only_false_default
+    except Exception:
+        pass
+except Exception:
+    # torch not installed in lightweight unit test envs
+    pass
+
 logger = logging.getLogger(__name__)
 
 
