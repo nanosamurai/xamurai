@@ -42,7 +42,11 @@ def test_recorder_worker_records_wav_and_emits_finished(kafka_bootstrap: str):
     """
 
     # --------------------- 1) Configure env & paths --------------------- #
-    topic_audio = "audio.raw.test"
+    # IMPORTANT: keep recorder tests isolated from whisperx tests.
+    # whisperx integration tests also use kafka_bootstrap and consume audio from
+    # their own topic(s). Using a shared topic causes cross-test interference
+    # (e.g. whisperx consuming silence and crashing on VAD=0 segments).
+    topic_audio = "audio.raw.test.recorder"
     topic_finished = "recordings.finished.test"
 
     os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap

@@ -1,0 +1,24 @@
+# Integration-test dependencies (GitHub-hosted runners / no GPU).
+#
+# Notes:
+# - Heavy ML deps (torch/whisperx/pyannote/faster-whisper) are intentionally NOT
+#   included here. Those tests will remain skipped unless we introduce a
+#   dedicated self-hosted runner or prebuilt test image.
+# - Protobuf runtime MUST match the major version of `proto_gen/*`.
+
+pytest==8.3.5
+pytest-timeout==2.3.1
+
+protobuf==6.31.1
+
+numpy==2.2.3
+soundfile==0.13.1
+
+grpcio==1.76.0
+grpcio-tools==1.76.0
+
+boto3==1.40.18
+
+confluent-kafka==2.13.0
+
+testcontainers[kafka,localstack]==4.13.1

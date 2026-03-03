@@ -730,16 +730,27 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     else:
         compute_type = "float16" if _WHISPERX_DEVICE == "cuda" else "int8"
 
+    asr_model = os.getenv("WHISPERX_MODEL", "medium").strip() or "medium"
+
     logger.info(
-        "Loading WhisperX ASR model (medium) on %s, compute_type=%s",
+        "Loading WhisperX ASR model (%s) on %s, compute_type=%s",
+        asr_model,
         _WHISPERX_DEVICE,
         compute_type,
     )
 
+    # NOTE: `vad_method` is optional. Passing `None` can break on some whisperx
+    # versions (expects a valid string). Only pass it when explicitly set.
+    load_kwargs = {}
+    vad_method = os.getenv("WHISPERX_VAD_METHOD", "").strip()
+    if vad_method:
+        load_kwargs["vad_method"] = vad_method
+
     _WHISPERX_MODEL = whisperx.load_model(
-        "medium",
+        asr_model,
         device=_WHISPERX_DEVICE,
         compute_type=compute_type,
+        **load_kwargs,
     )
 
     _ALIGN_MODEL = None
@@ -789,9 +800,19 @@ def run_whisperx(
     )
 
     if lang:
-        result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
+        try:
+            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
+        except IndexError:
+            # WhisperX can raise IndexError when VAD finds no active speech and
+            # returns an empty segment list. Treat as "no transcription".
+            logger.info("WhisperX: no active speech detected (lang=%s)", lang)
+            return "", []
     else:
-        result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
+        try:
+            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
+        except IndexError:
+            logger.info("WhisperX: no active speech detected")
+            return "", []
 
     detected_lang = result.get("language", lang or "unknown")
     logger.debug("WhisperX: detected language=%s", detected_lang)

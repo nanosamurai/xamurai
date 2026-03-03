@@ -1,0 +1,9 @@
+# Integration dependencies for the "whisperx" lane.
+#
+# WARNING: This can be slow/heavy on GitHub-hosted runners.
+# Torch is intentionally installed separately in the workflow (CPU vs CUDA control).
+
+-r requirements.integration.fastwhisper.txt
+
+# WhisperX stack
+whisperx==3.3.4

@@ -1,0 +1,78 @@
+name: Integration tests (whisperx worker)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-integration-whisperx:
+    name: whisperx integration (WhisperX + pyannote)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies (ffmpeg, libsndfile)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg libsndfile1
+
+      - name: Install torch (CPU)
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            --index-url https://download.pytorch.org/whl/cpu \
+            "torch==2.8.0" \
+            "torchaudio==2.8.0"
+
+      - name: Install integration deps (whisperx)
+        run: |
+          pip install -r requirements.integration.whisperx.txt
+
+      - name: Run integration tests (whisperx) - real E2E
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WHISPERX_MODEL: "tiny"
+          WHISPERX_COMPUTE_TYPE: "int8"
+          WHISPERX_VAD_METHOD: "silero"
+          WHISPERX_ENABLE_DIARIZATION: "true"
+        run: |
+          # IMPORTANT:
+          # Run each test in a fresh pytest process to avoid daemon-thread +
+          # importlib.reload + env cross-contamination.
+          pytest -q --maxfail=1 -o log_cli=true --log-cli-level=INFO \
+            -m integration \
+            tests/test_whisperx_worker_integration.py::test_whisperx_worker_end_to_end_real
+
+      - name: Run integration tests (whisperx) - diarization + local enrollment
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WHISPERX_MODEL: "tiny"
+          WHISPERX_COMPUTE_TYPE: "int8"
+          WHISPERX_VAD_METHOD: "silero"
+          WHISPERX_ENABLE_DIARIZATION: "true"
+        run: |
+          pytest -q --maxfail=1 -o log_cli=true --log-cli-level=INFO \
+            -m integration \
+            tests/test_whisperx_worker_integration.py::test_whisperx_worker_diarization_and_enrollment_on_test_wav
+
+      - name: Run integration tests (whisperx) - diarization + S3 enrollment (LocalStack)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WHISPERX_MODEL: "tiny"
+          WHISPERX_COMPUTE_TYPE: "int8"
+          WHISPERX_VAD_METHOD: "silero"
+          WHISPERX_ENABLE_DIARIZATION: "true"
+        run: |
+          pytest -q --maxfail=1 -o log_cli=true --log-cli-level=INFO \
+            -m integration \
+            tests/test_whisperx_worker_integration.py::test_whisperx_worker_diarization_and_s3_enrollment_on_test_wav

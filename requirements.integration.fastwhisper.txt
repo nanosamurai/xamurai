@@ -1,0 +1,14 @@
+# Integration dependencies for the "fast-whisper" lane (rtservice).
+#
+# Keeps the dependency set smaller than the full WhisperX stack.
+
+-r requirements.integration.txt
+
+# rtservice deps
+faster-whisper==1.2.0
+pyannote-audio==4.0.1
+omegaconf==2.3.0
+hydra-core==1.3.2
+
+# test_realtime_asr_grpc imports librosa for resampling
+librosa==0.11.0
