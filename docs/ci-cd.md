@@ -137,8 +137,16 @@ This repo now contains:
 - `.github/workflows/ci.yml` — fast PR gate
   - Helm lint + Helm template unit tests
   - lightweight Python unit tests (no GPU / no Kafka / no LocalStack)
-- `.github/workflows/integration-tests.yml` — manual/nightly scaffolding
-  - intentionally not enabled by default (heavy ML deps + Docker required)
+- `.github/workflows/integration-fastwhisper.yml` — integration lane for `rtservice`
+  - requires Docker (Testcontainers) + HF_TOKEN + Torch CPU wheels
+  - runs `tests/test_realtime_asr_grpc.py`
+- `.github/workflows/integration-whisperx.yml` — integration lane for `whisperx_worker`
+  - requires Docker (Testcontainers) + HF_TOKEN + WhisperX stack
+  - runs `tests/test_whisperx_worker_integration.py` with per-test pytest invocations
+
+Notes:
+- These integration lanes are heavier (Torch + model downloads) and will typically run on PRs to gate merges.
+- Keep them dependency-split to avoid unnecessary installs (fast-whisper vs whisperx).
 
 ---
 
