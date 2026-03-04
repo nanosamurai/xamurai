@@ -359,8 +359,25 @@ def _init_diarization_models() -> None:
             base = os.path.splitext(fname)[0]
             name = base.split("_")[0]
             try:
+                # IMPORTANT:
+                # Passing a filesystem path to pyannote's Inference triggers its
+                # internal audio decoding (AudioDecoder/torchcodec), which is
+                # brittle in CI environments.
+                #
+                # Instead, load the audio ourselves with soundfile and pass an
+                # in-memory waveform dict.
+                wav, sr = sf.read(path, dtype="float32")
+                if isinstance(wav, np.ndarray) and wav.ndim > 1:
+                    wav = wav.mean(axis=1)
+                wav = np.asarray(wav, dtype=np.float32).reshape(-1)
+                if int(sr) != SR:
+                    wav = _resample_linear(wav, int(sr), SR)
+
                 with _EMBED_LOCK:
-                    emb = _EMBED_INFER(path)  # type: ignore[operator]
+                    emb = _EMBED_INFER(
+                        {"waveform": torch.from_numpy(wav).unsqueeze(0), "sample_rate": SR}
+                    )  # type: ignore[operator]
+
                 emb = np.array(emb, dtype=np.float32)
                 if emb.ndim > 1:
                     emb = emb.mean(axis=0)
