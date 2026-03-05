@@ -110,6 +110,8 @@ if TYPE_CHECKING:
     from drsynth_common.enrollment import EnrollmentCache
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
+KAFKA_SECURITY_PROTOCOL = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").strip().upper()
+KAFKA_SSL_CA_LOCATION = os.getenv("KAFKA_SSL_CA_LOCATION", "").strip()
 TOPIC_AUDIO = os.getenv("KAFKA_TOPIC_AUDIO", "audio.raw")
 TOPIC_REFINED = os.getenv("KAFKA_TOPIC_REFINED", "transcripts.refined")
 GROUP_ID = os.getenv("KAFKA_GROUP_ID", "whisperx-async")
@@ -911,29 +913,36 @@ def run_whisperx(
 
 def make_consumer() -> Consumer:
     logger.info("Creating Kafka consumer")
-    return Consumer(
-        {
-            "bootstrap.servers": KAFKA_BOOTSTRAP,
-            "group.id": GROUP_ID,
-            "enable.auto.commit": False,
-            "auto.offset.reset": "earliest",
-            "max.partition.fetch.bytes": 5_000_000,
-            "fetch.wait.max.ms": 50,
-        }
-    )
+    cfg = {
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        "group.id": GROUP_ID,
+        "enable.auto.commit": False,
+        "auto.offset.reset": "earliest",
+        "max.partition.fetch.bytes": 5_000_000,
+        "fetch.wait.max.ms": 50,
+    }
+    if KAFKA_SECURITY_PROTOCOL and KAFKA_SECURITY_PROTOCOL != "PLAINTEXT":
+        # librdkafka expects 'SSL' (uppercase)
+        cfg["security.protocol"] = KAFKA_SECURITY_PROTOCOL
+        if KAFKA_SSL_CA_LOCATION:
+            cfg["ssl.ca.location"] = KAFKA_SSL_CA_LOCATION
+    return Consumer(cfg)
 
 
 def make_producer() -> Producer:
     logger.info("Creating Kafka producer")
-    return Producer(
-        {
-            "bootstrap.servers": KAFKA_BOOTSTRAP,
-            "client.id": "whisperx-async",
-            "compression.type": "zstd",
-            "linger.ms": 10,
-            "batch.size": 131072,
-        }
-    )
+    cfg = {
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        "client.id": "whisperx-async",
+        "compression.type": "zstd",
+        "linger.ms": 10,
+        "batch.size": 131072,
+    }
+    if KAFKA_SECURITY_PROTOCOL and KAFKA_SECURITY_PROTOCOL != "PLAINTEXT":
+        cfg["security.protocol"] = KAFKA_SECURITY_PROTOCOL
+        if KAFKA_SSL_CA_LOCATION:
+            cfg["ssl.ca.location"] = KAFKA_SSL_CA_LOCATION
+    return Producer(cfg)
 
 
 def main():

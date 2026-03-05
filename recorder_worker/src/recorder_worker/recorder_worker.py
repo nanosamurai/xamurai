@@ -26,6 +26,8 @@ except Exception:  # pragma: no cover
 # --------------------------------------------------------------------------- #
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
+KAFKA_SECURITY_PROTOCOL = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").strip().upper()
+KAFKA_SSL_CA_LOCATION = os.getenv("KAFKA_SSL_CA_LOCATION", "").strip()
 TOPIC_AUDIO = os.getenv("KAFKA_TOPIC_AUDIO", "audio.raw")
 TOPIC_RECORDING_FINISHED = os.getenv(
     "KAFKA_TOPIC_RECORDING_FINISHED", "recordings.finished"
@@ -97,29 +99,35 @@ logger = logging.getLogger("recorder_worker")
 
 def make_consumer() -> Consumer:
     logger.info("Creating Kafka consumer for recorder_worker")
-    return Consumer(
-        {
-            "bootstrap.servers": KAFKA_BOOTSTRAP,
-            "group.id": GROUP_ID,
-            "enable.auto.commit": False,
-            "auto.offset.reset": "earliest",
-            "max.partition.fetch.bytes": 5_000_000,
-            "fetch.wait.max.ms": 50,
-        }
-    )
+    cfg = {
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        "group.id": GROUP_ID,
+        "enable.auto.commit": False,
+        "auto.offset.reset": "earliest",
+        "max.partition.fetch.bytes": 5_000_000,
+        "fetch.wait.max.ms": 50,
+    }
+    if KAFKA_SECURITY_PROTOCOL and KAFKA_SECURITY_PROTOCOL != "PLAINTEXT":
+        cfg["security.protocol"] = KAFKA_SECURITY_PROTOCOL
+        if KAFKA_SSL_CA_LOCATION:
+            cfg["ssl.ca.location"] = KAFKA_SSL_CA_LOCATION
+    return Consumer(cfg)
 
 
 def make_producer() -> Producer:
     logger.info("Creating Kafka producer for recorder_worker")
-    return Producer(
-        {
-            "bootstrap.servers": KAFKA_BOOTSTRAP,
-            "client.id": "recorder-worker",
-            "compression.type": "zstd",
-            "linger.ms": 10,
-            "batch.size": 131072,
-        }
-    )
+    cfg = {
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        "client.id": "recorder-worker",
+        "compression.type": "zstd",
+        "linger.ms": 10,
+        "batch.size": 131072,
+    }
+    if KAFKA_SECURITY_PROTOCOL and KAFKA_SECURITY_PROTOCOL != "PLAINTEXT":
+        cfg["security.protocol"] = KAFKA_SECURITY_PROTOCOL
+        if KAFKA_SSL_CA_LOCATION:
+            cfg["ssl.ca.location"] = KAFKA_SSL_CA_LOCATION
+    return Producer(cfg)
 
 
 # --------------------------------------------------------------------------- #

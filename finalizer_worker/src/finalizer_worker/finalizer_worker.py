@@ -2,6 +2,8 @@
 import json
 import logging
 import os
+import re
+import tempfile
 import time
 from threading import Event
 from typing import Optional
@@ -25,6 +27,8 @@ except Exception:  # pragma: no cover
 # --------------------------------------------------------------------------- #
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
+KAFKA_SECURITY_PROTOCOL = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").strip().upper()
+KAFKA_SSL_CA_LOCATION = os.getenv("KAFKA_SSL_CA_LOCATION", "").strip()
 TOPIC_RECORDING_FINISHED = os.getenv(
     "KAFKA_TOPIC_RECORDING_FINISHED", "recordings.finished"
 )
@@ -32,6 +36,16 @@ TOPIC_TRANSCRIPTS_FINAL = os.getenv(
     "KAFKA_TOPIC_TRANSCRIPTS_FINAL", "transcripts.final"
 )
 GROUP_ID = os.getenv("KAFKA_GROUP_ID_FINALIZER", "finalizer-worker")
+
+# Recording storage backend
+RECORDING_STORAGE_BACKEND = os.getenv("RECORDING_STORAGE_BACKEND", "local").strip().lower()
+
+# S3 config (used when recording_url is s3://...)
+S3_ENDPOINT = os.getenv("S3_ENDPOINT", "").strip()
+S3_REGION = os.getenv("S3_REGION", "").strip()
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "").strip()
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "").strip()
+S3_FORCE_PATH_STYLE = os.getenv("S3_FORCE_PATH_STYLE", "true").strip().lower() in ("1", "true", "yes", "y")
 
 # Finalizer can do *very* long work per message (full session + alignment model downloads),
 # so the default Kafka client max.poll.interval.ms (5 minutes) is too low.
@@ -71,32 +85,38 @@ logger = logging.getLogger("finalizer_worker")
 
 def make_consumer() -> Consumer:
     logger.info("Creating Kafka consumer for finalizer_worker")
-    return Consumer(
-        {
-            "bootstrap.servers": KAFKA_BOOTSTRAP,
-            "group.id": GROUP_ID,
-            "enable.auto.commit": False,
-            "auto.offset.reset": "earliest",
-            # Must be higher than worst-case processing time for a single RecordingFinished
-            # message (including first-run model downloads).
-            "max.poll.interval.ms": MAX_POLL_INTERVAL_MS,
-            "max.partition.fetch.bytes": 10_000_000,
-            "fetch.wait.max.ms": 50,
-        }
-    )
+    cfg = {
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        "group.id": GROUP_ID,
+        "enable.auto.commit": False,
+        "auto.offset.reset": "earliest",
+        # Must be higher than worst-case processing time for a single RecordingFinished
+        # message (including first-run model downloads).
+        "max.poll.interval.ms": MAX_POLL_INTERVAL_MS,
+        "max.partition.fetch.bytes": 10_000_000,
+        "fetch.wait.max.ms": 50,
+    }
+    if KAFKA_SECURITY_PROTOCOL and KAFKA_SECURITY_PROTOCOL != "PLAINTEXT":
+        cfg["security.protocol"] = KAFKA_SECURITY_PROTOCOL
+        if KAFKA_SSL_CA_LOCATION:
+            cfg["ssl.ca.location"] = KAFKA_SSL_CA_LOCATION
+    return Consumer(cfg)
 
 
 def make_producer() -> Producer:
     logger.info("Creating Kafka producer for finalizer_worker")
-    return Producer(
-        {
-            "bootstrap.servers": KAFKA_BOOTSTRAP,
-            "client.id": "finalizer-worker",
-            "compression.type": "zstd",
-            "linger.ms": 10,
-            "batch.size": 131072,
-        }
-    )
+    cfg = {
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        "client.id": "finalizer-worker",
+        "compression.type": "zstd",
+        "linger.ms": 10,
+        "batch.size": 131072,
+    }
+    if KAFKA_SECURITY_PROTOCOL and KAFKA_SECURITY_PROTOCOL != "PLAINTEXT":
+        cfg["security.protocol"] = KAFKA_SECURITY_PROTOCOL
+        if KAFKA_SSL_CA_LOCATION:
+            cfg["ssl.ca.location"] = KAFKA_SSL_CA_LOCATION
+    return Producer(cfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +131,49 @@ def _load_local_wav_from_url(url: str) -> str:
 
     if url.startswith("file://"):
         return url[len("file://") :]
+
+    if url.startswith("s3://"):
+        # Download the object to a local temp file and return its path.
+        # We keep the filename stable-ish for debugging.
+        m = re.match(r"^s3://([^/]+)/(.+)$", url)
+        if not m:
+            raise RuntimeError(f"Invalid s3:// URL for finalizer: {url}")
+        bucket = m.group(1)
+        key = m.group(2)
+
+        import boto3
+        from botocore.config import Config
+
+        session_kwargs = {}
+        if S3_REGION:
+            session_kwargs["region_name"] = S3_REGION
+        if S3_ACCESS_KEY and S3_SECRET_KEY:
+            session_kwargs["aws_access_key_id"] = S3_ACCESS_KEY
+            session_kwargs["aws_secret_access_key"] = S3_SECRET_KEY
+
+        addressing_style = "path" if S3_FORCE_PATH_STYLE else "virtual"
+        cfg = Config(s3={"addressing_style": addressing_style})
+        client_kwargs = {"config": cfg}
+        if S3_ENDPOINT:
+            client_kwargs["endpoint_url"] = S3_ENDPOINT
+
+        s3 = boto3.client("s3", **session_kwargs, **client_kwargs)
+
+        # Keep suffix .wav so downstream tooling behaves.
+        safe_key = key.replace("/", "_")
+        with tempfile.NamedTemporaryFile(prefix=f"finalizer_{bucket}_", suffix=f"_{safe_key}.wav", delete=False) as tmp:
+            dst = tmp.name
+
+        logger.info(
+            "Downloading recording from %s to %s (endpoint=%s, path_style=%s)",
+            url,
+            dst,
+            S3_ENDPOINT or "aws",
+            addressing_style,
+        )
+        s3.download_file(bucket, key, dst)
+        return dst
+
     raise RuntimeError(f"Unsupported recording_url scheme for finalizer: {url}")
 
 
