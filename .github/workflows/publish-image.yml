@@ -30,19 +30,19 @@ jobs:
           - image: rtservice
             dockerfile: rtservice/Dockerfile
             context: .
-            ecr_repo: ${{ vars.ECR_REPO_RTSERVICE }}
+            ecr_repo: xamurai-rtservice
           - image: whisperx-worker
             dockerfile: whisperx_worker/Dockerfile
             context: .
-            ecr_repo: ${{ vars.ECR_REPO_WHISPERX_WORKER }}
+            ecr_repo: xamurai-whisperx-worker
           - image: recorder-worker
             dockerfile: recorder_worker/Dockerfile
             context: .
-            ecr_repo: ${{ vars.ECR_REPO_RECORDER_WORKER }}
+            ecr_repo: xamurai-recorder-worker
           - image: finalizer-worker
             dockerfile: finalizer_worker/Dockerfile
             context: .
-            ecr_repo: ${{ vars.ECR_REPO_FINALIZER_WORKER }}
+            ecr_repo: xamurai-finalizer-worker
 
     steps:
       - name: Checkout
