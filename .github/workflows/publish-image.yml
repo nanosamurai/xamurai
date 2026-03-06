@@ -1,0 +1,79 @@
+name: Publish images (ECR)
+
+on:
+  push:
+    branches:
+      - master
+
+# Needed for GitHub OIDC.
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+
+jobs:
+  publish:
+    name: Build + push images to ECR
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: rtservice
+            dockerfile: rtservice/Dockerfile
+            context: .
+            ecr_repo: xamurai-rtservice
+          - image: whisperx-worker
+            dockerfile: whisperx_worker/Dockerfile
+            context: .
+            ecr_repo: xamurai-whisperx-worker
+          - image: recorder-worker
+            dockerfile: recorder_worker/Dockerfile
+            context: .
+            ecr_repo: xamurai-recorder-worker
+          - image: finalizer-worker
+            dockerfile: finalizer_worker/Dockerfile
+            context: .
+            ecr_repo: xamurai-finalizer-worker
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tags
+        id: tags
+        run: |
+          echo "sha_tag=sha-${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          echo "image_uri=${ECR_REGISTRY}/${{ matrix.ecr_repo }}:sha-${GITHUB_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Docker build
+        run: |
+          docker build \
+            -f "${{ matrix.dockerfile }}" \
+            -t "${{ steps.tags.outputs.image_uri }}" \
+            "${{ matrix.context }}"
+
+      - name: Docker push
+        run: |
+          docker push "${{ steps.tags.outputs.image_uri }}"
+
+      - name: Summary
+        run: |
+          echo "Pushed: ${{ steps.tags.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
