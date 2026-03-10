@@ -15,6 +15,7 @@ from whisperx_worker.whisperx_worker import run_whisperx_diarized
 
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
+from drsynth_common.logging_setup import setup_logging
 
 try:
     from opentelemetry import trace
@@ -70,12 +71,6 @@ FINALIZER_PRODUCE_RETRY_BACKOFF_S = float(
 # --------------------------------------------------------------------------- #
 # Logging
 # --------------------------------------------------------------------------- #
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger("finalizer_worker")
 
 
@@ -314,6 +309,7 @@ def _produce_with_ack(
 # --------------------------------------------------------------------------- #
 
 def main():
+    setup_logging(default_level="INFO")
     # Initialize OTEL SDK (no-op if deps missing)
     setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "finalizer-worker"))
 

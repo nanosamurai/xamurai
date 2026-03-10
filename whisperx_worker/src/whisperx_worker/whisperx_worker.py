@@ -17,6 +17,7 @@ import torch
 
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
+from drsynth_common.logging_setup import setup_logging
 
 try:
     from opentelemetry import trace
@@ -131,11 +132,6 @@ session_trace_headers: Dict[str, Optional[list[KafkaHeader]]] = defaultdict(lamb
 # --------------------------------------------------------------------------- #
 # Logging setup
 # --------------------------------------------------------------------------- #
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
@@ -946,6 +942,7 @@ def make_producer() -> Producer:
 
 
 def main():
+    setup_logging(default_level="INFO")
     setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "whisperx-worker"))
 
     logger.info("Starting whisperx_worker")
