@@ -9,11 +9,7 @@ from proto_gen import stream_pb2
 from proto_gen import stream_pb2_grpc
 from rtservice.engine import RealtimeEngine
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+from drsynth_common.logging_setup import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +95,7 @@ def create_realtime_asr_server(
 
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    setup_logging(default_level="INFO")
     server = create_realtime_asr_server()
     server.start()
     logger.info("RealtimeASR server started, waiting for termination…")

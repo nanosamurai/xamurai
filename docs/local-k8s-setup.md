@@ -1,13 +1,18 @@
-# Local Kubernetes setup (nanosamurai)
+# Local Kubernetes setup (moved)
 
-This runbook describes a **k8s-realistic local dev topology**:
+This runbook has been **migrated to** the deployment repo:
 
-- **Infra** runs on your machine via **Docker Compose**: Kafka + Postgres + LocalStack(S3)
-- **Apps** run in **Kubernetes** via the Helm chart in `charts/nanosamurai-stack`
-  - `samuraibff`, `samuraipersistor`
-  - `rtservice`, `whisperx_worker`, `recorder_worker`, `finalizer_worker`
+- https://github.com/mikub/nanodeploy
 
-For the **compose-only** (fastest end-to-end) workflow, see: **`docs/local-stack.md`**.
+Please use:
+
+- `nanodeploy/docs/local-k8s-setup.md`
+
+Rationale:
+- local k8s is a deployment concern and should run Helm from `nanodeploy`
+- xamurai repo should focus on services
+
+This file is intentionally kept as a pointer during the migration window.
 
 ## Supported local Kubernetes variants
 

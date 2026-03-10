@@ -12,6 +12,7 @@ from proto_gen import stream_pb2
 
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
+from drsynth_common.logging_setup import setup_logging
 
 try:
     from opentelemetry import trace
@@ -84,12 +85,6 @@ SAMPLE_WIDTH_BYTES = 2  # 16-bit PCM
 # --------------------------------------------------------------------------- #
 # Logging
 # --------------------------------------------------------------------------- #
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger("recorder_worker")
 
 
@@ -378,6 +373,7 @@ def finalize_session(session_id: str, rec: SessionRecording, producer: Producer)
 # --------------------------------------------------------------------------- #
 
 def main():
+    setup_logging(default_level="INFO")
     # Initialize OTEL SDK (no-op if deps missing)
     setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "recorder-worker"))
 
