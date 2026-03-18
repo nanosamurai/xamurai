@@ -38,6 +38,11 @@ Use rtservice environment variables for defaults:
 - `RT_EMIT_EVERY_SEC` (default `0.7`)
 - `RT_PARTIAL_ENABLE` (default `true`)
 
+Implementation status (in this repo):
+- ✅ PARTIAL emission implemented (ASR-only partials)
+- ✅ env knobs implemented and defaulted as above
+- ✅ integration test added to assert PARTIAL precedes FINAL
+
 Per-session overrides (optional for phase 1):
 - gRPC metadata from `samuraibff` to `rtservice`:
   - `x-rt-window-sec: 5.0`
@@ -85,6 +90,9 @@ Update/increase coverage in `tests/test_realtime_asr_grpc.py`:
 
 - Expect at least one PARTIAL quickly.
 - Expect a FINAL after enough audio sent.
+
+Current test added:
+- `test_realtime_asr_stream_emits_partial_and_final`
 
 ## Other repos impacted
 
