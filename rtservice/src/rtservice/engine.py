@@ -92,8 +92,16 @@ def _bool_env(name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 SR = 16000
-WINDOW_SEC = 5.0
-OVERLAP_SEC = 0.5
+
+# Windowing defaults are configurable via env for deployment tuning.
+WINDOW_SEC = float(os.getenv("RT_WINDOW_SEC", "5.0"))
+OVERLAP_SEC = float(os.getenv("RT_OVERLAP_SEC", "0.5"))
+
+# Cumulative refinement: emit partial hypotheses on shorter cadence.
+PARTIAL_ENABLE = _bool_env("RT_PARTIAL_ENABLE") if os.getenv("RT_PARTIAL_ENABLE") is not None else True
+EMIT_EVERY_SEC = float(os.getenv("RT_EMIT_EVERY_SEC", "0.7"))
+
+# Kept for reference (most code should use RealtimeConfig.hop_sec)
 HOP_SEC = WINDOW_SEC - OVERLAP_SEC
 
 DEFAULT_LANG = os.getenv("FW_LANG_DEFAULT", None)  # per-session override still possible
@@ -150,6 +158,8 @@ class RealtimeConfig:
     sr: int = SR
     window_sec: float = WINDOW_SEC
     overlap_sec: float = OVERLAP_SEC
+    partial_enable: bool = PARTIAL_ENABLE
+    emit_every_sec: float = EMIT_EVERY_SEC
     finalize_min_dur_sec: float = FINALIZE_MIN_DUR_SEC
     key_resolution_sec: float = KEY_RES
 
@@ -165,6 +175,12 @@ class RealtimeConfig:
     def hop_samples(self) -> int:
         return int(round(self.hop_sec * self.sr))
 
+    @property
+    def emit_every_samples(self) -> int:
+        # Avoid pathological configs.
+        sec = max(0.05, float(self.emit_every_sec))
+        return int(round(sec * self.sr))
+
 
 @dataclass
 class SessionState:
@@ -176,6 +192,10 @@ class SessionState:
     emitted_keys: Set[Tuple[float, float, str]]
     last_activity_s: float
     lock: threading.Lock
+    # Cumulative refinement tracking (monotonic per session).
+    total_samples_ingested: int
+    last_partial_emit_at_samples: int
+    last_partial_text: str
 
     @staticmethod
     def new(now_s: float) -> "SessionState":
@@ -186,6 +206,9 @@ class SessionState:
             emitted_keys=set(),
             last_activity_s=now_s,
             lock=threading.Lock(),
+            total_samples_ingested=0,
+            last_partial_emit_at_samples=0,
+            last_partial_text="",
         )
 
 
@@ -234,6 +257,19 @@ class RealtimeSessionProcessor:
 
         # ingest
         state.buf = np.concatenate([state.buf, x])
+        state.total_samples_ingested += int(x.size)
+
+        # Emit low-latency partial updates as audio accumulates, before we have a full window.
+        # This uses ASR-only (no diarization) in phase 1 to keep it cheaper.
+        if cfg.partial_enable:
+            out.extend(
+                self._maybe_emit_partial(
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                    state=state,
+                    lang=effective_lang,
+                )
+            )
 
         # process
         while state.buf.size >= cfg.window_samples:
@@ -243,6 +279,24 @@ class RealtimeSessionProcessor:
 
             if self._gate_fn(window):
                 diar_segs = self._diarize_fn(window)
+
+                # Fallback: if diarization returns no segments, still emit a final ASR
+                # for the full window. This avoids the confusing behavior where clients
+                # see partials but never get a final.
+                if not diar_segs:
+                    text = self._asr_fn(window, effective_lang)
+                    text = (text or "").strip()
+                    if text:
+                        out.append(
+                            AsrResult(
+                                start_s=float(window_offset),
+                                end_s=float(window_offset + cfg.window_sec),
+                                text=text,
+                                is_final=True,
+                                lang=effective_lang,
+                                speaker=None,
+                            )
+                        )
 
                 for d in diar_segs:
                     seg_start = float(d.get("start") or 0.0)
@@ -298,7 +352,88 @@ class RealtimeSessionProcessor:
             state.base_offset_sec += cfg.hop_samples / cfg.sr
             state.window_index += 1
 
+            # Partial emission should start fresh per window.
+            state.last_partial_text = ""
+
+            # After sliding, we may again be in an "incomplete window" state;
+            # allow partial emission for the new window as it accumulates.
+            if cfg.partial_enable:
+                out.extend(
+                    self._maybe_emit_partial(
+                        tenant_id=tenant_id,
+                        session_id=session_id,
+                        state=state,
+                        lang=effective_lang,
+                    )
+                )
+
         return out
+
+    def _maybe_emit_partial(
+        self,
+        *,
+        tenant_id: str,
+        session_id: str,
+        state: SessionState,
+        lang: Optional[str],
+    ) -> List[AsrResult]:
+        cfg = self._cfg
+
+        # Need a bit of audio before we can emit anything meaningful.
+        if state.buf.size < int(cfg.finalize_min_dur_sec * cfg.sr):
+            return []
+
+        # If we already have a full window available, we'll emit finals via the
+        # normal path. Avoid producing redundant PARTIALs here.
+        if state.buf.size >= cfg.window_samples:
+            return []
+
+        # Rate-limit partials by an ingestion-based monotonic clock.
+        # This remains stable even if the rolling buffer slides.
+        if (state.total_samples_ingested - state.last_partial_emit_at_samples) < cfg.emit_every_samples:
+            return []
+
+        # Only emit partials when there's likely speech.
+        # gate_fn uses RMS + optional VAD; it's fine to call it on partial windows.
+        try:
+            if not self._gate_fn(state.buf):
+                state.last_partial_emit_at_samples = state.total_samples_ingested
+                return []
+        except Exception:
+            # Never let partial gating break the stream.
+            pass
+
+        # ASR-only partial: transcribe the current incomplete window (cap to window).
+        # NOTE: we do not include diarization/speaker mapping in partials for phase 1.
+        buf = state.buf
+        if buf.size > cfg.window_samples:
+            buf = buf[: cfg.window_samples]
+
+        text = self._asr_fn(buf, lang)
+        state.last_partial_emit_at_samples = state.total_samples_ingested
+
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        # De-spam identical repeats.
+        if text == state.last_partial_text:
+            return []
+        state.last_partial_text = text
+
+        s_abs = float(state.base_offset_sec)
+        e_abs = float(state.base_offset_sec + (buf.size / cfg.sr))
+
+        return [
+            AsrResult(
+                start_s=s_abs,
+                end_s=e_abs,
+                text=text,
+                is_final=False,
+                lang=lang,
+                speaker=None,
+            )
+        ]
 
 
 def _round_time(t: float, resolution: float) -> float:
