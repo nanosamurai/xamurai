@@ -211,10 +211,12 @@ services:
       #
       # Disable partials globally (if needed during rollout):
       #   RT_PARTIAL_ENABLE: "false"
-      RT_PARTIAL_ENABLE: ${RT_PARTIAL_ENABLE:-"true"}
-      RT_EMIT_EVERY_SEC: ${RT_EMIT_EVERY_SEC:-"0.7"}
-      RT_WINDOW_SEC: ${RT_WINDOW_SEC:-"5.0"}
-      RT_OVERLAP_SEC: ${RT_OVERLAP_SEC:-"0.5"}
+      # IMPORTANT: do not include quotes inside the ${...:-default} expression,
+      # otherwise the env var value will contain literal quote characters.
+      RT_PARTIAL_ENABLE: ${RT_PARTIAL_ENABLE:-true}
+      RT_EMIT_EVERY_SEC: ${RT_EMIT_EVERY_SEC:-0.7}
+      RT_WINDOW_SEC: ${RT_WINDOW_SEC:-5.0}
+      RT_OVERLAP_SEC: ${RT_OVERLAP_SEC:-0.5}
 
     # --- GPU (optional) ---
     # If you have NVIDIA GPU support configured in Docker, uncomment this to
