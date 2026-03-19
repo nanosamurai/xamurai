@@ -204,6 +204,28 @@ services:
       # Optional legacy dev path
       ENROLL_DIR: /app/enrolled_speakers
       FW_LANG_DEFAULT: ""
+
+      # --- Plan C: rtservice cumulative refinement defaults ---
+      # These are OPTIONAL defaults (can also be overridden per-session via
+      # gRPC metadata headers passed by samuraibff).
+      #
+      # Disable partials globally (if needed during rollout):
+      #   RT_PARTIAL_ENABLE: "false"
+      RT_PARTIAL_ENABLE: ${RT_PARTIAL_ENABLE:-"true"}
+      RT_EMIT_EVERY_SEC: ${RT_EMIT_EVERY_SEC:-"0.7"}
+      RT_WINDOW_SEC: ${RT_WINDOW_SEC:-"5.0"}
+      RT_OVERLAP_SEC: ${RT_OVERLAP_SEC:-"0.5"}
+
+    # --- GPU (optional) ---
+    # If you have NVIDIA GPU support configured in Docker, uncomment this to
+    # make torch.cuda.is_available() return true.
+    #
+    # For Docker Desktop on Windows this typically requires:
+    # - WSL2 backend
+    # - NVIDIA drivers installed on the host
+    # - nvidia-container-toolkit available to Docker
+    #
+    # gpus: all
     # Persist HF caches so the *first* startup is slow, subsequent restarts are fast.
     volumes:
       - nanosamurai_hf_cache:/data/hf_cache
