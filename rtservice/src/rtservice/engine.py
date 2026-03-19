@@ -102,12 +102,20 @@ PARTIAL_ENABLE = _bool_env("RT_PARTIAL_ENABLE") if os.getenv("RT_PARTIAL_ENABLE"
 EMIT_EVERY_SEC = float(os.getenv("RT_EMIT_EVERY_SEC", "0.7"))
 
 # Partial stability: require the same hypothesis to appear N times before emitting.
-# Set to 1 to disable.
+# Default is 1 so PARTIALs flow freely; set >1 if you want extra stability.
 PARTIAL_STABILITY_REPEATS = int(os.getenv("RT_PARTIAL_STABILITY_REPEATS", "1"))
 
-# Minimum audio duration before we emit any PARTIAL. This avoids very-early
-# hallucinated partials.
-PARTIAL_MIN_BUFFER_SEC = float(os.getenv("RT_PARTIAL_MIN_BUFFER_SEC", "1.5"))
+# Minimum audio duration before we emit any PARTIAL.
+# Keep this low for responsiveness, but non-zero to avoid very-early hallucinations.
+PARTIAL_MIN_BUFFER_SEC = float(os.getenv("RT_PARTIAL_MIN_BUFFER_SEC", "0.7"))
+
+# When emitting PARTIAL, transcribe only the trailing lookback chunk instead of
+# the full (growing) window. This makes PARTIALs "small" and more realtime.
+PARTIAL_LOOKBACK_SEC = float(os.getenv("RT_PARTIAL_LOOKBACK_SEC", "2.0"))
+
+# Minimum duration we will actually run ASR on for PARTIAL emission.
+# Faster-Whisper on extremely short audio tends to hallucinate.
+PARTIAL_MIN_TRANSCRIBE_SEC = float(os.getenv("RT_PARTIAL_MIN_TRANSCRIBE_SEC", "1.5"))
 
 # Kept for reference (most code should use RealtimeConfig.hop_sec)
 HOP_SEC = WINDOW_SEC - OVERLAP_SEC
@@ -170,6 +178,8 @@ class RealtimeConfig:
     emit_every_sec: float = EMIT_EVERY_SEC
     partial_stability_repeats: int = PARTIAL_STABILITY_REPEATS
     partial_min_buffer_sec: float = PARTIAL_MIN_BUFFER_SEC
+    partial_lookback_sec: float = PARTIAL_LOOKBACK_SEC
+    partial_min_transcribe_sec: float = PARTIAL_MIN_TRANSCRIBE_SEC
     finalize_min_dur_sec: float = FINALIZE_MIN_DUR_SEC
     key_resolution_sec: float = KEY_RES
 
@@ -194,6 +204,17 @@ class RealtimeConfig:
     @property
     def partial_min_buffer_samples(self) -> int:
         sec = max(0.0, float(self.partial_min_buffer_sec))
+        return int(round(sec * self.sr))
+
+    @property
+    def partial_lookback_samples(self) -> int:
+        # Keep within a window.
+        sec = max(0.1, float(self.partial_lookback_sec))
+        return min(self.window_samples, int(round(sec * self.sr)))
+
+    @property
+    def partial_min_transcribe_samples(self) -> int:
+        sec = max(0.0, float(self.partial_min_transcribe_sec))
         return int(round(sec * self.sr))
 
 
@@ -480,23 +501,36 @@ class RealtimeSessionProcessor:
         if (state.total_samples_ingested - state.last_partial_emit_at_samples) < cfg.emit_every_samples:
             return []
 
+        # ASR-only partial: transcribe only the tail of the current incomplete window.
+        # NOTE: we do not include diarization/speaker mapping in partials.
+        buf = state.buf
+        if buf.size > cfg.window_samples:
+            buf = buf[: cfg.window_samples]
+
+        lookback_n = int(cfg.partial_lookback_samples)
+        if buf.size > lookback_n:
+            buf_for_partial = buf[-lookback_n:]
+            s_abs = float(state.base_offset_sec + (buf.size - lookback_n) / cfg.sr)
+        else:
+            buf_for_partial = buf
+            s_abs = float(state.base_offset_sec)
+
+        # Avoid running ASR on extremely short audio.
+        if buf_for_partial.size < cfg.partial_min_transcribe_samples:
+            return []
+
         # Only emit partials when there's likely speech.
-        # gate_fn uses RMS + optional VAD; it's fine to call it on partial windows.
+        # gate_fn uses RMS + optional VAD. Gate the same chunk we plan to
+        # transcribe so silence earlier in the window doesn't suppress updates.
         try:
-            if not self._partial_gate_fn(state.buf):
+            if not self._partial_gate_fn(buf_for_partial):
                 state.last_partial_emit_at_samples = state.total_samples_ingested
                 return []
         except Exception:
             # Never let partial gating break the stream.
             pass
 
-        # ASR-only partial: transcribe the current incomplete window (cap to window).
-        # NOTE: we do not include diarization/speaker mapping in partials for phase 1.
-        buf = state.buf
-        if buf.size > cfg.window_samples:
-            buf = buf[: cfg.window_samples]
-
-        text = self._asr_fn(buf, lang)
+        text = self._asr_fn(buf_for_partial, lang)
         state.last_partial_emit_at_samples = state.total_samples_ingested
 
         text = (text or "").strip()
@@ -522,7 +556,6 @@ class RealtimeSessionProcessor:
 
         state.last_partial_text = text
 
-        s_abs = float(state.base_offset_sec)
         e_abs = float(state.base_offset_sec + (buf.size / cfg.sr))
 
         return [
@@ -1116,6 +1149,10 @@ class RealtimeEngine:
             r(cfg.overlap_sec),
             bool(cfg.partial_enable),
             r(cfg.emit_every_sec),
+            int(cfg.partial_stability_repeats),
+            r(cfg.partial_min_buffer_sec),
+            r(cfg.partial_lookback_sec),
+            r(cfg.partial_min_transcribe_sec),
             r(cfg.finalize_min_dur_sec),
             r(cfg.key_resolution_sec),
         )
@@ -1152,6 +1189,8 @@ class RealtimeEngine:
             emit_every_sec=emit,
             partial_stability_repeats=base.partial_stability_repeats,
             partial_min_buffer_sec=base.partial_min_buffer_sec,
+            partial_lookback_sec=base.partial_lookback_sec,
+            partial_min_transcribe_sec=base.partial_min_transcribe_sec,
             finalize_min_dur_sec=base.finalize_min_dur_sec,
             key_resolution_sec=base.key_resolution_sec,
         )

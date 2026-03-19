@@ -37,8 +37,10 @@ Use rtservice environment variables for defaults:
 - `RT_OVERLAP_SEC` (default `0.5`)
 - `RT_EMIT_EVERY_SEC` (default `0.7`)
 - `RT_PARTIAL_ENABLE` (default `true`)
-- `RT_PARTIAL_MIN_BUFFER_SEC` (default `1.5`) - do not emit PARTIAL until this much audio accumulates.
+- `RT_PARTIAL_MIN_BUFFER_SEC` (default `0.7`) - do not emit PARTIAL until this much audio accumulates.
+- `RT_PARTIAL_MIN_TRANSCRIBE_SEC` (default `1.5`) - do not run ASR for PARTIAL until at least this much audio is available for the lookback chunk (reduces hallucinations).
 - `RT_PARTIAL_STABILITY_REPEATS` (default `1`) - require the same hypothesis to repeat this many times before emitting (set to >1 for extra stability).
+- `RT_PARTIAL_LOOKBACK_SEC` (default `2.0`) - when emitting a PARTIAL, transcribe only the last N seconds (tail lookback) instead of the full growing window.
 
 Implementation status (in this repo):
 - ✅ PARTIAL emission implemented (ASR-only partials)

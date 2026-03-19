@@ -78,6 +78,7 @@ def test_rtservice_engine_per_session_overrides_affect_partial_emission():
         partial_enable=True,
         partial_stability_repeats=1,
         partial_min_buffer_sec=0.0,
+        partial_min_transcribe_sec=0.0,
         finalize_min_dur_sec=0.1,
         key_resolution_sec=0.1,
     )
