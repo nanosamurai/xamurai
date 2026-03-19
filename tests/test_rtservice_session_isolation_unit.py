@@ -37,7 +37,8 @@ def test_rtservice_engine_isolates_sessions_without_audio_mix():
 
     processor = RealtimeSessionProcessor(
         cfg=cfg,
-        gate_fn=gate_fn,
+        partial_gate_fn=gate_fn,
+        window_gate_fn=gate_fn,
         diarize_fn=diarize_fn,
         asr_fn=asr_fn,
         map_speaker_fn=map_speaker_fn,
@@ -75,6 +76,8 @@ def test_rtservice_engine_per_session_overrides_affect_partial_emission():
         overlap_sec=0.0,
         emit_every_sec=0.5,
         partial_enable=True,
+        partial_stability_repeats=1,
+        partial_min_buffer_sec=0.0,
         finalize_min_dur_sec=0.1,
         key_resolution_sec=0.1,
     )
@@ -94,6 +97,9 @@ def test_rtservice_engine_per_session_overrides_affect_partial_emission():
 
     class _FakeBundle:
         def gate_window(self, w):
+            return gate_fn(w)
+
+        def gate_speech(self, w):
             return gate_fn(w)
 
         def diarize_window(self, w):
@@ -138,7 +144,8 @@ def test_rtservice_engine_isolates_tenants_same_session_id():
 
     processor = RealtimeSessionProcessor(
         cfg=cfg,
-        gate_fn=gate_fn,
+        partial_gate_fn=gate_fn,
+        window_gate_fn=gate_fn,
         diarize_fn=diarize_fn,
         asr_fn=asr_fn,
         map_speaker_fn=map_speaker_fn,

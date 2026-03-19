@@ -101,6 +101,14 @@ OVERLAP_SEC = float(os.getenv("RT_OVERLAP_SEC", "0.5"))
 PARTIAL_ENABLE = _bool_env("RT_PARTIAL_ENABLE") if os.getenv("RT_PARTIAL_ENABLE") is not None else True
 EMIT_EVERY_SEC = float(os.getenv("RT_EMIT_EVERY_SEC", "0.7"))
 
+# Partial stability: require the same hypothesis to appear N times before emitting.
+# Set to 1 to disable.
+PARTIAL_STABILITY_REPEATS = int(os.getenv("RT_PARTIAL_STABILITY_REPEATS", "1"))
+
+# Minimum audio duration before we emit any PARTIAL. This avoids very-early
+# hallucinated partials.
+PARTIAL_MIN_BUFFER_SEC = float(os.getenv("RT_PARTIAL_MIN_BUFFER_SEC", "1.5"))
+
 # Kept for reference (most code should use RealtimeConfig.hop_sec)
 HOP_SEC = WINDOW_SEC - OVERLAP_SEC
 
@@ -160,6 +168,8 @@ class RealtimeConfig:
     overlap_sec: float = OVERLAP_SEC
     partial_enable: bool = PARTIAL_ENABLE
     emit_every_sec: float = EMIT_EVERY_SEC
+    partial_stability_repeats: int = PARTIAL_STABILITY_REPEATS
+    partial_min_buffer_sec: float = PARTIAL_MIN_BUFFER_SEC
     finalize_min_dur_sec: float = FINALIZE_MIN_DUR_SEC
     key_resolution_sec: float = KEY_RES
 
@@ -181,6 +191,11 @@ class RealtimeConfig:
         sec = max(0.05, float(self.emit_every_sec))
         return int(round(sec * self.sr))
 
+    @property
+    def partial_min_buffer_samples(self) -> int:
+        sec = max(0.0, float(self.partial_min_buffer_sec))
+        return int(round(sec * self.sr))
+
 
 @dataclass
 class SessionState:
@@ -196,6 +211,8 @@ class SessionState:
     total_samples_ingested: int
     last_partial_emit_at_samples: int
     last_partial_text: str
+    pending_partial_text: str
+    pending_partial_repeats: int
 
     # Signature of the realtime config used for this session. If a client changes
     # per-session overrides mid-stream, we reset the session state.
@@ -213,6 +230,8 @@ class SessionState:
             total_samples_ingested=0,
             last_partial_emit_at_samples=0,
             last_partial_text="",
+            pending_partial_text="",
+            pending_partial_repeats=0,
             cfg_key=None,
         )
 
@@ -383,6 +402,8 @@ class RealtimeSessionProcessor:
 
             # Partial emission should start fresh per window.
             state.last_partial_text = ""
+            state.pending_partial_text = ""
+            state.pending_partial_repeats = 0
 
             # After sliding, we may again be in an "incomplete window" state;
             # allow partial emission for the new window as it accumulates.
@@ -426,6 +447,8 @@ class RealtimeSessionProcessor:
 
             # Prevent emitting the tail repeatedly if multiple flush chunks arrive.
             state.buf = np.zeros(0, dtype=np.float32)
+            state.pending_partial_text = ""
+            state.pending_partial_repeats = 0
 
         return out
 
@@ -441,6 +464,10 @@ class RealtimeSessionProcessor:
 
         # Need a bit of audio before we can emit anything meaningful.
         if state.buf.size < int(cfg.finalize_min_dur_sec * cfg.sr):
+            return []
+
+        # Avoid very-early hallucinated partials.
+        if state.buf.size < cfg.partial_min_buffer_samples:
             return []
 
         # If we already have a full window available, we'll emit finals via the
@@ -479,6 +506,20 @@ class RealtimeSessionProcessor:
         # De-spam identical repeats.
         if text == state.last_partial_text:
             return []
+
+        # Stability filter: only emit when we see the same hypothesis repeatedly.
+        # This helps avoid very-early hallucinations on short buffers.
+        repeats = int(cfg.partial_stability_repeats)
+        if repeats > 1:
+            if text == state.pending_partial_text:
+                state.pending_partial_repeats += 1
+            else:
+                state.pending_partial_text = text
+                state.pending_partial_repeats = 1
+
+            if state.pending_partial_repeats < repeats:
+                return []
+
         state.last_partial_text = text
 
         s_abs = float(state.base_offset_sec)
@@ -1109,6 +1150,8 @@ class RealtimeEngine:
             overlap_sec=ov,
             partial_enable=base.partial_enable,
             emit_every_sec=emit,
+            partial_stability_repeats=base.partial_stability_repeats,
+            partial_min_buffer_sec=base.partial_min_buffer_sec,
             finalize_min_dur_sec=base.finalize_min_dur_sec,
             key_resolution_sec=base.key_resolution_sec,
         )

@@ -37,6 +37,8 @@ Use rtservice environment variables for defaults:
 - `RT_OVERLAP_SEC` (default `0.5`)
 - `RT_EMIT_EVERY_SEC` (default `0.7`)
 - `RT_PARTIAL_ENABLE` (default `true`)
+- `RT_PARTIAL_MIN_BUFFER_SEC` (default `1.5`) - do not emit PARTIAL until this much audio accumulates.
+- `RT_PARTIAL_STABILITY_REPEATS` (default `1`) - require the same hypothesis to repeat this many times before emitting (set to >1 for extra stability).
 
 Implementation status (in this repo):
 - ✅ PARTIAL emission implemented (ASR-only partials)
