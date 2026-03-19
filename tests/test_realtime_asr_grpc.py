@@ -239,6 +239,26 @@ def test_realtime_asr_stream_emits_partial_and_final(grpc_channel):
 
 
 @pytest.mark.integration
+def test_realtime_asr_stream_emits_multiple_finals_for_full_wav(grpc_channel):
+    """Regression: rtservice should not drop most of the WAV.
+
+    Historically we observed that only 1 FINAL might be emitted for a full WAV,
+    due to window gating + diarization segment ownership/deduping.
+    This test asserts we emit multiple FINALs for the full 20s test file.
+    """
+
+    stub = stream_pb2_grpc.RealtimeASRStub(grpc_channel)
+
+    wav_path = Path(__file__).parent / "data" / "test_cs.wav"
+    audio = load_audio_mono_16k(wav_path)
+
+    events: List[stream_pb2.AsrEvent] = list(stub.Stream(gen_chunks("test-grpc-multi-final", audio, lang="cs")))
+    finals = [e for e in events if e.type == stream_pb2.FINAL and e.text.strip()]
+    # With 5s windows and overlap, we should get several FINALs.
+    assert len(finals) >= 3, f"Expected >=3 FINAL AsrEvents for full WAV, got {len(finals)}"
+
+
+@pytest.mark.integration
 @pytest.mark.skipif(not _HAS_HF_TOKEN, reason="requires HF_TOKEN")
 @pytest.mark.skipif(not _HAS_BOTO3, reason="boto3 not installed")
 def test_realtime_asr_stream_s3_enrollment(localstack_s3, tmp_path):
