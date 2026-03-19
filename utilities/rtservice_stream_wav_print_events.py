@@ -83,6 +83,18 @@ def _chunks(
         tenant_id=tenant_id,
     )
 
+    # Some environments benefit from a second flush frame.
+    # (gRPC streaming + model init races can sometimes drop the very last message.)
+    yield stream_pb2.AudioChunk(
+        session_id=session_id,
+        seq=seq + 2,
+        t0_ns=0,
+        sample_rate=SR,
+        pcm16_le=b"",
+        lang=lang or "",
+        tenant_id=tenant_id,
+    )
+
 
 def _asr_type_name(t: int) -> str:
     if t == stream_pb2.PARTIAL:

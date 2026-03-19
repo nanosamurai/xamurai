@@ -223,6 +223,9 @@ class SessionState:
 
 DiarSeg = Dict[str, object]  # {start: float, end: float, speaker: str}
 
+# Gate functions for realtime processing.
+# - partial_gate_fn: typically RMS + VAD (avoid hallucinated partials)
+# - window_gate_fn: typically RMS-only (avoid dropping content due to VAD misses)
 GateFn = Callable[[np.ndarray], bool]
 DiarizeFn = Callable[[np.ndarray], List[DiarSeg]]
 AsrFn = Callable[[np.ndarray, Optional[str]], str]
@@ -234,13 +237,15 @@ class RealtimeSessionProcessor:
         self,
         *,
         cfg: RealtimeConfig,
-        gate_fn: GateFn,
+        partial_gate_fn: GateFn,
+        window_gate_fn: Optional[GateFn] = None,
         diarize_fn: DiarizeFn,
         asr_fn: AsrFn,
         map_speaker_fn: MapSpeakerFn,
     ) -> None:
         self._cfg = cfg
-        self._gate_fn = gate_fn
+        self._partial_gate_fn = partial_gate_fn
+        self._window_gate_fn = window_gate_fn or partial_gate_fn
         self._diarize_fn = diarize_fn
         self._asr_fn = asr_fn
         self._map_speaker_fn = map_speaker_fn
@@ -257,6 +262,8 @@ class RealtimeSessionProcessor:
         cfg = self._cfg
         effective_lang = lang
 
+        is_flush = (pcm16 is None) or (len(pcm16) == 0)
+
         x = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
         out: List[AsrResult] = []
 
@@ -266,7 +273,10 @@ class RealtimeSessionProcessor:
 
         # Emit low-latency partial updates as audio accumulates, before we have a full window.
         # This uses ASR-only (no diarization) in phase 1 to keep it cheaper.
-        if cfg.partial_enable:
+        #
+        # IMPORTANT: do not emit partials when the caller is flushing (empty chunk)
+        # because that would produce confusing late PARTIALs.
+        if cfg.partial_enable and not is_flush:
             out.extend(
                 self._maybe_emit_partial(
                     tenant_id=tenant_id,
@@ -282,26 +292,19 @@ class RealtimeSessionProcessor:
             window_offset = state.base_offset_sec
             my_idx = state.window_index
 
-            if self._gate_fn(window):
-                diar_segs = self._diarize_fn(window)
+            emitted_any_final_for_window = False
 
-                # Fallback: if diarization returns no segments, still emit a final ASR
-                # for the full window. This avoids the confusing behavior where clients
-                # see partials but never get a final.
-                if not diar_segs:
-                    text = self._asr_fn(window, effective_lang)
-                    text = (text or "").strip()
-                    if text:
-                        out.append(
-                            AsrResult(
-                                start_s=float(window_offset),
-                                end_s=float(window_offset + cfg.window_sec),
-                                text=text,
-                                is_final=True,
-                                lang=effective_lang,
-                                speaker=None,
-                            )
-                        )
+            # We keep two separate gates:
+            # - window gate: avoid dropping windows entirely (RMS-only in prod)
+            # - partial/speech gate: uses VAD to decide whether diarization is worth running
+            if self._window_gate_fn(window):
+                speech_ok = True
+                try:
+                    speech_ok = bool(self._partial_gate_fn(window))
+                except Exception:
+                    speech_ok = True
+
+                diar_segs = self._diarize_fn(window) if speech_ok else []
 
                 for d in diar_segs:
                     seg_start = float(d.get("start") or 0.0)
@@ -351,6 +354,27 @@ class RealtimeSessionProcessor:
                                 speaker=label,
                             )
                         )
+                        emitted_any_final_for_window = True
+
+                # Fallback: if diarization returns no usable FINAL segments (either because
+                # diarization yielded nothing, or because all segments were filtered out by
+                # duration/ownership/deduping), still emit a single FINAL for the full
+                # window. This avoids the confusing behavior where clients see PARTIALs
+                # but never get a FINAL for that window.
+                if not emitted_any_final_for_window:
+                    text = self._asr_fn(window, effective_lang)
+                    text = (text or "").strip()
+                    if text:
+                        out.append(
+                            AsrResult(
+                                start_s=float(window_offset),
+                                end_s=float(window_offset + cfg.window_sec),
+                                text=text,
+                                is_final=True,
+                                lang=effective_lang,
+                                speaker=None,
+                            )
+                        )
 
             # slide
             state.buf = state.buf[cfg.hop_samples :]
@@ -362,7 +386,7 @@ class RealtimeSessionProcessor:
 
             # After sliding, we may again be in an "incomplete window" state;
             # allow partial emission for the new window as it accumulates.
-            if cfg.partial_enable:
+            if cfg.partial_enable and not is_flush:
                 out.extend(
                     self._maybe_emit_partial(
                         tenant_id=tenant_id,
@@ -371,6 +395,37 @@ class RealtimeSessionProcessor:
                         lang=effective_lang,
                     )
                 )
+
+        # End-of-stream flush: when the client sends an empty chunk (or we get an empty
+        # buffer), finalize the remaining tail (shorter than window_sec) as a FINAL.
+        # This ensures we don't drop the last ~overlap chunk of the stream.
+        if is_flush and state.buf.size >= int(cfg.finalize_min_dur_sec * cfg.sr):
+            try:
+                if self._window_gate_fn(state.buf):
+                    buf = state.buf
+                    # Cap to window_samples in case callers flush while having >1 window.
+                    if buf.size > cfg.window_samples:
+                        buf = buf[: cfg.window_samples]
+                    text = self._asr_fn(buf, effective_lang)
+                    text = (text or "").strip()
+                    if text:
+                        s_abs = float(state.base_offset_sec)
+                        e_abs = float(state.base_offset_sec + (buf.size / cfg.sr))
+                        out.append(
+                            AsrResult(
+                                start_s=s_abs,
+                                end_s=e_abs,
+                                text=text,
+                                is_final=True,
+                                lang=effective_lang,
+                                speaker=None,
+                            )
+                        )
+            except Exception:
+                logger.warning("rtservice: tail flush failed", exc_info=True)
+
+            # Prevent emitting the tail repeatedly if multiple flush chunks arrive.
+            state.buf = np.zeros(0, dtype=np.float32)
 
         return out
 
@@ -401,7 +456,7 @@ class RealtimeSessionProcessor:
         # Only emit partials when there's likely speech.
         # gate_fn uses RMS + optional VAD; it's fine to call it on partial windows.
         try:
-            if not self._gate_fn(state.buf):
+            if not self._partial_gate_fn(state.buf):
                 state.last_partial_emit_at_samples = state.total_samples_ingested
                 return []
         except Exception:
@@ -608,6 +663,18 @@ class RealtimeModelBundle:
         # RMS pre-gate
         rms = float(np.sqrt(np.mean(window * window)) + 1e-12)
         if rms < 3e-5:
+            return False
+        return True
+
+    def gate_speech(self, window: np.ndarray) -> bool:
+        """Speech gate for PARTIALs / diarization.
+
+        This is intentionally stricter than `gate_window` because we use VAD to
+        avoid hallucinated partials and to avoid doing expensive diarization
+        work on windows that look like silence.
+        """
+
+        if not self.gate_window(window):
             return False
 
         if not USE_SILERO_VAD or self._vad_model is None:
@@ -909,7 +976,8 @@ class RealtimeEngine:
             # Ensure default processor is created.
             _p = RealtimeSessionProcessor(
                 cfg=self.cfg,
-                gate_fn=self._model_bundle.gate_window,
+                partial_gate_fn=self._model_bundle.gate_speech,
+                window_gate_fn=self._model_bundle.gate_window,
                 diarize_fn=self._model_bundle.diarize_window,
                 asr_fn=self._model_bundle.asr_text,
                 map_speaker_fn=self._model_bundle.map_speaker_label,
@@ -1058,7 +1126,8 @@ class RealtimeEngine:
             assert self._model_bundle is not None
             p = RealtimeSessionProcessor(
                 cfg=cfg,
-                gate_fn=self._model_bundle.gate_window,
+                partial_gate_fn=self._model_bundle.gate_speech,
+                window_gate_fn=self._model_bundle.gate_window,
                 diarize_fn=self._model_bundle.diarize_window,
                 asr_fn=self._model_bundle.asr_text,
                 map_speaker_fn=self._model_bundle.map_speaker_label,
