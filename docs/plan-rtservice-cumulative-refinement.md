@@ -49,6 +49,9 @@ Per-session overrides (optional for phase 1):
   - `x-rt-overlap-sec: 0.5`
   - `x-rt-emit-every-sec: 0.7`
 
+Implementation status:
+- ✅ `rtservice` reads these from gRPC invocation metadata per stream
+
 ### Phase 2 (proto changes)
 
 Move config into `AudioChunk` (and/or introduce a dedicated `SessionConfig` message) once semantics stabilize.

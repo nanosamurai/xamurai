@@ -197,6 +197,10 @@ class SessionState:
     last_partial_emit_at_samples: int
     last_partial_text: str
 
+    # Signature of the realtime config used for this session. If a client changes
+    # per-session overrides mid-stream, we reset the session state.
+    cfg_key: Optional[Tuple[object, ...]]
+
     @staticmethod
     def new(now_s: float) -> "SessionState":
         return SessionState(
@@ -209,6 +213,7 @@ class SessionState:
             total_samples_ingested=0,
             last_partial_emit_at_samples=0,
             last_partial_text="",
+            cfg_key=None,
         )
 
 
@@ -890,18 +895,26 @@ class RealtimeEngine:
         self._last_evict_scan_s = 0.0
 
         self._model_bundle = model_bundle
-        if processor is not None:
-            self._processor = processor
-        else:
+
+        # In unit tests we often inject a lightweight processor; in that case we
+        # keep behavior fixed and ignore per-session config overrides.
+        self._fixed_processor: Optional[RealtimeSessionProcessor] = processor
+
+        if self._fixed_processor is None:
             if self._model_bundle is None:
                 self._model_bundle = RealtimeModelBundle(cfg=self.cfg)
-            self._processor = RealtimeSessionProcessor(
+
+            self._processors_lock = threading.Lock()
+            self._processors_by_key: Dict[Tuple[object, ...], RealtimeSessionProcessor] = {}
+            # Ensure default processor is created.
+            _p = RealtimeSessionProcessor(
                 cfg=self.cfg,
                 gate_fn=self._model_bundle.gate_window,
                 diarize_fn=self._model_bundle.diarize_window,
                 asr_fn=self._model_bundle.asr_text,
                 map_speaker_fn=self._model_bundle.map_speaker_label,
             )
+            self._processors_by_key[self._cfg_key(self.cfg)] = _p
 
         logger.info(
             "RealtimeEngine ready: SR=%d WINDOW=%.2fs HOP=%.2fs default_lang=%s",
@@ -918,6 +931,9 @@ class RealtimeEngine:
         *,
         lang: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        rt_window_sec: Optional[float] = None,
+        rt_overlap_sec: Optional[float] = None,
+        rt_emit_every_sec: Optional[float] = None,
     ) -> List[AsrResult]:
         """Feed PCM16 audio bytes for a session.
 
@@ -940,16 +956,121 @@ class RealtimeEngine:
                 state = SessionState.new(now)
                 self._sessions[key] = state
 
+        # Resolve processor/config (default or per-session overrides).
+        proc = self._fixed_processor
+        cfg_key = None
+        if proc is None:
+            cfg = self._effective_cfg(
+                base=self.cfg,
+                rt_window_sec=rt_window_sec,
+                rt_overlap_sec=rt_overlap_sec,
+                rt_emit_every_sec=rt_emit_every_sec,
+            )
+            cfg_key = self._cfg_key(cfg)
+            proc = self._get_or_create_processor(cfg, cfg_key)
+
         # Per-session lock for correctness under concurrent sessions.
         with state.lock:
             state.last_activity_s = now
-            return self._processor.process(
+
+            # If per-session overrides changed mid-stream, reset session state.
+            if cfg_key is not None and state.cfg_key is not None and state.cfg_key != cfg_key:
+                logger.warning(
+                    "rtservice: session config changed mid-stream; resetting session state tenant=%s session=%s",
+                    tid,
+                    sid,
+                )
+                st2 = SessionState.new(now)
+                st2.cfg_key = cfg_key
+                self._sessions[key] = st2
+                state = st2
+            elif cfg_key is not None and state.cfg_key is None:
+                state.cfg_key = cfg_key
+
+            return proc.process(
                 tenant_id=tid,
                 session_id=sid,
                 state=state,
                 pcm16=pcm16,
                 lang=effective_lang,
             )
+
+    @staticmethod
+    def _cfg_key(cfg: RealtimeConfig) -> Tuple[object, ...]:
+        # Float stability: round to millisecond-ish precision.
+        def r(x: float) -> float:
+            return round(float(x), 6)
+
+        return (
+            int(cfg.sr),
+            r(cfg.window_sec),
+            r(cfg.overlap_sec),
+            bool(cfg.partial_enable),
+            r(cfg.emit_every_sec),
+            r(cfg.finalize_min_dur_sec),
+            r(cfg.key_resolution_sec),
+        )
+
+    def _effective_cfg(
+        self,
+        *,
+        base: RealtimeConfig,
+        rt_window_sec: Optional[float],
+        rt_overlap_sec: Optional[float],
+        rt_emit_every_sec: Optional[float],
+    ) -> RealtimeConfig:
+        # Validate and apply per-session overrides.
+        win = float(rt_window_sec) if rt_window_sec is not None else base.window_sec
+        ov = float(rt_overlap_sec) if rt_overlap_sec is not None else base.overlap_sec
+        emit = float(rt_emit_every_sec) if rt_emit_every_sec is not None else base.emit_every_sec
+
+        # Basic sanity. We keep ranges permissive and let operators enforce tighter
+        # policies in the BFF.
+        if not np.isfinite(win) or win <= 0.1:
+            win = base.window_sec
+        if not np.isfinite(ov) or ov < 0.0 or ov >= win:
+            ov = base.overlap_sec
+        if not np.isfinite(emit) or emit <= 0.0:
+            emit = base.emit_every_sec
+        if emit > win:
+            emit = win
+
+        return RealtimeConfig(
+            sr=base.sr,
+            window_sec=win,
+            overlap_sec=ov,
+            partial_enable=base.partial_enable,
+            emit_every_sec=emit,
+            finalize_min_dur_sec=base.finalize_min_dur_sec,
+            key_resolution_sec=base.key_resolution_sec,
+        )
+
+    def _get_or_create_processor(
+        self,
+        cfg: RealtimeConfig,
+        cfg_key: Tuple[object, ...],
+    ) -> RealtimeSessionProcessor:
+        with self._processors_lock:
+            p = self._processors_by_key.get(cfg_key)
+            if p is not None:
+                return p
+
+            assert self._model_bundle is not None
+            p = RealtimeSessionProcessor(
+                cfg=cfg,
+                gate_fn=self._model_bundle.gate_window,
+                diarize_fn=self._model_bundle.diarize_window,
+                asr_fn=self._model_bundle.asr_text,
+                map_speaker_fn=self._model_bundle.map_speaker_label,
+            )
+            self._processors_by_key[cfg_key] = p
+            logger.info(
+                "rtservice: created new processor for per-session cfg window=%.3fs overlap=%.3fs emit=%.3fs",
+                cfg.window_sec,
+                cfg.overlap_sec,
+                cfg.emit_every_sec,
+            )
+            return p
 
     def to_asr_events(self, session_id: str, r: AsrResult) -> stream_pb2.AsrEvent:
         return stream_pb2.AsrEvent(

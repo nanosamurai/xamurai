@@ -1,5 +1,6 @@
 import os
 import logging
+import math
 from concurrent import futures
 from typing import Optional
 
@@ -12,6 +13,48 @@ from rtservice.engine import RealtimeEngine
 from drsynth_common.logging_setup import setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_finite_float(s: object) -> Optional[float]:
+    if s is None:
+        return None
+    try:
+        x = float(str(s).strip())
+        if math.isfinite(x):
+            return x
+        return None
+    except Exception:
+        return None
+
+
+def _metadata_to_overrides(context: grpc.ServicerContext) -> dict:
+    """Extract per-stream rtservice override knobs from gRPC metadata.
+
+    Expected keys (lowercase on the wire):
+    - x-rt-window-sec
+    - x-rt-overlap-sec
+    - x-rt-emit-every-sec
+    """
+
+    md = {}
+    try:
+        for k, v in (context.invocation_metadata() or ()):  # type: ignore[attr-defined]
+            md[str(k).lower()] = v
+    except Exception:
+        return {}
+
+    win = _parse_finite_float(md.get("x-rt-window-sec"))
+    ov = _parse_finite_float(md.get("x-rt-overlap-sec"))
+    emit = _parse_finite_float(md.get("x-rt-emit-every-sec"))
+
+    out = {}
+    if win is not None:
+        out["rt_window_sec"] = win
+    if ov is not None:
+        out["rt_overlap_sec"] = ov
+    if emit is not None:
+        out["rt_emit_every_sec"] = emit
+    return out
 
 class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
     """
@@ -31,6 +74,10 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
         NOTE: this MUST be a normal (sync) generator for grpc.server(),
         not async def and not an async generator.
         """
+        overrides = _metadata_to_overrides(context)
+        if overrides:
+            self._log.info("RealtimeASR stream overrides enabled: %s", sorted(overrides.keys()))
+
         for chunk in request_iterator:
             session_id = chunk.session_id or "unknown"
             lang = getattr(chunk, "lang", "") or None
@@ -51,6 +98,7 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                 chunk.pcm16_le,
                 lang=lang,
                 tenant_id=tenant_id,
+                **overrides,
             )
 
             # Fan out final events
