@@ -1058,6 +1058,22 @@ class RealtimeEngine:
             )
             self._processors_by_key[self._cfg_key(self.cfg)] = _p
 
+        # Log the effective default PARTIAL configuration at startup. This is
+        # critical for debugging "why did I get hallucinated partials" issues
+        # (often caused by stale images / unexpected env overrides).
+        logger.info(
+            "rtservice partial defaults: enable=%s emit_every=%.3fs window=%.3fs overlap=%.3fs "
+            "min_buffer=%.3fs lookback=%.3fs min_transcribe=%.3fs stability_repeats=%d",
+            bool(self.cfg.partial_enable),
+            float(self.cfg.emit_every_sec),
+            float(self.cfg.window_sec),
+            float(self.cfg.overlap_sec),
+            float(self.cfg.partial_min_buffer_sec),
+            float(self.cfg.partial_lookback_sec),
+            float(self.cfg.partial_min_transcribe_sec),
+            int(self.cfg.partial_stability_repeats),
+        )
+
         logger.info(
             "RealtimeEngine ready: SR=%d WINDOW=%.2fs HOP=%.2fs default_lang=%s",
             self.cfg.sr,

@@ -184,6 +184,19 @@ rtservice:
     enabled: false
     count: 1
 
+  # --- Plan C: rtservice cumulative refinement defaults ---
+  # These can be overridden per-session by the BFF (gRPC metadata), but we keep
+  # sane operator defaults here.
+  partial:
+    enable: true
+    emitEverySec: 0.7
+    windowSec: 5.0
+    overlapSec: 0.5
+    minBufferSec: 0.7
+    lookbackSec: 2.0
+    minTranscribeSec: 1.5
+    stabilityRepeats: 1
+
 whisperxWorker:
   enabled: true
 
