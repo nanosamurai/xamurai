@@ -62,6 +62,32 @@ Use rtservice environment variables for defaults:
 - `RT_PARTIAL_STABILITY_REPEATS` (default `1`) - require the same hypothesis to repeat this many times before emitting (set to >1 for extra stability).
 - `RT_PARTIAL_LOOKBACK_SEC` (default `2.0`) - only relevant when `RT_PARTIAL_MODE=tail`.
 
+### Environment variables reference (single source of truth)
+
+The following table documents **every rtservice env var introduced for Plan C partials**.
+These are wired in:
+- `docker-compose.yml` (compose local stack)
+- `charts/nanosamurai-stack/values.yaml` + `templates/rtservice.yaml` (Helm for local k8s + EKS)
+
+| Env var | Default | Meaning | Notes / gotchas |
+|---|---:|---|---|
+| `RT_PARTIAL_ENABLE` | `true` | Enable/disable PARTIAL emission entirely. | Use this as the “kill switch” during rollout. |
+| `RT_EMIT_EVERY_SEC` | `0.7` | How often to *attempt* emitting a PARTIAL (cadence). | Smaller values amplify compute; should be clamped in BFF for untrusted clients. |
+| `RT_WINDOW_SEC` | `5.0` | Window length for FINAL processing. | Together with overlap determines hop size. |
+| `RT_OVERLAP_SEC` | `0.5` | Overlap between windows. | Hop = `window - overlap`. |
+| `RT_PARTIAL_MIN_BUFFER_SEC` | `0.7` | Minimum buffered audio before emitting any PARTIAL. | Avoids extremely-early hallucinations. |
+| `RT_PARTIAL_MIN_TRANSCRIBE_SEC` | `1.5` | Minimum audio length we will actually run ASR on for PARTIAL. | Critical hallucination guard. In `tail` mode applies to the lookback chunk; in `cumulative` mode applies to the current window prefix. |
+| `RT_PARTIAL_STABILITY_REPEATS` | `1` | Require the same hypothesis to repeat N times before emitting. | Set >1 for extra stability at cost of latency. |
+| `RT_PARTIAL_MODE` | `cumulative` | `cumulative` = monotonic within window; `tail` = lookback-only partials. | `tail` is cheaper but produces “jumping” text that’s harder to merge. |
+| `RT_PARTIAL_LOOKBACK_SEC` | `2.0` | Lookback duration for `RT_PARTIAL_MODE=tail`. | Ignored in `cumulative` mode. |
+
+Per-stream overrides (gRPC metadata) currently supported:
+- `x-rt-window-sec` → `RT_WINDOW_SEC`
+- `x-rt-overlap-sec` → `RT_OVERLAP_SEC`
+- `x-rt-emit-every-sec` → `RT_EMIT_EVERY_SEC`
+
+Note: the remaining PARTIAL knobs are currently **process defaults** (env-driven), not per-stream.
+
 Implementation status (in this repo):
 - ✅ PARTIAL emission implemented (ASR-only partials)
 - ✅ env knobs implemented and defaulted as above
@@ -86,6 +112,32 @@ Move config into `AudioChunk` (and/or introduce a dedicated `SessionConfig` mess
 
 - Maintain a per-session “current partial line” and replace it on every PARTIAL.
 - When FINAL arrives, append/commit it to the transcript and clear the partial line.
+
+### Event identity / linking PARTIALs to FINALs
+
+Currently `AsrEvent` does **not** include an explicit `segment_id` / `window_id` / `revision`.
+The identity available to the client is:
+- `session_id`
+- `type` (PARTIAL/FINAL)
+- `start_s`, `end_s`
+- `speaker` (FINAL may have speaker; PARTIAL is currently speaker-less)
+
+Practical UI/BFF logic (works today):
+
+1) Treat PARTIALs as an ephemeral **single “live line” per session**.
+   - In `RT_PARTIAL_MODE=cumulative`, PARTIALs have a stable `start_s` for the current window.
+   - Replace the currently displayed partial on each new PARTIAL.
+
+2) Clear the live PARTIAL line when you observe progress into the next window:
+   - if the next PARTIAL has a larger `start_s` than the previous (window advanced), drop the old one.
+
+3) De-duplicate FINALs by keying on `(session_id, start_s, end_s, speaker)` (plus `text` if you want extra safety).
+
+Known limitation: FINALs are diarization segments (multiple per window) while PARTIALs are window-prefix hypotheses.
+So a PARTIAL is not a strict “preview of exactly one FINAL segment”.
+
+Follow-up (recommended): add `window_start_s` / `window_index` and optionally `segment_id` + `revision` into the proto,
+so UI can link PARTIALs to a specific committed FINAL deterministically.
 
 **More robust rule (if needed later):**
 
