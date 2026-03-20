@@ -58,6 +58,29 @@ This is wired by default in `docker-compose.yml`.
 docker compose up --build
 ```
 
+### Rebuilding a single service image (when code changes)
+
+`docker build ...` alone will build an image, but **it will not restart** the running
+Compose container. Use Compose so the service is rebuilt *and* recreated.
+
+Rebuild + recreate rtservice:
+```bash
+docker compose up -d --build --force-recreate rtservice
+```
+
+If you suspect Docker layer caching is keeping old code (rare, but happens during
+rapid iteration), do a no-cache rebuild:
+```bash
+docker compose build --no-cache rtservice
+docker compose up -d --force-recreate rtservice
+```
+
+To confirm you are running the new code/config:
+```bash
+docker exec xamurai-rtservice /bin/sh -lc "printenv | grep -E '^RT_PARTIAL_|^RT_EMIT|^RT_WINDOW|^RT_OVERLAP' | sort"
+docker logs --tail 200 xamurai-rtservice
+```
+
 > Note: `docker-compose.dev.yml` is deprecated; the full stack is consolidated into `docker-compose.yml`.
 
 What this starts:
