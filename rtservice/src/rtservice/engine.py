@@ -113,6 +113,11 @@ PARTIAL_MIN_BUFFER_SEC = float(os.getenv("RT_PARTIAL_MIN_BUFFER_SEC", "0.7"))
 # the full (growing) window. This makes PARTIALs "small" and more realtime.
 PARTIAL_LOOKBACK_SEC = float(os.getenv("RT_PARTIAL_LOOKBACK_SEC", "2.0"))
 
+# PARTIAL mode:
+# - cumulative: transcribe from window start to now (monotonic growth; UI can replace)
+# - tail: transcribe only a trailing lookback window (cheaper but non-cumulative)
+PARTIAL_MODE = os.getenv("RT_PARTIAL_MODE", "cumulative").strip().lower() or "cumulative"
+
 # Minimum duration we will actually run ASR on for PARTIAL emission.
 # Faster-Whisper on extremely short audio tends to hallucinate.
 PARTIAL_MIN_TRANSCRIBE_SEC = float(os.getenv("RT_PARTIAL_MIN_TRANSCRIBE_SEC", "1.5"))
@@ -179,6 +184,7 @@ class RealtimeConfig:
     partial_stability_repeats: int = PARTIAL_STABILITY_REPEATS
     partial_min_buffer_sec: float = PARTIAL_MIN_BUFFER_SEC
     partial_lookback_sec: float = PARTIAL_LOOKBACK_SEC
+    partial_mode: str = PARTIAL_MODE
     partial_min_transcribe_sec: float = PARTIAL_MIN_TRANSCRIBE_SEC
     finalize_min_dur_sec: float = FINALIZE_MIN_DUR_SEC
     key_resolution_sec: float = KEY_RES
@@ -338,13 +344,13 @@ class RealtimeSessionProcessor:
             # - window gate: avoid dropping windows entirely (RMS-only in prod)
             # - partial/speech gate: uses VAD to decide whether diarization is worth running
             if self._window_gate_fn(window):
-                speech_ok = True
+                # For FINALs we should not suppress diarization based on VAD.
+                # VAD misses cause speaker labels to disappear which is worse than
+                # a bit of extra compute.
                 try:
-                    speech_ok = bool(self._partial_gate_fn(window))
+                    diar_segs = self._diarize_fn(window)
                 except Exception:
-                    speech_ok = True
-
-                diar_segs = self._diarize_fn(window) if speech_ok else []
+                    diar_segs = []
 
                 for d in diar_segs:
                     seg_start = float(d.get("start") or 0.0)
@@ -402,6 +408,13 @@ class RealtimeSessionProcessor:
                 # window. This avoids the confusing behavior where clients see PARTIALs
                 # but never get a FINAL for that window.
                 if not emitted_any_final_for_window:
+                    logger.info(
+                        "rtservice: FINAL fallback (no diar segments) tenant=%s session=%s window_offset=%.3f idx=%d",
+                        tenant_id,
+                        session_id,
+                        float(window_offset),
+                        int(my_idx),
+                    )
                     text = self._asr_fn(window, effective_lang)
                     text = (text or "").strip()
                     if text:
@@ -501,17 +514,24 @@ class RealtimeSessionProcessor:
         if (state.total_samples_ingested - state.last_partial_emit_at_samples) < cfg.emit_every_samples:
             return []
 
-        # ASR-only partial: transcribe only the tail of the current incomplete window.
+        # ASR-only partial.
         # NOTE: we do not include diarization/speaker mapping in partials.
         buf = state.buf
         if buf.size > cfg.window_samples:
             buf = buf[: cfg.window_samples]
 
-        lookback_n = int(cfg.partial_lookback_samples)
-        if buf.size > lookback_n:
-            buf_for_partial = buf[-lookback_n:]
-            s_abs = float(state.base_offset_sec + (buf.size - lookback_n) / cfg.sr)
+        # Mode controls what audio we transcribe for PARTIAL.
+        mode = (cfg.partial_mode or "cumulative").strip().lower()
+        if mode == "tail":
+            lookback_n = int(cfg.partial_lookback_samples)
+            if buf.size > lookback_n:
+                buf_for_partial = buf[-lookback_n:]
+                s_abs = float(state.base_offset_sec + (buf.size - lookback_n) / cfg.sr)
+            else:
+                buf_for_partial = buf
+                s_abs = float(state.base_offset_sec)
         else:
+            # cumulative (default): stable start (window start), growing end.
             buf_for_partial = buf
             s_abs = float(state.base_offset_sec)
 
@@ -1062,8 +1082,9 @@ class RealtimeEngine:
         # critical for debugging "why did I get hallucinated partials" issues
         # (often caused by stale images / unexpected env overrides).
         logger.info(
-            "rtservice partial defaults: enable=%s emit_every=%.3fs window=%.3fs overlap=%.3fs "
+            "rtservice partial defaults: mode=%s enable=%s emit_every=%.3fs window=%.3fs overlap=%.3fs "
             "min_buffer=%.3fs lookback=%.3fs min_transcribe=%.3fs stability_repeats=%d",
+            str(self.cfg.partial_mode),
             bool(self.cfg.partial_enable),
             float(self.cfg.emit_every_sec),
             float(self.cfg.window_sec),
@@ -1168,6 +1189,7 @@ class RealtimeEngine:
             int(cfg.partial_stability_repeats),
             r(cfg.partial_min_buffer_sec),
             r(cfg.partial_lookback_sec),
+            str(getattr(cfg, "partial_mode", "cumulative")),
             r(cfg.partial_min_transcribe_sec),
             r(cfg.finalize_min_dur_sec),
             r(cfg.key_resolution_sec),
@@ -1206,6 +1228,7 @@ class RealtimeEngine:
             partial_stability_repeats=base.partial_stability_repeats,
             partial_min_buffer_sec=base.partial_min_buffer_sec,
             partial_lookback_sec=base.partial_lookback_sec,
+            partial_mode=base.partial_mode,
             partial_min_transcribe_sec=base.partial_min_transcribe_sec,
             finalize_min_dur_sec=base.finalize_min_dur_sec,
             key_resolution_sec=base.key_resolution_sec,

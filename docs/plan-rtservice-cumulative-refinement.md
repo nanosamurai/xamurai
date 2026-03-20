@@ -27,6 +27,25 @@ For a given session:
 
 **Important:** the UI/BFF must treat PARTIALs as *replaceable* and FINALs as *locking*.
 
+## Partial emission semantics (what "cumulative" means here)
+
+The intended PARTIAL behavior is **cumulative-within-window**:
+
+- For each realtime window (default **5s**), the server emits multiple `PARTIAL` hypotheses on a shorter cadence (default **0.7s**).
+- Each subsequent `PARTIAL` is meant to **supersede** the previous one:
+  - `start_s` stays constant (the current window start)
+  - `end_s` grows as more audio arrives
+  - `text` is the best current hypothesis for the span `[start_s..end_s]`
+- When the `FINAL` arrives for that window, it becomes the source of truth and any earlier PARTIALs for that time span can be discarded.
+
+This is the UI-friendly pattern:
+```
+PARTIAL: "hell"
+PARTIAL: "hello howa"
+PARTIAL: "hello how are you"
+FINAL:   "hello how are you doing?"
+```
+
 ## Configuration
 
 ### Phase 1 (no proto changes)
@@ -37,10 +56,11 @@ Use rtservice environment variables for defaults:
 - `RT_OVERLAP_SEC` (default `0.5`)
 - `RT_EMIT_EVERY_SEC` (default `0.7`)
 - `RT_PARTIAL_ENABLE` (default `true`)
+- `RT_PARTIAL_MODE` (default `cumulative`) - `cumulative` produces monotonic-within-window PARTIALs; `tail` produces non-cumulative lookback PARTIALs.
 - `RT_PARTIAL_MIN_BUFFER_SEC` (default `0.7`) - do not emit PARTIAL until this much audio accumulates.
 - `RT_PARTIAL_MIN_TRANSCRIBE_SEC` (default `1.5`) - do not run ASR for PARTIAL until at least this much audio is available for the lookback chunk (reduces hallucinations).
 - `RT_PARTIAL_STABILITY_REPEATS` (default `1`) - require the same hypothesis to repeat this many times before emitting (set to >1 for extra stability).
-- `RT_PARTIAL_LOOKBACK_SEC` (default `2.0`) - when emitting a PARTIAL, transcribe only the last N seconds (tail lookback) instead of the full growing window.
+- `RT_PARTIAL_LOOKBACK_SEC` (default `2.0`) - only relevant when `RT_PARTIAL_MODE=tail`.
 
 Implementation status (in this repo):
 - ✅ PARTIAL emission implemented (ASR-only partials)

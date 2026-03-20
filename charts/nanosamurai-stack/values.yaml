@@ -188,6 +188,7 @@ rtservice:
   # These can be overridden per-session by the BFF (gRPC metadata), but we keep
   # sane operator defaults here.
   partial:
+    mode: "cumulative" # "cumulative" | "tail"
     enable: true
     emitEverySec: 0.7
     windowSec: 5.0

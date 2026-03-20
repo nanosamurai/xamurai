@@ -182,6 +182,64 @@ def test_rtservice_partial_min_transcribe_sec_suppresses_too_short_audio():
     assert not any((not r.is_final) for r in out)
 
 
+def test_rtservice_partials_are_cumulative_within_window_by_default():
+    """PARTIALs should be cumulative within the current window.
+
+    I.e. for repeated emits (<window), start_s should stay constant and end_s
+    should grow monotonically.
+    """
+
+    cfg = RealtimeConfig(
+        sr=16000,
+        window_sec=5.0,
+        overlap_sec=0.5,
+        partial_enable=True,
+        partial_mode="cumulative",
+        emit_every_sec=0.1,
+        partial_stability_repeats=1,
+        partial_min_buffer_sec=0.0,
+        partial_min_transcribe_sec=0.0,
+        finalize_min_dur_sec=0.1,
+        key_resolution_sec=0.1,
+    )
+
+    def gate_fn(_w):
+        return True
+
+    def diarize_fn(_w):
+        return []
+
+    def asr_fn(chunk, _lang):
+        # Encode length into text so we can see changes.
+        return f"len={chunk.size}"
+
+    def map_speaker_fn(_tenant_id, diar_label, _chunk):
+        return diar_label
+
+    processor = RealtimeSessionProcessor(
+        cfg=cfg,
+        partial_gate_fn=gate_fn,
+        window_gate_fn=gate_fn,
+        diarize_fn=diarize_fn,
+        asr_fn=asr_fn,
+        map_speaker_fn=map_speaker_fn,
+    )
+    engine = RealtimeEngine(cfg=cfg, processor=processor)
+
+    pcm_a = (np.ones(int(cfg.sr * 0.25), dtype=np.int16)).tobytes()
+    pcm_b = (np.ones(int(cfg.sr * 0.25), dtype=np.int16)).tobytes()
+
+    out1 = engine.feed("s", pcm_a, tenant_id="t1", lang="en")
+    out2 = engine.feed("s", pcm_b, tenant_id="t1", lang="en")
+
+    p1 = [r for r in out1 if not r.is_final]
+    p2 = [r for r in out2 if not r.is_final]
+    assert p1 and p2
+
+    assert p2[-1].start_s == p1[-1].start_s
+    assert p2[-1].end_s > p1[-1].end_s
+
+
 def test_rtservice_engine_isolates_tenants_same_session_id():
     """Same session_id in different tenants must not share buffers."""
 

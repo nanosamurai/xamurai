@@ -47,6 +47,8 @@ spec:
               value: {{ .Values.rtservice.partial.minBufferSec | default 0.7 | quote }}
             - name: RT_PARTIAL_LOOKBACK_SEC
               value: {{ .Values.rtservice.partial.lookbackSec | default 2.0 | quote }}
+            - name: RT_PARTIAL_MODE
+              value: {{ .Values.rtservice.partial.mode | default "cumulative" | quote }}
             - name: RT_PARTIAL_MIN_TRANSCRIBE_SEC
               value: {{ .Values.rtservice.partial.minTranscribeSec | default 1.5 | quote }}
             - name: RT_PARTIAL_STABILITY_REPEATS
