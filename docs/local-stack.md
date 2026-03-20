@@ -58,6 +58,21 @@ This is wired by default in `docker-compose.yml`.
 docker compose up --build
 ```
 
+### GPU: start rtservice on CUDA (optional)
+
+If you have NVIDIA GPU + Docker GPU support configured, start rtservice with the GPU override:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.override.yml up -d --build --force-recreate rtservice
+```
+
+Verify CUDA is actually available inside the container:
+```bash
+docker exec xamurai-rtservice /bin/sh -lc "/opt/venv/bin/python -c \"import torch; print(torch.cuda.is_available(), torch.cuda.device_count())\""
+docker logs --tail 200 xamurai-rtservice
+```
+
+If you see `CUDA not available`, it means the container was started **without** the GPU override, or Docker/WSL GPU integration isn't active.
+
 ### Rebuilding a single service image (when code changes)
 
 `docker build ...` alone will build an image, but **it will not restart** the running
