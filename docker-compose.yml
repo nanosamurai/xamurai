@@ -224,12 +224,15 @@ services:
       RT_PARTIAL_STABILITY_REPEATS: ${RT_PARTIAL_STABILITY_REPEATS:-1}
 
     # --- GPU (optional) ---
-    # By default the local stack runs CPU-first so it works on any machine.
+    # If you have NVIDIA GPU support configured in Docker, uncomment this to
+    # make torch.cuda.is_available() return true.
     #
-    # To run rtservice on CUDA, use the override file:
-    #   docker compose -f docker-compose.yml -f docker-compose.gpu.override.yml up -d --build --force-recreate rtservice
+    # For Docker Desktop on Windows this typically requires:
+    # - WSL2 backend
+    # - NVIDIA drivers installed on the host
+    # - nvidia-container-toolkit available to Docker
     #
-    # (The override sets `gpus: all` for rtservice.)
+    # gpus: all
     # Persist HF caches so the *first* startup is slow, subsequent restarts are fast.
     volumes:
       - nanosamurai_hf_cache:/data/hf_cache
