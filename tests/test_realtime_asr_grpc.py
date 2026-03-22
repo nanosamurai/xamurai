@@ -210,6 +210,55 @@ def test_realtime_asr_stream(grpc_channel):
 
 
 @pytest.mark.integration
+def test_realtime_asr_stream_emits_partial_and_final(grpc_channel):
+    """Plan C regression test: rtservice should emit PARTIAL updates before FINAL.
+
+    We don't assert exact timings (wall clock) because inference cost varies.
+    Instead, we send enough audio for at least one partial emission and at
+    least one finalized window.
+    """
+
+    stub = stream_pb2_grpc.RealtimeASRStub(grpc_channel)
+
+    wav_path = Path(__file__).parent / "data" / "test_cs.wav"
+    audio = load_audio_mono_16k(wav_path)
+
+    # Send only a short prefix to keep the test runtime bounded.
+    # Default rtservice window is 5s, so 6s is enough to finalize at least one window.
+    audio = audio[: int(6.0 * SR)]
+
+    events: List[stream_pb2.AsrEvent] = list(stub.Stream(gen_chunks("test-grpc-partial", audio, lang="cs")))
+    assert events, "Expected some AsrEvents"
+
+    partial_idx = [i for i, e in enumerate(events) if e.type == stream_pb2.PARTIAL and e.text.strip()]
+    final_idx = [i for i, e in enumerate(events) if e.type == stream_pb2.FINAL and e.text.strip()]
+
+    assert partial_idx, "Expected at least one PARTIAL AsrEvent"
+    assert final_idx, "Expected at least one FINAL AsrEvent"
+    assert min(partial_idx) < min(final_idx), "Expected PARTIAL to arrive before FINAL"
+
+
+@pytest.mark.integration
+def test_realtime_asr_stream_emits_multiple_finals_for_full_wav(grpc_channel):
+    """Regression: rtservice should not drop most of the WAV.
+
+    Historically we observed that only 1 FINAL might be emitted for a full WAV,
+    due to window gating + diarization segment ownership/deduping.
+    This test asserts we emit multiple FINALs for the full 20s test file.
+    """
+
+    stub = stream_pb2_grpc.RealtimeASRStub(grpc_channel)
+
+    wav_path = Path(__file__).parent / "data" / "test_cs.wav"
+    audio = load_audio_mono_16k(wav_path)
+
+    events: List[stream_pb2.AsrEvent] = list(stub.Stream(gen_chunks("test-grpc-multi-final", audio, lang="cs")))
+    finals = [e for e in events if e.type == stream_pb2.FINAL and e.text.strip()]
+    # With 5s windows and overlap, we should get several FINALs.
+    assert len(finals) >= 3, f"Expected >=3 FINAL AsrEvents for full WAV, got {len(finals)}"
+
+
+@pytest.mark.integration
 @pytest.mark.skipif(not _HAS_HF_TOKEN, reason="requires HF_TOKEN")
 @pytest.mark.skipif(not _HAS_BOTO3, reason="boto3 not installed")
 def test_realtime_asr_stream_s3_enrollment(localstack_s3, tmp_path):

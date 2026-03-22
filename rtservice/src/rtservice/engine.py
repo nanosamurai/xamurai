@@ -92,8 +92,37 @@ def _bool_env(name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 SR = 16000
-WINDOW_SEC = 5.0
-OVERLAP_SEC = 0.5
+
+# Windowing defaults are configurable via env for deployment tuning.
+WINDOW_SEC = float(os.getenv("RT_WINDOW_SEC", "5.0"))
+OVERLAP_SEC = float(os.getenv("RT_OVERLAP_SEC", "0.5"))
+
+# Cumulative refinement: emit partial hypotheses on shorter cadence.
+PARTIAL_ENABLE = _bool_env("RT_PARTIAL_ENABLE") if os.getenv("RT_PARTIAL_ENABLE") is not None else True
+EMIT_EVERY_SEC = float(os.getenv("RT_EMIT_EVERY_SEC", "0.7"))
+
+# Partial stability: require the same hypothesis to appear N times before emitting.
+# Default is 1 so PARTIALs flow freely; set >1 if you want extra stability.
+PARTIAL_STABILITY_REPEATS = int(os.getenv("RT_PARTIAL_STABILITY_REPEATS", "1"))
+
+# Minimum audio duration before we emit any PARTIAL.
+# Keep this low for responsiveness, but non-zero to avoid very-early hallucinations.
+PARTIAL_MIN_BUFFER_SEC = float(os.getenv("RT_PARTIAL_MIN_BUFFER_SEC", "0.7"))
+
+# When emitting PARTIAL, transcribe only the trailing lookback chunk instead of
+# the full (growing) window. This makes PARTIALs "small" and more realtime.
+PARTIAL_LOOKBACK_SEC = float(os.getenv("RT_PARTIAL_LOOKBACK_SEC", "2.0"))
+
+# PARTIAL mode:
+# - cumulative: transcribe from window start to now (monotonic growth; UI can replace)
+# - tail: transcribe only a trailing lookback window (cheaper but non-cumulative)
+PARTIAL_MODE = os.getenv("RT_PARTIAL_MODE", "cumulative").strip().lower() or "cumulative"
+
+# Minimum duration we will actually run ASR on for PARTIAL emission.
+# Faster-Whisper on extremely short audio tends to hallucinate.
+PARTIAL_MIN_TRANSCRIBE_SEC = float(os.getenv("RT_PARTIAL_MIN_TRANSCRIBE_SEC", "1.5"))
+
+# Kept for reference (most code should use RealtimeConfig.hop_sec)
 HOP_SEC = WINDOW_SEC - OVERLAP_SEC
 
 DEFAULT_LANG = os.getenv("FW_LANG_DEFAULT", None)  # per-session override still possible
@@ -150,6 +179,13 @@ class RealtimeConfig:
     sr: int = SR
     window_sec: float = WINDOW_SEC
     overlap_sec: float = OVERLAP_SEC
+    partial_enable: bool = PARTIAL_ENABLE
+    emit_every_sec: float = EMIT_EVERY_SEC
+    partial_stability_repeats: int = PARTIAL_STABILITY_REPEATS
+    partial_min_buffer_sec: float = PARTIAL_MIN_BUFFER_SEC
+    partial_lookback_sec: float = PARTIAL_LOOKBACK_SEC
+    partial_mode: str = PARTIAL_MODE
+    partial_min_transcribe_sec: float = PARTIAL_MIN_TRANSCRIBE_SEC
     finalize_min_dur_sec: float = FINALIZE_MIN_DUR_SEC
     key_resolution_sec: float = KEY_RES
 
@@ -165,6 +201,28 @@ class RealtimeConfig:
     def hop_samples(self) -> int:
         return int(round(self.hop_sec * self.sr))
 
+    @property
+    def emit_every_samples(self) -> int:
+        # Avoid pathological configs.
+        sec = max(0.05, float(self.emit_every_sec))
+        return int(round(sec * self.sr))
+
+    @property
+    def partial_min_buffer_samples(self) -> int:
+        sec = max(0.0, float(self.partial_min_buffer_sec))
+        return int(round(sec * self.sr))
+
+    @property
+    def partial_lookback_samples(self) -> int:
+        # Keep within a window.
+        sec = max(0.1, float(self.partial_lookback_sec))
+        return min(self.window_samples, int(round(sec * self.sr)))
+
+    @property
+    def partial_min_transcribe_samples(self) -> int:
+        sec = max(0.0, float(self.partial_min_transcribe_sec))
+        return int(round(sec * self.sr))
+
 
 @dataclass
 class SessionState:
@@ -176,6 +234,16 @@ class SessionState:
     emitted_keys: Set[Tuple[float, float, str]]
     last_activity_s: float
     lock: threading.Lock
+    # Cumulative refinement tracking (monotonic per session).
+    total_samples_ingested: int
+    last_partial_emit_at_samples: int
+    last_partial_text: str
+    pending_partial_text: str
+    pending_partial_repeats: int
+
+    # Signature of the realtime config used for this session. If a client changes
+    # per-session overrides mid-stream, we reset the session state.
+    cfg_key: Optional[Tuple[object, ...]]
 
     @staticmethod
     def new(now_s: float) -> "SessionState":
@@ -186,6 +254,12 @@ class SessionState:
             emitted_keys=set(),
             last_activity_s=now_s,
             lock=threading.Lock(),
+            total_samples_ingested=0,
+            last_partial_emit_at_samples=0,
+            last_partial_text="",
+            pending_partial_text="",
+            pending_partial_repeats=0,
+            cfg_key=None,
         )
 
 
@@ -195,6 +269,9 @@ class SessionState:
 
 DiarSeg = Dict[str, object]  # {start: float, end: float, speaker: str}
 
+# Gate functions for realtime processing.
+# - partial_gate_fn: typically RMS + VAD (avoid hallucinated partials)
+# - window_gate_fn: typically RMS-only (avoid dropping content due to VAD misses)
 GateFn = Callable[[np.ndarray], bool]
 DiarizeFn = Callable[[np.ndarray], List[DiarSeg]]
 AsrFn = Callable[[np.ndarray, Optional[str]], str]
@@ -206,13 +283,15 @@ class RealtimeSessionProcessor:
         self,
         *,
         cfg: RealtimeConfig,
-        gate_fn: GateFn,
+        partial_gate_fn: GateFn,
+        window_gate_fn: Optional[GateFn] = None,
         diarize_fn: DiarizeFn,
         asr_fn: AsrFn,
         map_speaker_fn: MapSpeakerFn,
     ) -> None:
         self._cfg = cfg
-        self._gate_fn = gate_fn
+        self._partial_gate_fn = partial_gate_fn
+        self._window_gate_fn = window_gate_fn or partial_gate_fn
         self._diarize_fn = diarize_fn
         self._asr_fn = asr_fn
         self._map_speaker_fn = map_speaker_fn
@@ -229,11 +308,29 @@ class RealtimeSessionProcessor:
         cfg = self._cfg
         effective_lang = lang
 
+        is_flush = (pcm16 is None) or (len(pcm16) == 0)
+
         x = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
         out: List[AsrResult] = []
 
         # ingest
         state.buf = np.concatenate([state.buf, x])
+        state.total_samples_ingested += int(x.size)
+
+        # Emit low-latency partial updates as audio accumulates, before we have a full window.
+        # This uses ASR-only (no diarization) in phase 1 to keep it cheaper.
+        #
+        # IMPORTANT: do not emit partials when the caller is flushing (empty chunk)
+        # because that would produce confusing late PARTIALs.
+        if cfg.partial_enable and not is_flush:
+            out.extend(
+                self._maybe_emit_partial(
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                    state=state,
+                    lang=effective_lang,
+                )
+            )
 
         # process
         while state.buf.size >= cfg.window_samples:
@@ -241,8 +338,19 @@ class RealtimeSessionProcessor:
             window_offset = state.base_offset_sec
             my_idx = state.window_index
 
-            if self._gate_fn(window):
-                diar_segs = self._diarize_fn(window)
+            emitted_any_final_for_window = False
+
+            # We keep two separate gates:
+            # - window gate: avoid dropping windows entirely (RMS-only in prod)
+            # - partial/speech gate: uses VAD to decide whether diarization is worth running
+            if self._window_gate_fn(window):
+                # For FINALs we should not suppress diarization based on VAD.
+                # VAD misses cause speaker labels to disappear which is worse than
+                # a bit of extra compute.
+                try:
+                    diar_segs = self._diarize_fn(window)
+                except Exception:
+                    diar_segs = []
 
                 for d in diar_segs:
                     seg_start = float(d.get("start") or 0.0)
@@ -292,13 +400,194 @@ class RealtimeSessionProcessor:
                                 speaker=label,
                             )
                         )
+                        emitted_any_final_for_window = True
+
+                # Fallback: if diarization returns no usable FINAL segments (either because
+                # diarization yielded nothing, or because all segments were filtered out by
+                # duration/ownership/deduping), still emit a single FINAL for the full
+                # window. This avoids the confusing behavior where clients see PARTIALs
+                # but never get a FINAL for that window.
+                if not emitted_any_final_for_window:
+                    logger.info(
+                        "rtservice: FINAL fallback (no diar segments) tenant=%s session=%s window_offset=%.3f idx=%d",
+                        tenant_id,
+                        session_id,
+                        float(window_offset),
+                        int(my_idx),
+                    )
+                    text = self._asr_fn(window, effective_lang)
+                    text = (text or "").strip()
+                    if text:
+                        out.append(
+                            AsrResult(
+                                start_s=float(window_offset),
+                                end_s=float(window_offset + cfg.window_sec),
+                                text=text,
+                                is_final=True,
+                                lang=effective_lang,
+                                speaker=None,
+                            )
+                        )
 
             # slide
             state.buf = state.buf[cfg.hop_samples :]
             state.base_offset_sec += cfg.hop_samples / cfg.sr
             state.window_index += 1
 
+            # Partial emission should start fresh per window.
+            state.last_partial_text = ""
+            state.pending_partial_text = ""
+            state.pending_partial_repeats = 0
+
+            # After sliding, we may again be in an "incomplete window" state;
+            # allow partial emission for the new window as it accumulates.
+            if cfg.partial_enable and not is_flush:
+                out.extend(
+                    self._maybe_emit_partial(
+                        tenant_id=tenant_id,
+                        session_id=session_id,
+                        state=state,
+                        lang=effective_lang,
+                    )
+                )
+
+        # End-of-stream flush: when the client sends an empty chunk (or we get an empty
+        # buffer), finalize the remaining tail (shorter than window_sec) as a FINAL.
+        # This ensures we don't drop the last ~overlap chunk of the stream.
+        if is_flush and state.buf.size >= int(cfg.finalize_min_dur_sec * cfg.sr):
+            try:
+                if self._window_gate_fn(state.buf):
+                    buf = state.buf
+                    # Cap to window_samples in case callers flush while having >1 window.
+                    if buf.size > cfg.window_samples:
+                        buf = buf[: cfg.window_samples]
+                    text = self._asr_fn(buf, effective_lang)
+                    text = (text or "").strip()
+                    if text:
+                        s_abs = float(state.base_offset_sec)
+                        e_abs = float(state.base_offset_sec + (buf.size / cfg.sr))
+                        out.append(
+                            AsrResult(
+                                start_s=s_abs,
+                                end_s=e_abs,
+                                text=text,
+                                is_final=True,
+                                lang=effective_lang,
+                                speaker=None,
+                            )
+                        )
+            except Exception:
+                logger.warning("rtservice: tail flush failed", exc_info=True)
+
+            # Prevent emitting the tail repeatedly if multiple flush chunks arrive.
+            state.buf = np.zeros(0, dtype=np.float32)
+            state.pending_partial_text = ""
+            state.pending_partial_repeats = 0
+
         return out
+
+    def _maybe_emit_partial(
+        self,
+        *,
+        tenant_id: str,
+        session_id: str,
+        state: SessionState,
+        lang: Optional[str],
+    ) -> List[AsrResult]:
+        cfg = self._cfg
+
+        # Need a bit of audio before we can emit anything meaningful.
+        if state.buf.size < int(cfg.finalize_min_dur_sec * cfg.sr):
+            return []
+
+        # Avoid very-early hallucinated partials.
+        if state.buf.size < cfg.partial_min_buffer_samples:
+            return []
+
+        # If we already have a full window available, we'll emit finals via the
+        # normal path. Avoid producing redundant PARTIALs here.
+        if state.buf.size >= cfg.window_samples:
+            return []
+
+        # Rate-limit partials by an ingestion-based monotonic clock.
+        # This remains stable even if the rolling buffer slides.
+        if (state.total_samples_ingested - state.last_partial_emit_at_samples) < cfg.emit_every_samples:
+            return []
+
+        # ASR-only partial.
+        # NOTE: we do not include diarization/speaker mapping in partials.
+        buf = state.buf
+        if buf.size > cfg.window_samples:
+            buf = buf[: cfg.window_samples]
+
+        # Mode controls what audio we transcribe for PARTIAL.
+        mode = (cfg.partial_mode or "cumulative").strip().lower()
+        if mode == "tail":
+            lookback_n = int(cfg.partial_lookback_samples)
+            if buf.size > lookback_n:
+                buf_for_partial = buf[-lookback_n:]
+                s_abs = float(state.base_offset_sec + (buf.size - lookback_n) / cfg.sr)
+            else:
+                buf_for_partial = buf
+                s_abs = float(state.base_offset_sec)
+        else:
+            # cumulative (default): stable start (window start), growing end.
+            buf_for_partial = buf
+            s_abs = float(state.base_offset_sec)
+
+        # Avoid running ASR on extremely short audio.
+        if buf_for_partial.size < cfg.partial_min_transcribe_samples:
+            return []
+
+        # Only emit partials when there's likely speech.
+        # gate_fn uses RMS + optional VAD. Gate the same chunk we plan to
+        # transcribe so silence earlier in the window doesn't suppress updates.
+        try:
+            if not self._partial_gate_fn(buf_for_partial):
+                state.last_partial_emit_at_samples = state.total_samples_ingested
+                return []
+        except Exception:
+            # Never let partial gating break the stream.
+            pass
+
+        text = self._asr_fn(buf_for_partial, lang)
+        state.last_partial_emit_at_samples = state.total_samples_ingested
+
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        # De-spam identical repeats.
+        if text == state.last_partial_text:
+            return []
+
+        # Stability filter: only emit when we see the same hypothesis repeatedly.
+        # This helps avoid very-early hallucinations on short buffers.
+        repeats = int(cfg.partial_stability_repeats)
+        if repeats > 1:
+            if text == state.pending_partial_text:
+                state.pending_partial_repeats += 1
+            else:
+                state.pending_partial_text = text
+                state.pending_partial_repeats = 1
+
+            if state.pending_partial_repeats < repeats:
+                return []
+
+        state.last_partial_text = text
+
+        e_abs = float(state.base_offset_sec + (buf.size / cfg.sr))
+
+        return [
+            AsrResult(
+                start_s=s_abs,
+                end_s=e_abs,
+                text=text,
+                is_final=False,
+                lang=lang,
+                speaker=None,
+            )
+        ]
 
 
 def _round_time(t: float, resolution: float) -> float:
@@ -468,6 +757,18 @@ class RealtimeModelBundle:
         # RMS pre-gate
         rms = float(np.sqrt(np.mean(window * window)) + 1e-12)
         if rms < 3e-5:
+            return False
+        return True
+
+    def gate_speech(self, window: np.ndarray) -> bool:
+        """Speech gate for PARTIALs / diarization.
+
+        This is intentionally stricter than `gate_window` because we use VAD to
+        avoid hallucinated partials and to avoid doing expensive diarization
+        work on windows that look like silence.
+        """
+
+        if not self.gate_window(window):
             return False
 
         if not USE_SILERO_VAD or self._vad_model is None:
@@ -755,18 +1056,44 @@ class RealtimeEngine:
         self._last_evict_scan_s = 0.0
 
         self._model_bundle = model_bundle
-        if processor is not None:
-            self._processor = processor
-        else:
+
+        # In unit tests we often inject a lightweight processor; in that case we
+        # keep behavior fixed and ignore per-session config overrides.
+        self._fixed_processor: Optional[RealtimeSessionProcessor] = processor
+
+        if self._fixed_processor is None:
             if self._model_bundle is None:
                 self._model_bundle = RealtimeModelBundle(cfg=self.cfg)
-            self._processor = RealtimeSessionProcessor(
+
+            self._processors_lock = threading.Lock()
+            self._processors_by_key: Dict[Tuple[object, ...], RealtimeSessionProcessor] = {}
+            # Ensure default processor is created.
+            _p = RealtimeSessionProcessor(
                 cfg=self.cfg,
-                gate_fn=self._model_bundle.gate_window,
+                partial_gate_fn=self._model_bundle.gate_speech,
+                window_gate_fn=self._model_bundle.gate_window,
                 diarize_fn=self._model_bundle.diarize_window,
                 asr_fn=self._model_bundle.asr_text,
                 map_speaker_fn=self._model_bundle.map_speaker_label,
             )
+            self._processors_by_key[self._cfg_key(self.cfg)] = _p
+
+        # Log the effective default PARTIAL configuration at startup. This is
+        # critical for debugging "why did I get hallucinated partials" issues
+        # (often caused by stale images / unexpected env overrides).
+        logger.info(
+            "rtservice partial defaults: mode=%s enable=%s emit_every=%.3fs window=%.3fs overlap=%.3fs "
+            "min_buffer=%.3fs lookback=%.3fs min_transcribe=%.3fs stability_repeats=%d",
+            str(self.cfg.partial_mode),
+            bool(self.cfg.partial_enable),
+            float(self.cfg.emit_every_sec),
+            float(self.cfg.window_sec),
+            float(self.cfg.overlap_sec),
+            float(self.cfg.partial_min_buffer_sec),
+            float(self.cfg.partial_lookback_sec),
+            float(self.cfg.partial_min_transcribe_sec),
+            int(self.cfg.partial_stability_repeats),
+        )
 
         logger.info(
             "RealtimeEngine ready: SR=%d WINDOW=%.2fs HOP=%.2fs default_lang=%s",
@@ -783,6 +1110,9 @@ class RealtimeEngine:
         *,
         lang: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        rt_window_sec: Optional[float] = None,
+        rt_overlap_sec: Optional[float] = None,
+        rt_emit_every_sec: Optional[float] = None,
     ) -> List[AsrResult]:
         """Feed PCM16 audio bytes for a session.
 
@@ -805,16 +1135,132 @@ class RealtimeEngine:
                 state = SessionState.new(now)
                 self._sessions[key] = state
 
+        # Resolve processor/config (default or per-session overrides).
+        proc = self._fixed_processor
+        cfg_key = None
+        if proc is None:
+            cfg = self._effective_cfg(
+                base=self.cfg,
+                rt_window_sec=rt_window_sec,
+                rt_overlap_sec=rt_overlap_sec,
+                rt_emit_every_sec=rt_emit_every_sec,
+            )
+            cfg_key = self._cfg_key(cfg)
+            proc = self._get_or_create_processor(cfg, cfg_key)
+
         # Per-session lock for correctness under concurrent sessions.
         with state.lock:
             state.last_activity_s = now
-            return self._processor.process(
+
+            # If per-session overrides changed mid-stream, reset session state.
+            if cfg_key is not None and state.cfg_key is not None and state.cfg_key != cfg_key:
+                logger.warning(
+                    "rtservice: session config changed mid-stream; resetting session state tenant=%s session=%s",
+                    tid,
+                    sid,
+                )
+                st2 = SessionState.new(now)
+                st2.cfg_key = cfg_key
+                self._sessions[key] = st2
+                state = st2
+            elif cfg_key is not None and state.cfg_key is None:
+                state.cfg_key = cfg_key
+
+            return proc.process(
                 tenant_id=tid,
                 session_id=sid,
                 state=state,
                 pcm16=pcm16,
                 lang=effective_lang,
             )
+
+    @staticmethod
+    def _cfg_key(cfg: RealtimeConfig) -> Tuple[object, ...]:
+        # Float stability: round to millisecond-ish precision.
+        def r(x: float) -> float:
+            return round(float(x), 6)
+
+        return (
+            int(cfg.sr),
+            r(cfg.window_sec),
+            r(cfg.overlap_sec),
+            bool(cfg.partial_enable),
+            r(cfg.emit_every_sec),
+            int(cfg.partial_stability_repeats),
+            r(cfg.partial_min_buffer_sec),
+            r(cfg.partial_lookback_sec),
+            str(getattr(cfg, "partial_mode", "cumulative")),
+            r(cfg.partial_min_transcribe_sec),
+            r(cfg.finalize_min_dur_sec),
+            r(cfg.key_resolution_sec),
+        )
+
+    def _effective_cfg(
+        self,
+        *,
+        base: RealtimeConfig,
+        rt_window_sec: Optional[float],
+        rt_overlap_sec: Optional[float],
+        rt_emit_every_sec: Optional[float],
+    ) -> RealtimeConfig:
+        # Validate and apply per-session overrides.
+        win = float(rt_window_sec) if rt_window_sec is not None else base.window_sec
+        ov = float(rt_overlap_sec) if rt_overlap_sec is not None else base.overlap_sec
+        emit = float(rt_emit_every_sec) if rt_emit_every_sec is not None else base.emit_every_sec
+
+        # Basic sanity. We keep ranges permissive and let operators enforce tighter
+        # policies in the BFF.
+        if not np.isfinite(win) or win <= 0.1:
+            win = base.window_sec
+        if not np.isfinite(ov) or ov < 0.0 or ov >= win:
+            ov = base.overlap_sec
+        if not np.isfinite(emit) or emit <= 0.0:
+            emit = base.emit_every_sec
+        if emit > win:
+            emit = win
+
+        return RealtimeConfig(
+            sr=base.sr,
+            window_sec=win,
+            overlap_sec=ov,
+            partial_enable=base.partial_enable,
+            emit_every_sec=emit,
+            partial_stability_repeats=base.partial_stability_repeats,
+            partial_min_buffer_sec=base.partial_min_buffer_sec,
+            partial_lookback_sec=base.partial_lookback_sec,
+            partial_mode=base.partial_mode,
+            partial_min_transcribe_sec=base.partial_min_transcribe_sec,
+            finalize_min_dur_sec=base.finalize_min_dur_sec,
+            key_resolution_sec=base.key_resolution_sec,
+        )
+
+    def _get_or_create_processor(
+        self,
+        cfg: RealtimeConfig,
+        cfg_key: Tuple[object, ...],
+    ) -> RealtimeSessionProcessor:
+        with self._processors_lock:
+            p = self._processors_by_key.get(cfg_key)
+            if p is not None:
+                return p
+
+            assert self._model_bundle is not None
+            p = RealtimeSessionProcessor(
+                cfg=cfg,
+                partial_gate_fn=self._model_bundle.gate_speech,
+                window_gate_fn=self._model_bundle.gate_window,
+                diarize_fn=self._model_bundle.diarize_window,
+                asr_fn=self._model_bundle.asr_text,
+                map_speaker_fn=self._model_bundle.map_speaker_label,
+            )
+            self._processors_by_key[cfg_key] = p
+            logger.info(
+                "rtservice: created new processor for per-session cfg window=%.3fs overlap=%.3fs emit=%.3fs",
+                cfg.window_sec,
+                cfg.overlap_sec,
+                cfg.emit_every_sec,
+            )
+            return p
 
     def to_asr_events(self, session_id: str, r: AsrResult) -> stream_pb2.AsrEvent:
         return stream_pb2.AsrEvent(
