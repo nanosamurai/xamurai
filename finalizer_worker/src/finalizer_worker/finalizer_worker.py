@@ -11,7 +11,7 @@ from typing import Optional
 from confluent_kafka import Consumer, Producer, KafkaException
 
 from proto_gen import stream_pb2
-from whisperx_worker.whisperx_worker import run_whisperx_diarized
+from whisperx_worker.whisperx_worker import run_whisperx_diarized_words
 
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
@@ -201,6 +201,14 @@ def _save_transcript_json(transcript: stream_pb2.SessionTranscript) -> Optional[
                 "end_s": seg.end_s,
                 "text": seg.text,
                 "speaker": seg.speaker,
+                "words": [
+                    {
+                        "start_s": w.start_s,
+                        "end_s": w.end_s,
+                        "text": w.text,
+                    }
+                    for w in seg.words
+                ],
             }
             for seg in transcript.segments
         ],
@@ -394,7 +402,7 @@ def main():
 
                     # Full-session WhisperX with alignment + optional diarization/enrollment.
                     # Enrollment backend is configured via env (ENROLL_BACKEND=...).
-                    full_text, segments = run_whisperx_diarized(
+                    full_text, segments = run_whisperx_diarized_words(
                         wav_path,
                         tenant=(rf.tenant_id or None),
                         lang=(rf.lang or None),
@@ -411,12 +419,17 @@ def main():
                         created_at_ns=rf.created_at_ns,
                     )
 
-                    for (s0, s1, text, speaker) in segments:
+                    for seg_in in segments:
                         seg = transcript.segments.add()
-                        seg.start_s = s0
-                        seg.end_s = s1
-                        seg.text = text
-                        seg.speaker = speaker or ""
+                        seg.start_s = float(seg_in.get("start_s", 0.0))
+                        seg.end_s = float(seg_in.get("end_s", 0.0))
+                        seg.text = str(seg_in.get("text", "") or "")
+                        seg.speaker = str(seg_in.get("speaker", "") or "")
+                        for w_in in (seg_in.get("words") or []):
+                            w = seg.words.add()
+                            w.start_s = float(w_in.get("start_s", 0.0))
+                            w.end_s = float(w_in.get("end_s", 0.0))
+                            w.text = str(w_in.get("text", "") or "")
 
                     # 1) Persist JSON next to WAV
                     _ = _save_transcript_json(transcript)
