@@ -192,6 +192,11 @@ def test_finalizer_worker_writes_json_and_emits_event(
     assert ft.recording_url == recording_url
     assert len(ft.segments) > 0
 
+    # Word-level timings should be present when alignment runs.
+    # (In rare cases alignment may fall back; in that case this assertion may be too strict.
+    # If it becomes flaky in CI, we can relax it to "field exists".)
+    assert any(len(s.words) > 0 for s in ft.segments), "Expected at least one segment with word timings"
+
 
 @pytest.mark.timeout(1200)
 @pytest.mark.integration
@@ -337,3 +342,5 @@ def test_finalizer_worker_s3_enrollment_speaker_labels(
     assert ft is not None, "Did not receive SessionTranscript"
     speakers = {s.speaker for s in ft.segments if s.speaker}
     assert "Miro-cz" in speakers, f"Expected Miro-cz in speakers, got {sorted(speakers)}"
+
+    assert any(len(s.words) > 0 for s in ft.segments), "Expected at least one segment with word timings"

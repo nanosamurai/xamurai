@@ -3,6 +3,8 @@
 import grpc
 import warnings
 
+# NOTE: `proto_gen` is imported as a Python package (e.g. `from proto_gen import stream_pb2_grpc`).
+# The generated gRPC stubs must therefore import the sibling module package-relatively.
 from . import stream_pb2 as stream__pb2
 
 GRPC_GENERATED_VERSION = '1.76.0'

@@ -3,7 +3,7 @@ import os
 import tempfile
 import threading
 from collections import defaultdict, deque
-from typing import Deque, Dict, List, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Deque, Dict, List, Optional, TYPE_CHECKING, Tuple, TypedDict
 
 import numpy as np
 import soundfile as sf
@@ -573,6 +573,296 @@ def run_whisperx_diarized(
     return full_text, out
 
 
+class WordTiming(TypedDict):
+    start_s: float
+    end_s: float
+    text: str
+
+
+class SegmentTiming(TypedDict):
+    start_s: float
+    end_s: float
+    text: str
+    words: List[WordTiming]
+
+
+class DiarizedSegmentTiming(SegmentTiming):
+    speaker: str
+
+
+def _extract_word_timings(seg: Dict[str, Any]) -> List[WordTiming]:
+    """Normalize WhisperX `align()` segment words into a stable shape.
+
+    WhisperX returns words as objects like:
+      {"word": "hello", "start": 1.23, "end": 1.45, ...}
+
+    Some words may have missing timestamps (start/end None) → we skip them.
+    """
+
+    out: List[WordTiming] = []
+    raw_words = seg.get("words") or []
+    if not isinstance(raw_words, list):
+        return out
+
+    for w in raw_words:
+        if not isinstance(w, dict):
+            continue
+        s = w.get("start")
+        e = w.get("end")
+        if s is None or e is None:
+            continue
+        txt = (w.get("word") or w.get("text") or "").strip()
+        if not txt:
+            continue
+        try:
+            out.append({"start_s": float(s), "end_s": float(e), "text": txt})
+        except Exception:
+            continue
+
+    return out
+
+
+def run_whisperx_words(
+    wav_path: str,
+    lang: Optional[str] = None,
+    use_alignment: bool = False,
+    alignment_min_coverage: float = 0.7,
+) -> Tuple[str, List[SegmentTiming]]:
+    """Run WhisperX ASR and (optionally) alignment, returning word-level timing.
+
+    This is a superset of `run_whisperx()`:
+    - When `use_alignment=False`, segments will have `words=[]`.
+    - When `use_alignment=True` and WhisperX alignment succeeds, segments will have
+      `words` with per-word start/end.
+
+    Note: returned word timestamps are relative to the input WAV.
+    """
+
+    _init_whisperx(lang_hint=lang)
+
+    try:
+        audio = whisperx.load_audio(wav_path)
+    except FileNotFoundError:
+        logger.warning(
+            "ffmpeg not found while loading %s; falling back to soundfile WAV loader",
+            wav_path,
+        )
+        audio, _sr = sf.read(wav_path, dtype="float32")
+
+    logger.info(
+        "WhisperX: transcribing %s (lang=%s, use_alignment=%s)",
+        wav_path,
+        lang or "auto",
+        use_alignment,
+    )
+
+    if lang:
+        try:
+            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
+        except IndexError:
+            logger.info("WhisperX: no active speech detected (lang=%s)", lang)
+            return "", []
+    else:
+        try:
+            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
+        except IndexError:
+            logger.info("WhisperX: no active speech detected")
+            return "", []
+
+    detected_lang = result.get("language", lang or "unknown")
+    logger.debug("WhisperX: detected language=%s", detected_lang)
+
+    asr_segments = result.get("segments", []) or []
+
+    def from_asr_segments() -> Tuple[str, List[SegmentTiming]]:
+        segs_out: List[SegmentTiming] = []
+        words_out: List[str] = []
+        for seg in asr_segments:
+            s0 = float(seg.get("start", 0.0))
+            s1 = float(seg.get("end", 0.0))
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+            segs_out.append({"start_s": s0, "end_s": s1, "text": text, "words": []})
+            words_out.append(text)
+        full = " ".join(words_out).strip()
+        logger.info(
+            "WhisperX (no align): %d segments, total_text_len=%d",
+            len(segs_out),
+            len(full),
+        )
+        return full, segs_out
+
+    if not use_alignment:
+        return from_asr_segments()
+
+    try:
+        _ensure_align_model(detected_lang)
+        aligned = whisperx.align(
+            asr_segments,
+            _ALIGN_MODEL,
+            _ALIGN_METADATA,
+            audio,
+            _WHISPERX_DEVICE,
+            return_char_alignments=False,
+        )
+
+        aligned_segments = aligned.get("segments", []) or []
+
+        def total_duration(segs: List[Dict[str, Any]]) -> float:
+            return sum(
+                max(0.0, float(s.get("end", 0.0)) - float(s.get("start", 0.0))) for s in segs
+            )
+
+        asr_cov = total_duration(asr_segments)
+        aln_cov = total_duration(aligned_segments)
+        coverage_ratio = (aln_cov / asr_cov) if asr_cov > 0 else 1.0
+
+        if asr_cov > 0 and coverage_ratio < alignment_min_coverage:
+            logger.warning(
+                "WhisperX alignment coverage too low: %.2f (ASR=%.2fs, aligned=%.2fs). Falling back.",
+                coverage_ratio,
+                asr_cov,
+                aln_cov,
+            )
+            return from_asr_segments()
+
+        segs_out: List[SegmentTiming] = []
+        texts_out: List[str] = []
+
+        for seg in aligned_segments:
+            s0 = float(seg.get("start", 0.0))
+            s1 = float(seg.get("end", 0.0))
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+            words = _extract_word_timings(seg)
+            segs_out.append({"start_s": s0, "end_s": s1, "text": text, "words": words})
+            texts_out.append(text)
+
+        full = " ".join(texts_out).strip()
+        logger.info(
+            "WhisperX (aligned): %d segments, total_text_len=%d, coverage_ratio=%.2f",
+            len(segs_out),
+            len(full),
+            coverage_ratio,
+        )
+        return full, segs_out
+
+    except Exception as e:
+        logger.warning("WhisperX alignment failed (%s); falling back.", e)
+        return from_asr_segments()
+
+
+def run_whisperx_diarized_words(
+    wav_path: str,
+    *,
+    tenant: Optional[str],
+    lang: Optional[str],
+    use_alignment: bool,
+) -> Tuple[str, List[DiarizedSegmentTiming]]:
+    """Like `run_whisperx_diarized`, but returns segments with word-level timestamps."""
+
+    _init_diarization_models()
+
+    full_text, segs = run_whisperx_words(
+        wav_path,
+        lang=lang,
+        use_alignment=use_alignment,
+    )
+
+    # If diarization isn't available, still return segments (speaker empty).
+    if not _ENABLE_DIARIZATION or _DIAR_PIPE is None or _EMBED_INFER is None:
+        return full_text, [
+            {"start_s": s["start_s"], "end_s": s["end_s"], "text": s["text"], "speaker": "", "words": s["words"]}
+            for s in segs
+        ]
+
+    _ensure_whisperx_imported()
+    try:
+        audio = whisperx.load_audio(wav_path)
+    except FileNotFoundError:
+        audio, _sr = sf.read(wav_path, dtype="float32")
+
+    if isinstance(audio, np.ndarray) and audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+
+    diar = _diarize_audio(audio)
+    if not diar:
+        return full_text, [
+            {"start_s": s["start_s"], "end_s": s["end_s"], "text": s["text"], "speaker": "", "words": s["words"]}
+            for s in segs
+        ]
+
+    asr_time_segs = [TimeSegment(start_s=s["start_s"], end_s=s["end_s"]) for s in segs]
+    diar_speakers = assign_speaker_by_overlap(
+        segments=asr_time_segs,
+        diarization=diar,
+        default_speaker="",
+        min_coverage=0.1,
+    )
+
+    assigned = sum(1 for s in diar_speakers if s)
+    logger.info(
+        "Overlap assignment: asr_segments=%d assigned=%d unique=%d",
+        len(asr_time_segs),
+        assigned,
+        len(set(diar_speakers)),
+    )
+
+    enrolled = _get_enrolled_embeddings_for_tenant(tenant)
+    logger.info(
+        "Enrollment snapshot: tenant=%s labels=%d",
+        (tenant or "default"),
+        len(enrolled),
+    )
+
+    cluster_map: Dict[str, str] = {}
+    if enrolled:
+        unique_clusters = sorted({s for s in diar_speakers if s})
+        for cluster in unique_clusters:
+            chunks = []
+            for d in diar:
+                if d.speaker != cluster:
+                    continue
+                s_idx = int(max(0.0, d.start_s) * SR)
+                e_idx = int(min(float(audio.size) / SR, d.end_s) * SR)
+                if e_idx > s_idx:
+                    chunks.append(audio[s_idx:e_idx])
+
+            if not chunks:
+                continue
+
+            wave = np.concatenate(chunks)
+            max_samples = int(10.0 * SR)
+            if wave.size > max_samples:
+                wave = wave[:max_samples]
+
+            emb = _embed_wave(wave)
+            if emb is None:
+                continue
+
+            mapped = _map_embedding_to_enrolled_label(emb, enrolled)
+            if mapped:
+                cluster_map[cluster] = mapped
+
+    out: List[DiarizedSegmentTiming] = []
+    for (seg, cluster) in zip(segs, diar_speakers):
+        speaker = cluster_map.get(cluster) or cluster or ""
+        out.append(
+            {
+                "start_s": seg["start_s"],
+                "end_s": seg["end_s"],
+                "text": seg["text"],
+                "speaker": speaker,
+                "words": seg["words"],
+            }
+        )
+
+    return full_text, out
+
+
 def _flush_session_partial(
     session_id: str,
     lang_hint: Optional[str],
@@ -796,115 +1086,13 @@ def run_whisperx(
     use_alignment: bool = False,
     alignment_min_coverage: float = 0.7,
 ) -> Tuple[str, List[Tuple[float, float, str, str]]]:
-    _init_whisperx(lang_hint=lang)
-
-    try:
-        audio = whisperx.load_audio(wav_path)
-    except FileNotFoundError:
-        logger.warning(
-            "ffmpeg not found while loading %s; falling back to soundfile WAV loader",
-            wav_path,
-        )
-        audio, _sr = sf.read(wav_path, dtype="float32")
-
-    logger.info(
-        "WhisperX: transcribing %s (lang=%s, use_alignment=%s)",
+    full, segs = run_whisperx_words(
         wav_path,
-        lang or "auto",
-        use_alignment,
+        lang=lang,
+        use_alignment=use_alignment,
+        alignment_min_coverage=alignment_min_coverage,
     )
-
-    if lang:
-        try:
-            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
-        except IndexError:
-            # WhisperX can raise IndexError when VAD finds no active speech and
-            # returns an empty segment list. Treat as "no transcription".
-            logger.info("WhisperX: no active speech detected (lang=%s)", lang)
-            return "", []
-    else:
-        try:
-            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
-        except IndexError:
-            logger.info("WhisperX: no active speech detected")
-            return "", []
-
-    detected_lang = result.get("language", lang or "unknown")
-    logger.debug("WhisperX: detected language=%s", detected_lang)
-
-    asr_segments = result.get("segments", []) or []
-
-    def from_asr_segments():
-        segs_out: List[Tuple[float, float, str, str]] = []
-        words_out: List[str] = []
-        for seg in asr_segments:
-            s0 = float(seg.get("start", 0.0))
-            s1 = float(seg.get("end", 0.0))
-            text = (seg.get("text") or "").strip()
-            if not text:
-                continue
-            segs_out.append((s0, s1, text, ""))
-            words_out.append(text)
-        full = " ".join(words_out).strip()
-        logger.info("WhisperX (no align): %d segments, total_text_len=%d", len(segs_out), len(full))
-        return full, segs_out
-
-    if not use_alignment:
-        return from_asr_segments()
-
-    try:
-        _ensure_align_model(detected_lang)
-        aligned = whisperx.align(
-            asr_segments,
-            _ALIGN_MODEL,
-            _ALIGN_METADATA,
-            audio,
-            _WHISPERX_DEVICE,
-            return_char_alignments=False,
-        )
-
-        aligned_segments = aligned.get("segments", []) or []
-
-        def total_duration(segs):
-            return sum(max(0.0, float(s.get("end", 0.0)) - float(s.get("start", 0.0))) for s in segs)
-
-        asr_cov = total_duration(asr_segments)
-        aln_cov = total_duration(aligned_segments)
-        coverage_ratio = (aln_cov / asr_cov) if asr_cov > 0 else 1.0
-
-        if asr_cov > 0 and coverage_ratio < alignment_min_coverage:
-            logger.warning(
-                "WhisperX alignment coverage too low: %.2f (ASR=%.2fs, aligned=%.2fs). Falling back.",
-                coverage_ratio,
-                asr_cov,
-                aln_cov,
-            )
-            return from_asr_segments()
-
-        segs_out: List[Tuple[float, float, str, str]] = []
-        words_out: List[str] = []
-
-        for seg in aligned_segments:
-            s0 = float(seg.get("start", 0.0))
-            s1 = float(seg.get("end", 0.0))
-            text = (seg.get("text") or "").strip()
-            if not text:
-                continue
-            segs_out.append((s0, s1, text, ""))
-            words_out.append(text)
-
-        full = " ".join(words_out).strip()
-        logger.info(
-            "WhisperX (aligned): %d segments, total_text_len=%d, coverage_ratio=%.2f",
-            len(segs_out),
-            len(full),
-            coverage_ratio,
-        )
-        return full, segs_out
-
-    except Exception as e:
-        logger.warning("WhisperX alignment failed (%s); falling back.", e)
-        return from_asr_segments()
+    return full, [(s["start_s"], s["end_s"], s["text"], "") for s in segs]
 
 
 def make_consumer() -> Consumer:
