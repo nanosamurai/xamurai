@@ -104,6 +104,10 @@ message SessionTranscriptSegment {
   double end_s   = 2;
   string text    = 3;
   string speaker = 4; // optional, "" if unknown
+
+  // Optional word-level timing (requires WhisperX alignment).
+  // When present, words are relative to the recording start (absolute within session).
+  repeated WordAlignment words = 5;
 }
 
 message SessionTranscript {
