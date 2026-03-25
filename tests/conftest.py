@@ -94,7 +94,19 @@ def localstack_s3():
     bucket = os.getenv("TEST_ENROLL_S3_BUCKET", "drsynth-enrollment-test")
     prefix = os.getenv("TEST_ENROLL_S3_PREFIX", "enrollment")
 
-    with LocalStackContainer("localstack/localstack:latest").with_services("s3") as ls:
+    # NOTE:
+    # Do not use `:latest` here. LocalStack occasionally introduces breaking startup
+    # behavior (including account/token requirements) that makes CI flaky.
+    #
+    # Allow override for experiments, but keep a stable default.
+    localstack_image = os.getenv("TEST_LOCALSTACK_IMAGE", "localstack/localstack:3.8.1")
+
+    with (
+        LocalStackContainer(localstack_image)
+        .with_services("s3")
+        # LocalStack may require acknowledging account requirements even for local/CI usage.
+        .with_env("LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT", "1")
+    ) as ls:
         endpoint_url = ls.get_url()
 
         # Create bucket via boto3
