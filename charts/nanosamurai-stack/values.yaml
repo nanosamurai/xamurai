@@ -197,6 +197,10 @@ rtservice:
     lookbackSec: 2.0
     minTranscribeSec: 1.5
     stabilityRepeats: 1
+    # Overload guard: skip PARTIALs when rtservice gets behind realtime.
+    maxBehindSec: 2.0
+    # If there is an idle gap between chunks (e.g. pause), reset lag baseline.
+    idleResetSec: 3.0
 
 whisperxWorker:
   enabled: true
