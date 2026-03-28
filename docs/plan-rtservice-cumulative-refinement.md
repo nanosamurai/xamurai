@@ -80,6 +80,8 @@ These are wired in:
 | `RT_PARTIAL_STABILITY_REPEATS` | `1` | Require the same hypothesis to repeat N times before emitting. | Set >1 for extra stability at cost of latency. |
 | `RT_PARTIAL_MODE` | `cumulative` | `cumulative` = monotonic within window; `tail` = lookback-only partials. | `tail` is cheaper but produces “jumping” text that’s harder to merge. |
 | `RT_PARTIAL_LOOKBACK_SEC` | `2.0` | Lookback duration for `RT_PARTIAL_MODE=tail`. | Ignored in `cumulative` mode. |
+| `RT_PARTIAL_MAX_BEHIND_SEC` | `2.0` | Skip PARTIAL emissions when the stream is behind wall clock by more than this threshold. | FINALs still run; prevents runaway lag. |
+| `RT_PARTIAL_IDLE_RESET_SEC` | `3.0` | If no chunks arrive for this long, treat it as a pause and reset lag baseline. | Avoids permanently suppressing PARTIALs after a pause. |
 
 Per-stream overrides (gRPC metadata) currently supported:
 - `x-rt-window-sec` → `RT_WINDOW_SEC`
@@ -196,3 +198,5 @@ Current test added:
 - PARTIAL emission frequency is a compute amplifier.
 - Do not let arbitrary clients set `emit_every_sec` unbounded; validate in BFF.
 - Consider per-tenant session quotas.
+
+See also: `docs/rtservice-performance.md` for practical tuning guidance.
