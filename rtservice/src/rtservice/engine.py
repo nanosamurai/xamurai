@@ -122,6 +122,17 @@ PARTIAL_MODE = os.getenv("RT_PARTIAL_MODE", "cumulative").strip().lower() or "cu
 # Faster-Whisper on extremely short audio tends to hallucinate.
 PARTIAL_MIN_TRANSCRIBE_SEC = float(os.getenv("RT_PARTIAL_MIN_TRANSCRIBE_SEC", "1.5"))
 
+# Overload protection: if the realtime stream gets behind wall clock by more than
+# this threshold, skip PARTIAL emissions (FINALs still run).
+#
+# NOTE: "behind" here is computed as: wall_elapsed - audio_ingested_elapsed.
+# When this is positive, the server is not keeping up with realtime.
+PARTIAL_MAX_BEHIND_SEC = float(os.getenv("RT_PARTIAL_MAX_BEHIND_SEC", "2.0"))
+
+# If we observe a long idle gap between chunks, treat it as a pause and reset the
+# lag baseline so we don't permanently suppress PARTIALs after a pause.
+PARTIAL_IDLE_RESET_SEC = float(os.getenv("RT_PARTIAL_IDLE_RESET_SEC", "3.0"))
+
 # Kept for reference (most code should use RealtimeConfig.hop_sec)
 HOP_SEC = WINDOW_SEC - OVERLAP_SEC
 
@@ -186,6 +197,8 @@ class RealtimeConfig:
     partial_lookback_sec: float = PARTIAL_LOOKBACK_SEC
     partial_mode: str = PARTIAL_MODE
     partial_min_transcribe_sec: float = PARTIAL_MIN_TRANSCRIBE_SEC
+    partial_max_behind_sec: float = PARTIAL_MAX_BEHIND_SEC
+    partial_idle_reset_sec: float = PARTIAL_IDLE_RESET_SEC
     finalize_min_dur_sec: float = FINALIZE_MIN_DUR_SEC
     key_resolution_sec: float = KEY_RES
 
@@ -241,6 +254,12 @@ class SessionState:
     pending_partial_text: str
     pending_partial_repeats: int
 
+    # Realtime lag baseline tracking.
+    # wall_base_s: wall clock timestamp (time.time()) corresponding to "audio time 0".
+    # last_feed_wall_s: last time we processed a chunk for this session.
+    wall_base_s: float
+    last_feed_wall_s: float
+
     # Signature of the realtime config used for this session. If a client changes
     # per-session overrides mid-stream, we reset the session state.
     cfg_key: Optional[Tuple[object, ...]]
@@ -259,6 +278,8 @@ class SessionState:
             last_partial_text="",
             pending_partial_text="",
             pending_partial_repeats=0,
+            wall_base_s=now_s,
+            last_feed_wall_s=now_s,
             cfg_key=None,
         )
 
@@ -287,6 +308,7 @@ class RealtimeSessionProcessor:
         window_gate_fn: Optional[GateFn] = None,
         diarize_fn: DiarizeFn,
         asr_fn: AsrFn,
+        asr_partial_fn: Optional[AsrFn] = None,
         map_speaker_fn: MapSpeakerFn,
     ) -> None:
         self._cfg = cfg
@@ -294,6 +316,7 @@ class RealtimeSessionProcessor:
         self._window_gate_fn = window_gate_fn or partial_gate_fn
         self._diarize_fn = diarize_fn
         self._asr_fn = asr_fn
+        self._asr_partial_fn = asr_partial_fn or asr_fn
         self._map_speaker_fn = map_speaker_fn
 
     def process(
@@ -304,6 +327,7 @@ class RealtimeSessionProcessor:
         state: SessionState,
         pcm16: bytes,
         lang: Optional[str],
+        now_s: float,
     ) -> List[AsrResult]:
         cfg = self._cfg
         effective_lang = lang
@@ -312,6 +336,15 @@ class RealtimeSessionProcessor:
 
         x = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
         out: List[AsrResult] = []
+
+        # Lag tracking: if we see a long idle gap between chunks, treat it as a
+        # pause and re-align the wall_base so we don't suppress partials forever.
+        gap_s = float(now_s - state.last_feed_wall_s)
+        if gap_s > float(cfg.partial_idle_reset_sec):
+            audio_s = float(state.total_samples_ingested) / float(cfg.sr)
+            state.wall_base_s = float(now_s - audio_s)
+
+        state.last_feed_wall_s = float(now_s)
 
         # ingest
         state.buf = np.concatenate([state.buf, x])
@@ -322,7 +355,7 @@ class RealtimeSessionProcessor:
         #
         # IMPORTANT: do not emit partials when the caller is flushing (empty chunk)
         # because that would produce confusing late PARTIALs.
-        if cfg.partial_enable and not is_flush:
+        if cfg.partial_enable and not is_flush and not self._should_skip_partials_due_to_lag(state, now_s):
             out.extend(
                 self._maybe_emit_partial(
                     tenant_id=tenant_id,
@@ -441,7 +474,7 @@ class RealtimeSessionProcessor:
 
             # After sliding, we may again be in an "incomplete window" state;
             # allow partial emission for the new window as it accumulates.
-            if cfg.partial_enable and not is_flush:
+            if cfg.partial_enable and not is_flush and not self._should_skip_partials_due_to_lag(state, now_s):
                 out.extend(
                     self._maybe_emit_partial(
                         tenant_id=tenant_id,
@@ -550,7 +583,7 @@ class RealtimeSessionProcessor:
             # Never let partial gating break the stream.
             pass
 
-        text = self._asr_fn(buf_for_partial, lang)
+        text = self._asr_partial_fn(buf_for_partial, lang)
         state.last_partial_emit_at_samples = state.total_samples_ingested
 
         text = (text or "").strip()
@@ -588,6 +621,25 @@ class RealtimeSessionProcessor:
                 speaker=None,
             )
         ]
+
+    def _should_skip_partials_due_to_lag(self, state: SessionState, now_s: float) -> bool:
+        """Return True when the session is behind realtime enough that PARTIALs should be skipped.
+
+        This is a pragmatic overload guard. When we get behind wall clock, emitting
+        PARTIALs (which re-run ASR) amplifies compute and can make the lag worse.
+
+        We keep FINAL emission enabled so we still converge.
+        """
+
+        cfg = self._cfg
+        max_behind = float(cfg.partial_max_behind_sec)
+        if max_behind <= 0.0:
+            return False
+
+        wall_elapsed = float(now_s - state.wall_base_s)
+        audio_elapsed = float(state.total_samples_ingested) / float(cfg.sr)
+        behind_s = wall_elapsed - audio_elapsed
+        return behind_s > max_behind
 
 
 def _round_time(t: float, resolution: float) -> float:
@@ -803,41 +855,59 @@ class RealtimeModelBundle:
             segs.append({"start": float(turn.start), "end": float(turn.end), "speaker": str(spk)})
         return segs
 
-    def asr_text(self, wave: np.ndarray, lang: Optional[str]) -> str:
+    def _asr_transcribe(
+        self,
+        wave: np.ndarray,
+        lang: Optional[str],
+        *,
+        beam_size: int,
+        word_timestamps: bool,
+    ) -> str:
+        """Run faster-whisper on an in-memory waveform.
+
+        We intentionally avoid writing temporary WAV files for performance
+        (lower latency, less jitter, less disk contention under concurrency).
+        """
+
         if wave.size < int(self._cfg.finalize_min_dur_sec * self._cfg.sr):
             return ""
-        import tempfile
-        import os as _os
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            path = tmp.name
+        # Ensure contiguous float32 mono.
+        wave = np.asarray(wave, dtype=np.float32).reshape(-1)
 
-        sf.write(path, wave, self._cfg.sr, subtype="PCM_16")
-        try:
-            segs, _info = self._asr.transcribe(
-                path,
-                language=(lang or None),
-                task="transcribe",
-                beam_size=5,
-                temperature=[0.0],
-                condition_on_previous_text=False,
-                vad_filter=False,
-                word_timestamps=True,
-            )
-            words: list[str] = []
-            for s in segs:
-                if getattr(s, "words", None):
-                    for w in s.words:
-                        if w.word.strip():
-                            words.append(w.word)
-                elif s.text.strip():
-                    words.append(s.text.strip())
-            return " ".join(words).strip()
-        finally:
-            try:
-                _os.unlink(path)
-            except Exception:
-                pass
+        segs, _info = self._asr.transcribe(
+            wave,
+            language=(lang or None),
+            task="transcribe",
+            beam_size=int(beam_size),
+            temperature=[0.0],
+            condition_on_previous_text=False,
+            vad_filter=False,
+            word_timestamps=bool(word_timestamps),
+        )
+
+        words: list[str] = []
+        for s in segs:
+            # When word_timestamps=True, faster-whisper returns per-word tokens.
+            if getattr(s, "words", None):
+                for w in s.words:
+                    ww = getattr(w, "word", "")
+                    if ww and ww.strip():
+                        words.append(ww)
+            else:
+                t = getattr(s, "text", "")
+                if t and t.strip():
+                    words.append(t.strip())
+
+        return " ".join(words).strip()
+
+    def asr_text(self, wave: np.ndarray, lang: Optional[str]) -> str:
+        # FINAL decode path (higher quality).
+        return self._asr_transcribe(wave, lang, beam_size=5, word_timestamps=True)
+
+    def asr_text_partial(self, wave: np.ndarray, lang: Optional[str]) -> str:
+        # PARTIAL decode path (cheaper): no word timestamps, lower beam.
+        return self._asr_transcribe(wave, lang, beam_size=1, word_timestamps=False)
 
     # ---------------- Enrollment mapping ----------------
 
@@ -1074,6 +1144,7 @@ class RealtimeEngine:
                 window_gate_fn=self._model_bundle.gate_window,
                 diarize_fn=self._model_bundle.diarize_window,
                 asr_fn=self._model_bundle.asr_text,
+                asr_partial_fn=getattr(self._model_bundle, "asr_text_partial", None),
                 map_speaker_fn=self._model_bundle.map_speaker_label,
             )
             self._processors_by_key[self._cfg_key(self.cfg)] = _p
@@ -1172,6 +1243,7 @@ class RealtimeEngine:
                 state=state,
                 pcm16=pcm16,
                 lang=effective_lang,
+                now_s=now,
             )
 
     @staticmethod
@@ -1191,6 +1263,8 @@ class RealtimeEngine:
             r(cfg.partial_lookback_sec),
             str(getattr(cfg, "partial_mode", "cumulative")),
             r(cfg.partial_min_transcribe_sec),
+            r(cfg.partial_max_behind_sec),
+            r(cfg.partial_idle_reset_sec),
             r(cfg.finalize_min_dur_sec),
             r(cfg.key_resolution_sec),
         )
@@ -1230,6 +1304,8 @@ class RealtimeEngine:
             partial_lookback_sec=base.partial_lookback_sec,
             partial_mode=base.partial_mode,
             partial_min_transcribe_sec=base.partial_min_transcribe_sec,
+            partial_max_behind_sec=base.partial_max_behind_sec,
+            partial_idle_reset_sec=base.partial_idle_reset_sec,
             finalize_min_dur_sec=base.finalize_min_dur_sec,
             key_resolution_sec=base.key_resolution_sec,
         )
@@ -1251,6 +1327,7 @@ class RealtimeEngine:
                 window_gate_fn=self._model_bundle.gate_window,
                 diarize_fn=self._model_bundle.diarize_window,
                 asr_fn=self._model_bundle.asr_text,
+                asr_partial_fn=getattr(self._model_bundle, "asr_text_partial", None),
                 map_speaker_fn=self._model_bundle.map_speaker_label,
             )
             self._processors_by_key[cfg_key] = p

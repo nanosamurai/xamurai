@@ -223,6 +223,10 @@ services:
       RT_PARTIAL_MIN_TRANSCRIBE_SEC: ${RT_PARTIAL_MIN_TRANSCRIBE_SEC:-1.5}
       RT_PARTIAL_STABILITY_REPEATS: ${RT_PARTIAL_STABILITY_REPEATS:-1}
 
+      # Overload protection: skip PARTIALs when behind realtime.
+      RT_PARTIAL_MAX_BEHIND_SEC: ${RT_PARTIAL_MAX_BEHIND_SEC:-2.0}
+      RT_PARTIAL_IDLE_RESET_SEC: ${RT_PARTIAL_IDLE_RESET_SEC:-3.0}
+
     # --- GPU (optional) ---
     # If you have NVIDIA GPU support configured in Docker, uncomment this to
     # make torch.cuda.is_available() return true.
