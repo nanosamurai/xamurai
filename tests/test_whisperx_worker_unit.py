@@ -164,3 +164,49 @@ def test_run_whisperx_diarized_smoke_no_diarization(monkeypatch, tmp_path):
 
     assert full_text == "Hello"
     assert out_segments == [(0.0, 1.0, "Hello", "")]
+
+
+def test_should_evict_idle_session_true_when_idle_and_polling_recently():
+    now = 1000.0
+    last_activity = {"s": now - 31.0}
+    last_poll_s = now - 0.5
+    assert whisperx_worker._should_evict_idle_session(
+        "s",
+        now_s=now,
+        last_activity_s=last_activity,
+        last_poll_s=last_poll_s,
+        idle_sec=30.0,
+    )
+
+
+def test_should_not_evict_when_not_idle():
+    now = 1000.0
+    last_activity = {"s": now - 10.0}
+    last_poll_s = now - 0.5
+    assert not whisperx_worker._should_evict_idle_session(
+        "s",
+        now_s=now,
+        last_activity_s=last_activity,
+        last_poll_s=last_poll_s,
+        idle_sec=30.0,
+    )
+
+
+def test_should_not_evict_when_consumer_poll_was_blocked_by_inference():
+    """Regression test for refined-timing reset bug.
+
+    If inference blocks the main loop for > idle_sec, wall-clock-based eviction is
+    unsafe because we may be behind on consuming audio.
+    """
+
+    now = 1000.0
+    last_activity = {"s": now - 31.0}
+    # last poll was also a long time ago -> indicates main loop was blocked
+    last_poll_s = now - 120.0
+    assert not whisperx_worker._should_evict_idle_session(
+        "s",
+        now_s=now,
+        last_activity_s=last_activity,
+        last_poll_s=last_poll_s,
+        idle_sec=30.0,
+    )
