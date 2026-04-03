@@ -90,22 +90,20 @@ This avoids slice-index reset while the session is still being processed.
 
 ## Current Working Tree State (IMPORTANT)
 
-There is an in-progress/uncommitted change to:
-- `whisperx_worker/src/whisperx_worker/whisperx_worker.py`
+Phase 2 is now partially implemented on branch `fix-whisperx-idle-eviction`.
 
-It contains Phase 2 scaffolding but is **not safe to keep**:
-- includes dead/unreachable legacy code after an early `return`
-- contains garbled unicode sequences like `�+'` (likely from copy/paste / encoding issues)
+Commits:
+- `ba7c612` — Add optional decoupled Kafka poll loop for whisperx worker
 
-### Cleanup command before continuing Phase 2
-
-If you want to restart Phase 2 cleanly:
-
-```bash
-git restore whisperx_worker/src/whisperx_worker/whisperx_worker.py
-```
-
-Then re-apply Phase 2 using the strategy below.
+### What was implemented
+- New module: `whisperx_worker/src/whisperx_worker/decoupled_runtime.py`
+  - Poll thread owns Kafka `Consumer`
+  - Main thread runs inference/publish
+  - Commit-after-produce via `TopicPartition` commits executed in poll thread
+- `whisperx_worker.py` wiring:
+  - `WHISPERX_DECOUPLE_IO` (default false)
+  - `WHISPERX_COMMIT_AFTER_PRODUCE` (default true)
+  - When `WHISPERX_DECOUPLE_IO=true`, worker runs `run_decoupled(...)` and returns.
 
 ## Cline / Tooling Stability Note
 
