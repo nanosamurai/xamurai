@@ -3,11 +3,12 @@ import os
 import tempfile
 import threading
 from collections import defaultdict, deque
+from whisperx_worker.decoupled_runtime import run_decoupled
 from typing import Any, Deque, Dict, List, Optional, TYPE_CHECKING, Tuple, TypedDict
 
 import numpy as np
 import soundfile as sf
-from confluent_kafka import Consumer, Producer, KafkaException
+from confluent_kafka import Consumer, Producer, KafkaException, TopicPartition
 
 from proto_gen import stream_pb2
 
@@ -120,6 +121,10 @@ GROUP_ID = os.getenv("KAFKA_GROUP_ID", "whisperx-async")
 SLICE_SECONDS = float(os.getenv("WHISPERX_SLICE_SECONDS", "60.0"))
 SESSION_IDLE_SEC = float(os.getenv("WHISPERX_IDLE_SECONDS", "30.0"))
 SR = 16000
+
+_DECOUPLE_IO = os.getenv("WHISPERX_DECOUPLE_IO", "false").strip().lower() in ("1", "true", "yes", "y")
+_COMMIT_AFTER_PRODUCE = os.getenv("WHISPERX_COMMIT_AFTER_PRODUCE", "true").strip().lower() in ("1", "true", "yes", "y")
+
 
 
 def _should_evict_idle_session(
@@ -1197,6 +1202,38 @@ def main():
     p = make_producer()
     c.subscribe([TOPIC_AUDIO])
 
+    if _DECOUPLE_IO:
+        def _parse_audio_chunk(v: bytes) -> stream_pb2.AudioChunk:
+            audio = stream_pb2.AudioChunk()
+            audio.ParseFromString(v)
+            return audio
+
+        run_decoupled(
+            consumer=c,
+            topic_audio=TOPIC_AUDIO,
+            slice_seconds=SLICE_SECONDS,
+            sample_rate=SR,
+            session_idle_sec=SESSION_IDLE_SEC,
+            should_evict_idle_session=_should_evict_idle_session,
+            parse_audio_chunk=_parse_audio_chunk,
+            build_job=lambda **kw: {
+                "session_id": kw["session_id"],
+                "tenant_id": kw.get("tenant"),
+                "lang": kw.get("lang"),
+                "bff_origin_uri": kw.get("bff_uri"),
+                "trace_headers": kw.get("trace_headers"),
+                "pcm16": kw["pcm16"],
+                "base_start_s": float(kw["base_start_s"]),
+                "slice_index": int(kw["slice_index"]),
+                "flush_reason": kw.get("flush_reason", "slice"),
+                "topic": kw.get("msg_topic", TOPIC_AUDIO),
+                "partition": int(kw.get("msg_partition", 0)),
+                "offset": int(kw.get("msg_offset", -1)),
+            },
+            run_inference_and_publish=lambda job: _run_inference_and_publish(job=job, producer=p),
+        )
+        return
+
     buffers: Dict[str, Deque[np.ndarray]] = defaultdict(deque)
     buf_samples: Dict[str, int] = defaultdict(int)
     slice_index: Dict[str, int] = defaultdict(int)
@@ -1421,7 +1458,10 @@ def main():
                         except Exception:
                             pass
 
-                    c.commit(msg, asynchronous=True)
+                    if _COMMIT_AFTER_PRODUCE:
+                        c.commit(msg, asynchronous=False)
+                    else:
+                        c.commit(msg, asynchronous=True)
                 finally:
                     pass
 
