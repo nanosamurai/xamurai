@@ -265,6 +265,20 @@ For more details and troubleshooting tips (Kafka ports, ffmpeg/torio warnings, e
 * `WHISPERX_IDLE_SECONDS` (default: `30.0`)
 * `WHISPERX_COMPUTE_TYPE` (optional)
 
+Scalability / parallelization related vars:
+
+* `WHISPERX_DECOUPLE_IO` (default: `false`)
+  * When enabled, Kafka polling/buffering runs in a dedicated thread and inference runs in a separate loop.
+  * This prevents “idle” eviction from triggering just because WhisperX inference is slow/blocked.
+* `WHISPERX_COMMIT_AFTER_PRODUCE` (default: `true`)
+  * When enabled, offsets are committed only after refined events are produced.
+  * Safer (reduces message loss) but can reprocess messages after crash.
+* `WHISPERX_BATCH_MAX_ITEMS` (default: `1`)
+* `WHISPERX_BATCH_MAX_WAIT_MS` (default: `30`)
+* `WHISPERX_BATCH_MODE` (default: `sequential`)
+  * These currently control scheduler-level collection of jobs (groundwork).
+  * NOTE: this is not true multi-audio GPU batching yet.
+
 ### recorder_worker
 
 * `KAFKA_BOOTSTRAP`

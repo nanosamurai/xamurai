@@ -210,6 +210,23 @@ whisperxWorker:
     enabled: false
     count: 1
 
+  # Phase 2: decouple Kafka polling from inference.
+  # When enabled, the worker continuously polls Kafka in a dedicated thread and
+  # runs WhisperX inference in a separate loop.
+  decoupleIo: false
+
+  # Commit offsets only after producing refined events.
+  # This is safer but can reprocess after crash (at-least-once-ish).
+  commitAfterProduce: true
+
+  # Scheduler-level dynamic batching knobs.
+  # NOTE: currently only affects queue scheduling (we still run sequential
+  # inference per job). Future work may switch to true multi-audio batching.
+  batch:
+    maxItems: 1
+    maxWaitMs: 30
+    mode: sequential
+
 recorderWorker:
   enabled: true
 
