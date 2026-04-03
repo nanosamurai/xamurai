@@ -142,3 +142,14 @@ Functional:
 Operational:
 - worker remains responsive under slow inference
 - Kafka consumer group lag should not spike purely due to inference blocking poll loop
+
+### Test runs (evidence)
+
+Ran integration suite in the documented conda env (`drsynth-whisperx`):
+
+```bat
+conda run -n drsynth-whisperx python -m pytest -q -m integration tests/test_whisperx_worker_integration.py
+```
+
+Result (2026-04-03):
+- **3 passed** (with warnings from 3rd party libs: testcontainers/pyannote/torchaudio)
