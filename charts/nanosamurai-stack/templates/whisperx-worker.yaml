@@ -64,6 +64,22 @@ spec:
             - name: WHISPERX_COMPUTE_TYPE
               value: ""
 
+            # Phase 2: decouple Kafka polling from inference.
+            - name: WHISPERX_DECOUPLE_IO
+              value: {{ .Values.whisperxWorker.decoupleIo | default false | quote }}
+
+            # Commit offsets only after producing refined messages.
+            - name: WHISPERX_COMMIT_AFTER_PRODUCE
+              value: {{ .Values.whisperxWorker.commitAfterProduce | default true | quote }}
+
+            # Scheduler-level dynamic batching knobs.
+            - name: WHISPERX_BATCH_MAX_ITEMS
+              value: {{ .Values.whisperxWorker.batch.maxItems | default 1 | quote }}
+            - name: WHISPERX_BATCH_MAX_WAIT_MS
+              value: {{ .Values.whisperxWorker.batch.maxWaitMs | default 30 | quote }}
+            - name: WHISPERX_BATCH_MODE
+              value: {{ .Values.whisperxWorker.batch.mode | default "sequential" | quote }}
+
             {{- include "nanosamurai-stack.enrollmentEnv" . | nindent 12 }}
 
           {{- if and .Values.whisperxWorker.gpu.enabled (gt (int .Values.whisperxWorker.gpu.count) 0) }}

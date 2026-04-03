@@ -266,6 +266,20 @@ services:
       WHISPERX_IDLE_SECONDS: "30.0"
       WHISPERX_COMPUTE_TYPE: ""
 
+      # Phase 2: decouple Kafka polling from inference (keeps consumer responsive
+      # even when WhisperX is slow).
+      WHISPERX_DECOUPLE_IO: ${WHISPERX_DECOUPLE_IO:-false}
+
+      # Commit offsets only after producing refined events (safer; can reprocess
+      # after crash).
+      WHISPERX_COMMIT_AFTER_PRODUCE: ${WHISPERX_COMMIT_AFTER_PRODUCE:-true}
+
+      # Scheduler-level dynamic batching knobs (currently sequential execution,
+      # but collecting jobs is already supported).
+      WHISPERX_BATCH_MAX_ITEMS: ${WHISPERX_BATCH_MAX_ITEMS:-1}
+      WHISPERX_BATCH_MAX_WAIT_MS: ${WHISPERX_BATCH_MAX_WAIT_MS:-30}
+      WHISPERX_BATCH_MODE: ${WHISPERX_BATCH_MODE:-sequential}
+
       # Enrollment (multi-tenant, S3-backed)
       ENROLL_BACKEND: s3_manifest
       ENROLL_S3_ENDPOINT: http://localstack:4566
