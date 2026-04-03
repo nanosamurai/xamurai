@@ -265,7 +265,7 @@ For more details and troubleshooting tips (Kafka ports, ffmpeg/torio warnings, e
 * `WHISPERX_IDLE_SECONDS` (default: `30.0`)
 * `WHISPERX_COMPUTE_TYPE` (optional)
 
-Phase 2 (scalability / slow inference correctness):
+Scalability / parallelization related vars:
 
 * `WHISPERX_DECOUPLE_IO` (default: `false`)
   * When enabled, Kafka polling/buffering runs in a dedicated thread and inference runs in a separate loop.
