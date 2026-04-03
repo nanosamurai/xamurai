@@ -2,6 +2,88 @@
 
 This document scopes **Phase 2** follow-up work for `whisperx_worker`.
 
+## Implementation status (as of 2026-04-03)
+
+This plan started as a design document. The following section is an explicit
+mapping to what is already implemented on branch `fix-whisperx-idle-eviction`.
+
+Related docs:
+- `docs/whisperx-worker-phase2-status.md` (status + evidence of test runs)
+- `docs/whisperx-worker-scalability.md` (long-form rationale + operational notes)
+
+### Implemented
+
+#### Consume/infer decoupling (rollout step 1)
+
+- ✅ Added an opt-in decoupled runtime in:
+  - `whisperx_worker/src/whisperx_worker/decoupled_runtime.py`
+- ✅ Wiring in `whisperx_worker.py` behind:
+  - `WHISPERX_DECOUPLE_IO` (default `false`)
+
+Runtime model:
+- poll thread owns Kafka `Consumer` and continuously polls/buffers/cuts slices
+- main thread runs inference+publish for slice jobs
+
+This addresses the original correctness issue (slow inference blocking `poll()`),
+and it keeps Kafka consumer health stable under load.
+
+#### Job model
+
+- ✅ Implemented internal job object `SliceJob` (TypedDict) including:
+  - session metadata (tenant/lang/bff uri/trace headers)
+  - audio payload (`pcm16`, `base_start_s`, `slice_index`)
+  - delivery metadata (`topic`, `partition`, `offset`)
+
+Note: field names differ slightly from the plan (`topic/partition/offset` instead
+of `kafka_topic/kafka_partition/kafka_offset`), but semantics are the same.
+
+#### Offset commit semantics (commit-after-produce)
+
+- ✅ Implemented `WHISPERX_COMMIT_AFTER_PRODUCE` (default `true`).
+- ✅ In decoupled mode, commits are executed in the poll thread via
+  `TopicPartition` commits (consumer thread-affinity is respected).
+
+Trade-off is as documented: safer semantics (less chance of losing work) at the
+cost of possible reprocessing after crash.
+
+#### Scheduler-level batch collection (groundwork)
+
+- ✅ Added env knobs:
+  - `WHISPERX_BATCH_MAX_ITEMS`
+  - `WHISPERX_BATCH_MAX_WAIT_MS`
+  - `WHISPERX_BATCH_MODE`
+- ✅ Implemented `_queue_get_many()` which can collect multiple ready jobs into a
+  list before processing.
+
+Important: this is only the *scheduler* foundation. Inference is still executed
+sequentially per job.
+
+### Not implemented yet (still part of the plan)
+
+#### True multi-audio GPU batching
+
+- ⛔ No duration bucketization.
+- ⛔ No language bucketization.
+- ⛔ No single-call list-of-audios batched inference.
+
+Reason: this requires confirming the exact WhisperX backend API we use in our
+runtime (and validating accuracy/latency trade-offs). Until then, we keep the
+logic correct and safe, and treat the current knobs as groundwork.
+
+#### Publisher flush knob
+
+- ⛔ `WHISPERX_PRODUCER_FLUSH_S` is not implemented yet.
+
+#### Observability spans for batching
+
+- ⛔ No new OTEL spans/attributes for batch-level metrics yet.
+
+## Rollout checklist (recommended)
+
+1) ✅ Decouple consume/infer with batch size 1 (correctness + Kafka health)
+2) ⛔ Add true dynamic batching (multi-audio inference) behind env flags
+3) ⛔ Measure throughput + P95 latency; tune `max_items` and `max_wait_ms`
+
 Motivation:
 - Fix correctness: do not treat sessions as idle purely because inference blocks Kafka polling.
 - Improve throughput: enable **dynamic batching** of independent slices across sessions on GPU.
