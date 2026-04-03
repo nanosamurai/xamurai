@@ -210,3 +210,23 @@ def test_should_not_evict_when_consumer_poll_was_blocked_by_inference():
         last_poll_s=last_poll_s,
         idle_sec=30.0,
     )
+
+
+def test_decoupled_runtime_job_collection_scheduler_only(monkeypatch):
+    """Unit-level sanity check for Phase 2 decoupled runtime.
+
+    This test intentionally avoids Kafka/WhisperX dependencies.
+
+    We verify that `_queue_get_many` collects multiple jobs when configured,
+    which is the foundation for future true multi-audio batching.
+    """
+
+    from whisperx_worker.decoupled_runtime import _queue_get_many
+    from queue import Queue
+
+    q: "Queue[dict]" = Queue()
+    q.put({"session_id": "a"})
+    q.put({"session_id": "b"})
+
+    batch = _queue_get_many(q, max_items=2, max_wait_ms=1)
+    assert [j["session_id"] for j in batch] == ["a", "b"]
