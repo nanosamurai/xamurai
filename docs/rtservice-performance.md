@@ -96,7 +96,9 @@ rtservice can expose a Prometheus `/metrics` endpoint from the same process.
 Env vars:
 - `RT_METRICS_ENABLE` (default `true`)
 - `RT_METRICS_PORT` (default `8008`)
-- `RT_METRICS_ADDR` (default `127.0.0.1` for security)
+- `RT_METRICS_ADDR`
+  - recommended for local runs: `127.0.0.1` (security-first)
+  - default in k8s Helm: `0.0.0.0` (so port-forward/scraping works)
 
 In Kubernetes, prefer accessing this via `kubectl port-forward`.
 

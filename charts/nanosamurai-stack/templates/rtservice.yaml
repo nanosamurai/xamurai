@@ -56,7 +56,7 @@ spec:
               value: {{ .Values.rtservice.observability.metrics.port | default 8008 | quote }}
             # Bind to localhost inside the pod by default (security-first).
             - name: RT_METRICS_ADDR
-              value: "127.0.0.1"
+              value: "0.0.0.0"
             {{- else }}
             - name: RT_METRICS_ENABLE
               value: "false"
