@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -84,12 +85,34 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 
-def _bool_env(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "y")
+def _bool_env(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() in ("1", "true", "yes", "y")
 
 
-RT_ASR_SERIALIZE = _bool_env("RT_ASR_SERIALIZE")
-RT_DIAR_SERIALIZE = _bool_env("RT_DIAR_SERIALIZE")
+RT_ASR_SERIALIZE = _bool_env("RT_ASR_SERIALIZE", default=False)
+RT_DIAR_SERIALIZE = _bool_env("RT_DIAR_SERIALIZE", default=False)
+
+# VAD hardening / experimentation
+RT_USE_SILERO_VAD = _bool_env("RT_USE_SILERO_VAD", default=True)
+RT_SILERO_VAD_ONNX = _bool_env("RT_SILERO_VAD_ONNX", default=False)
+RT_VAD_SERIALIZE = _bool_env("RT_VAD_SERIALIZE", default=False)
+RT_VAD_RESET_STATES = _bool_env("RT_VAD_RESET_STATES", default=True)
+RT_VAD_NO_GRAD = _bool_env("RT_VAD_NO_GRAD", default=True)
+
+try:
+    from prometheus_client import Counter, Histogram
+except Exception:  # pragma: no cover
+    Counter = Histogram = None  # type: ignore[assignment]
+
+_M_VAD_SECONDS = Histogram("rtservice_vad_seconds", "Silero VAD get_speech_timestamps latency (seconds)") if Histogram else None
+_M_VAD_CALLS_TOTAL = Counter(
+    "rtservice_vad_calls_total",
+    "Silero VAD calls",
+    labelnames=["result"],
+) if Counter else None
 
 # ---------------------------------------------------------------------------
 # Constants / defaults
@@ -146,9 +169,9 @@ FINALIZE_MIN_DUR_SEC = 0.25
 KEY_RES = 0.25
 
 # VAD (window-level)
-USE_SILERO_VAD = True
-VAD_MIN_SPEECH_MS = 150
-VAD_MIN_SILENCE_MS = 400
+USE_SILERO_VAD = RT_USE_SILERO_VAD
+VAD_MIN_SPEECH_MS = int(os.getenv("RT_VAD_MIN_SPEECH_MS", "150"))
+VAD_MIN_SILENCE_MS = int(os.getenv("RT_VAD_MIN_SILENCE_MS", "400"))
 
 # Speaker enrollment
 USE_SPEAKER_ENROLLMENT = True
@@ -688,6 +711,7 @@ class RealtimeModelBundle:
         # or if we confirm the underlying libraries are not thread-safe.
         self._asr_lock = threading.Lock()
         self._diar_lock = threading.Lock()
+        self._vad_lock = threading.Lock()
 
         hf_token = os.environ.get("HF_TOKEN")
         if not hf_token:
@@ -759,12 +783,19 @@ class RealtimeModelBundle:
                     repo_or_dir="snakers4/silero-vad",
                     model="silero_vad",
                     force_reload=False,
-                    onnx=False,
+                    onnx=bool(RT_SILERO_VAD_ONNX),
                     trust_repo=True,
                 )
                 (get_speech_timestamps, _save_audio, _read_audio, _VADIterator, _collect_chunks) = _vad_utils
                 self._vad_model = _vad_model
                 self._get_speech_timestamps = get_speech_timestamps
+
+                # Ensure inference mode. (Also helps avoid accidental grad tracking in threaded apps.)
+                try:
+                    if hasattr(self._vad_model, "eval"):
+                        self._vad_model.eval()
+                except Exception:
+                    pass
             except Exception as e:
                 logger.warning("Failed to init Silero VAD, disabling: %s", e)
 
@@ -802,6 +833,17 @@ class RealtimeModelBundle:
             "rtservice concurrency guards: RT_ASR_SERIALIZE=%s RT_DIAR_SERIALIZE=%s",
             RT_ASR_SERIALIZE,
             RT_DIAR_SERIALIZE,
+        )
+
+        logger.info(
+            "rtservice VAD config: enabled=%s backend=%s serialize=%s reset_states=%s no_grad=%s min_speech_ms=%d min_silence_ms=%d",
+            USE_SILERO_VAD,
+            "onnx" if RT_SILERO_VAD_ONNX else "torch",
+            RT_VAD_SERIALIZE,
+            RT_VAD_RESET_STATES,
+            RT_VAD_NO_GRAD,
+            int(VAD_MIN_SPEECH_MS),
+            int(VAD_MIN_SILENCE_MS),
         )
 
         try:
@@ -857,15 +899,50 @@ class RealtimeModelBundle:
             return True
 
         wav16 = (np.clip(window, -1.0, 1.0) * 32767).astype(np.int16)
-        ts = self._get_speech_timestamps(
-            wav16,
-            self._vad_model,
-            sampling_rate=self._cfg.sr,
-            return_seconds=True,
-            min_speech_duration_ms=VAD_MIN_SPEECH_MS,
-            min_silence_duration_ms=VAD_MIN_SILENCE_MS,
-        )
-        return bool(ts)
+
+        # Guardrails:
+        # - Silero VAD uses torch; in multi-threaded apps, ensure no-grad/inference mode.
+        # - The VAD model is not guaranteed to be stateless. Reset per call if supported.
+        # - Optional lock to prevent concurrent access to the shared VAD model.
+        lock_cm = self._vad_lock if RT_VAD_SERIALIZE else nullcontext()
+        try:
+            import torch
+
+            infer_cm = (
+                torch.inference_mode() if RT_VAD_NO_GRAD and hasattr(torch, "inference_mode") else nullcontext()
+            )
+
+            with lock_cm:
+                if RT_VAD_RESET_STATES and hasattr(self._vad_model, "reset_states"):
+                    try:
+                        self._vad_model.reset_states()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
+                t0 = time.time()
+                with infer_cm:
+                    ts = self._get_speech_timestamps(
+                        wav16,
+                        self._vad_model,
+                        sampling_rate=self._cfg.sr,
+                        return_seconds=True,
+                        min_speech_duration_ms=VAD_MIN_SPEECH_MS,
+                        min_silence_duration_ms=VAD_MIN_SILENCE_MS,
+                    )
+                dt = max(0.0, time.time() - t0)
+                if _M_VAD_SECONDS:
+                    _M_VAD_SECONDS.observe(dt)
+        except Exception:
+            # Never let VAD break a realtime stream; fall back to letting speech through.
+            if _M_VAD_CALLS_TOTAL:
+                _M_VAD_CALLS_TOTAL.labels(result="error").inc()
+            logger.warning("rtservice: VAD failed, falling back to allow speech", exc_info=True)
+            return True
+
+        ok = bool(ts)
+        if _M_VAD_CALLS_TOTAL:
+            _M_VAD_CALLS_TOTAL.labels(result="hit" if ok else "miss").inc()
+        return ok
 
     def diarize_window(self, wave: np.ndarray) -> List[DiarSeg]:
         if wave.size == 0:
