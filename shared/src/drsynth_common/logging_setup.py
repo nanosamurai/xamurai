@@ -17,6 +17,7 @@ Log record fields added:
 - trace_id: 32-hex lowercase trace id (or "-" when not available)
 - span_id:  16-hex lowercase span id (or "-")
 - session_id: session id (or "-")
+- session_trace_id: session uuid without dashes (or "-")
 """
 
 from __future__ import annotations
@@ -80,10 +81,17 @@ def _install_log_record_factory() -> None:
         record = old_factory(*args, **kwargs)
         trace_id, span_id = _safe_current_otel_ids()
 
+        session_id = _session_id_var.get()
+        session_trace_id = "-"
+        if session_id and session_id != "-":
+            # Our Tempo trace id convention: session_id UUID without dashes.
+            session_trace_id = session_id.replace("-", "")
+
         # Ensure the attributes always exist so formatters never KeyError.
         setattr(record, "trace_id", trace_id)
         setattr(record, "span_id", span_id)
-        setattr(record, "session_id", _session_id_var.get())
+        setattr(record, "session_id", session_id)
+        setattr(record, "session_trace_id", session_trace_id)
         return record
 
     logging.setLogRecordFactory(record_factory)
@@ -123,7 +131,8 @@ def setup_logging(*, default_level: str = "INFO") -> int:
         level=level,
         format=(
             "%(asctime)s [%(levelname)s] %(name)s "
-            "trace_id=%(trace_id)s span_id=%(span_id)s session=%(session_id)s: %(message)s"
+            "trace_id=%(trace_id)s span_id=%(span_id)s "
+            "session=%(session_id)s session_trace_id=%(session_trace_id)s: %(message)s"
         ),
         datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
