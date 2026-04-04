@@ -49,7 +49,11 @@ RUN pip install \
       pyannote-audio \
       omegaconf \
       hydra-core \
-      boto3
+      boto3 \
+      prometheus-client \
+      opentelemetry-api \
+      opentelemetry-sdk \
+      opentelemetry-exporter-otlp-proto-grpc
 
 # Copy monorepo
 COPY . /app

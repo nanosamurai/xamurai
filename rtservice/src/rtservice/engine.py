@@ -87,6 +87,10 @@ logger = logging.getLogger(__name__)
 def _bool_env(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "y")
 
+
+RT_ASR_SERIALIZE = _bool_env("RT_ASR_SERIALIZE")
+RT_DIAR_SERIALIZE = _bool_env("RT_DIAR_SERIALIZE")
+
 # ---------------------------------------------------------------------------
 # Constants / defaults
 # ---------------------------------------------------------------------------
@@ -383,6 +387,14 @@ class RealtimeSessionProcessor:
                 try:
                     diar_segs = self._diarize_fn(window)
                 except Exception:
+                    logger.warning(
+                        "rtservice: diarization failed tenant=%s session=%s window_offset=%.3f idx=%d",
+                        tenant_id,
+                        session_id,
+                        float(window_offset),
+                        int(my_idx),
+                        exc_info=True,
+                    )
                     diar_segs = []
 
                 for d in diar_segs:
@@ -665,6 +677,18 @@ class RealtimeModelBundle:
     def __init__(self, *, cfg: RealtimeConfig) -> None:
         self._cfg = cfg
 
+        # Optional concurrency guards.
+        #
+        # Motivation:
+        # - Under load we've seen native SIGSEGV crashes (exit code 139).
+        # - A pragmatic mitigation is to serialize entry into native GPU-heavy
+        #   stacks (ctranslate2/faster-whisper, torch/pyannote).
+        #
+        # These are OFF by default and should be enabled only for investigation
+        # or if we confirm the underlying libraries are not thread-safe.
+        self._asr_lock = threading.Lock()
+        self._diar_lock = threading.Lock()
+
         hf_token = os.environ.get("HF_TOKEN")
         if not hf_token:
             raise RuntimeError("Set HF_TOKEN environment variable for pyannote.")
@@ -774,6 +798,12 @@ class RealtimeModelBundle:
             USE_SPEAKER_ENROLLMENT,
         )
 
+        logger.info(
+            "rtservice concurrency guards: RT_ASR_SERIALIZE=%s RT_DIAR_SERIALIZE=%s",
+            RT_ASR_SERIALIZE,
+            RT_DIAR_SERIALIZE,
+        )
+
         try:
             import importlib.metadata as _md
 
@@ -843,7 +873,12 @@ class RealtimeModelBundle:
         import torch
 
         w = torch.from_numpy(wave.copy()).unsqueeze(0)
-        out = self._pipe({"waveform": w, "sample_rate": self._cfg.sr})
+
+        if RT_DIAR_SERIALIZE:
+            with self._diar_lock:
+                out = self._pipe({"waveform": w, "sample_rate": self._cfg.sr})
+        else:
+            out = self._pipe({"waveform": w, "sample_rate": self._cfg.sr})
 
         # pyannote.audio 4.x returns DiarizeOutput with an Annotation in `.speaker_diarization`
         diar = getattr(out, "speaker_diarization", None)
@@ -875,29 +910,37 @@ class RealtimeModelBundle:
         # Ensure contiguous float32 mono.
         wave = np.asarray(wave, dtype=np.float32).reshape(-1)
 
-        segs, _info = self._asr.transcribe(
-            wave,
-            language=(lang or None),
-            task="transcribe",
-            beam_size=int(beam_size),
-            temperature=[0.0],
-            condition_on_previous_text=False,
-            vad_filter=False,
-            word_timestamps=bool(word_timestamps),
-        )
+        def _run_decode() -> list[str]:
+            segs, _info = self._asr.transcribe(
+                wave,
+                language=(lang or None),
+                task="transcribe",
+                beam_size=int(beam_size),
+                temperature=[0.0],
+                condition_on_previous_text=False,
+                vad_filter=False,
+                word_timestamps=bool(word_timestamps),
+            )
 
-        words: list[str] = []
-        for s in segs:
-            # When word_timestamps=True, faster-whisper returns per-word tokens.
-            if getattr(s, "words", None):
-                for w in s.words:
-                    ww = getattr(w, "word", "")
-                    if ww and ww.strip():
-                        words.append(ww)
-            else:
-                t = getattr(s, "text", "")
-                if t and t.strip():
-                    words.append(t.strip())
+            words: list[str] = []
+            for s in segs:
+                # When word_timestamps=True, faster-whisper returns per-word tokens.
+                if getattr(s, "words", None):
+                    for w in s.words:
+                        ww = getattr(w, "word", "")
+                        if ww and ww.strip():
+                            words.append(ww)
+                else:
+                    t = getattr(s, "text", "")
+                    if t and t.strip():
+                        words.append(t.strip())
+            return words
+
+        if RT_ASR_SERIALIZE:
+            with self._asr_lock:
+                words = _run_decode()
+        else:
+            words = _run_decode()
 
         return " ".join(words).strip()
 

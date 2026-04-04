@@ -71,3 +71,45 @@ Additional perf/overload knobs:
 - Per-chunk `np.concatenate` buffer growth is still O(n) copying; a ring-buffer would reduce CPU overhead under high chunk rates.
 - GPU scheduling/fairness across many concurrent sessions is still “best effort” in a single process.
 - True multi-GPU scaling needs multiple rtservice pods and session stickiness at the LB layer.
+
+---
+
+## Observability / crash diagnostics (EKS dev)
+
+In EKS dev we observed rtservice crashing under load with exit code 139 (SIGSEGV).
+This is a **native crash** (likely a C/CUDA stack) and bypasses normal Python exception logs.
+
+rtservice therefore supports the following observability knobs:
+
+### Crash diagnostics (faulthandler)
+
+Env vars:
+- `RT_FAULTHANDLER_ENABLE` (default `true`)
+  - enables `faulthandler.enable(all_threads=True)`
+  - registers SIGUSR1 so you can dump stacks on demand:
+    - `kubectl exec -it <pod> -- kill -USR1 1`
+
+### Prometheus metrics
+
+rtservice can expose a Prometheus `/metrics` endpoint from the same process.
+
+Env vars:
+- `RT_METRICS_ENABLE` (default `true`)
+- `RT_METRICS_PORT` (default `8008`)
+- `RT_METRICS_ADDR`
+  - recommended for local runs: `127.0.0.1` (security-first)
+  - default in k8s Helm: `0.0.0.0` (so port-forward/scraping works)
+
+In Kubernetes, prefer accessing this via `kubectl port-forward`.
+
+### Trace/log correlation
+
+All Python services use `drsynth_common.logging_setup.setup_logging()`.
+When OpenTelemetry is enabled, logs include:
+
+- `trace_id` and `span_id` (from the current OTEL span)
+- `session_id` and `session_trace_id` (`session_id` without dashes)
+
+This makes it easy to jump from a Loki log line to a Tempo trace:
+- copy `session_trace_id`
+- in Grafana Tempo, use TraceID lookup

@@ -63,3 +63,45 @@ def setup_otel(*, service_name: Optional[str] = None) -> None:
 
     # Ensure W3C propagation
     set_global_textmap(TraceContextTextMapPropagator())
+
+
+def extract_trace_context_from_headers(headers: dict[str, str | bytes | None]):
+    """Extract OTEL context from W3C TraceContext headers.
+
+    Intended for gRPC metadata and other header-like carriers.
+    Returns an OTEL context object (or None if OTEL isn't available).
+
+    Notes:
+    - Input is a simple dict-like mapping; keys are treated case-insensitively.
+    - Currently we care mainly about `traceparent`.
+    """
+
+    try:
+        from opentelemetry.propagate import get_global_textmap
+    except Exception:
+        return None
+
+    propagator = get_global_textmap()
+    if propagator is None:
+        return None
+
+    # Normalize carrier to string->string.
+    carrier: dict[str, str] = {}
+    for k, v in (headers or {}).items():
+        if k is None:
+            continue
+        kk = str(k).lower()
+        if v is None:
+            continue
+        if isinstance(v, bytes):
+            try:
+                carrier[kk] = v.decode("utf-8", errors="ignore")
+            except Exception:
+                continue
+        else:
+            carrier[kk] = str(v)
+
+    try:
+        return propagator.extract(carrier)
+    except Exception:
+        return None

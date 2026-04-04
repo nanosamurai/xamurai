@@ -184,6 +184,24 @@ rtservice:
     enabled: false
     count: 1
 
+  # Observability / debugging
+  #
+  # Security note: metrics endpoint defaults to binding 127.0.0.1 in the container.
+  # In Kubernetes we also expose it only as a ClusterIP port.
+  observability:
+    metrics:
+      enabled: true
+      port: 8008
+    crashDiagnostics:
+      faulthandlerEnabled: true
+
+    # Concurrency safety knobs (off by default)
+    asrSerialize: false
+    diarSerialize: false
+
+  grpc:
+    maxWorkers: 8
+
   # --- Plan C: rtservice cumulative refinement defaults ---
   # These can be overridden per-session by the BFF (gRPC metadata), but we keep
   # sane operator defaults here.

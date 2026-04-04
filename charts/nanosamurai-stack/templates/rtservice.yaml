@@ -26,6 +26,10 @@ spec:
           ports:
             - name: grpc
               containerPort: 50052
+            {{- if .Values.rtservice.observability.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.rtservice.observability.metrics.port | default 8008 }}
+            {{- end }}
           env:
             - name: KAFKA_BOOTSTRAP
               value: {{ .Values.infra.kafkaBootstrapServers | quote }}
@@ -33,6 +37,30 @@ spec:
               value: "audio.raw"
             - name: RT_GRPC_PORT
               value: "50052"
+
+            - name: RT_GRPC_MAX_WORKERS
+              value: {{ .Values.rtservice.grpc.maxWorkers | default 8 | quote }}
+
+            {{- if .Values.rtservice.observability.crashDiagnostics.faulthandlerEnabled }}
+            - name: RT_FAULTHANDLER_ENABLE
+              value: "true"
+            {{- else }}
+            - name: RT_FAULTHANDLER_ENABLE
+              value: "false"
+            {{- end }}
+
+            {{- if .Values.rtservice.observability.metrics.enabled }}
+            - name: RT_METRICS_ENABLE
+              value: "true"
+            - name: RT_METRICS_PORT
+              value: {{ .Values.rtservice.observability.metrics.port | default 8008 | quote }}
+            # Bind to localhost inside the pod by default (security-first).
+            - name: RT_METRICS_ADDR
+              value: "0.0.0.0"
+            {{- else }}
+            - name: RT_METRICS_ENABLE
+              value: "false"
+            {{- end }}
 
             # --- Plan C: rtservice cumulative refinement defaults ---
             - name: RT_PARTIAL_ENABLE
@@ -142,4 +170,9 @@ spec:
     - name: grpc
       port: {{ .Values.rtservice.service.port }}
       targetPort: grpc
+    {{- if .Values.rtservice.observability.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.rtservice.observability.metrics.port | default 8008 }}
+      targetPort: metrics
+    {{- end }}
 {{- end }}
