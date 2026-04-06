@@ -19,6 +19,8 @@ from typing import Callable, Deque, Dict, List, Optional, TypedDict
 import numpy as np
 from confluent_kafka import Consumer, KafkaException, TopicPartition
 
+from drsynth_common.stream_controls import parse_stream_controls_from_kafka_headers
+
 
 KafkaHeader = tuple[str, Optional[bytes]]
 
@@ -247,6 +249,15 @@ def run_decoupled(
                 continue
             if msg.error():
                 raise KafkaException(msg.error())
+
+            controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
+            if not controls.want_refined:
+                # Skip refined jobs entirely; still commit offsets so group progresses.
+                if commit_after_produce:
+                    consumer.commit(msg, asynchronous=False)
+                else:
+                    consumer.commit(msg, asynchronous=True)
+                continue
 
             # Parse protobuf in caller to avoid dependency cycle.
             value = msg.value()
