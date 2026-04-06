@@ -243,6 +243,13 @@ For more details and troubleshooting tips (Kafka ports, ffmpeg/torio warnings, e
 
 ## Configuration (environment variables)
 
+## Stream-level configuration (per session/stream)
+
+Some behavior is configured per audio stream (set by **samuraibff** when streaming audio):
+
+- Output selection (realtime/refined/final) and recording retention are documented in:
+  - `docs/stream-output-selection.md`
+
 ### Kafka (shared across services)
 
 * `KAFKA_BOOTSTRAP` (default in code: `localhost:9092`; in compose: `broker:9092`)
