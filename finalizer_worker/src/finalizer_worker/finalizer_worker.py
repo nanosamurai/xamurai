@@ -16,6 +16,7 @@ from whisperx_worker.whisperx_worker import run_whisperx_diarized_words
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
 from drsynth_common.logging_setup import setup_logging
+from drsynth_common.stream_controls import parse_stream_controls_from_kafka_headers
 
 try:
     from opentelemetry import trace
@@ -170,6 +171,59 @@ def _load_local_wav_from_url(url: str) -> str:
         return dst
 
     raise RuntimeError(f"Unsupported recording_url scheme for finalizer: {url}")
+
+
+def _delete_recording_url(url: str) -> None:
+    """Best-effort deletion of a recording object.
+
+    This is used when the stream-level policy says we should not retain
+    recordings after transcription.
+    """
+
+    if url.startswith("file://"):
+        path = url[len("file://") :]
+        try:
+            os.unlink(path)
+            logger.info("Deleted recording file %s", path)
+        except FileNotFoundError:
+            logger.info("Recording file already deleted: %s", path)
+        except Exception:
+            logger.warning("Failed to delete recording file %s", path, exc_info=True)
+        return
+
+    if url.startswith("s3://"):
+        m = re.match(r"^s3://([^/]+)/(.+)$", url)
+        if not m:
+            logger.warning("Cannot parse s3 recording_url for deletion: %s", url)
+            return
+        bucket = m.group(1)
+        key = m.group(2)
+
+        import boto3
+        from botocore.config import Config
+
+        session_kwargs = {}
+        if S3_REGION:
+            session_kwargs["region_name"] = S3_REGION
+        if S3_ACCESS_KEY and S3_SECRET_KEY:
+            session_kwargs["aws_access_key_id"] = S3_ACCESS_KEY
+            session_kwargs["aws_secret_access_key"] = S3_SECRET_KEY
+
+        addressing_style = "path" if S3_FORCE_PATH_STYLE else "virtual"
+        cfg = Config(s3={"addressing_style": addressing_style})
+        client_kwargs = {"config": cfg}
+        if S3_ENDPOINT:
+            client_kwargs["endpoint_url"] = S3_ENDPOINT
+
+        s3 = boto3.client("s3", **session_kwargs, **client_kwargs)
+        try:
+            s3.delete_object(Bucket=bucket, Key=key)
+            logger.info("Deleted recording object s3://%s/%s", bucket, key)
+        except Exception:
+            logger.warning("Failed to delete recording object %s", url, exc_info=True)
+        return
+
+    logger.warning("Unsupported recording_url scheme for deletion: %s", url)
 
 
 def _save_transcript_json(transcript: stream_pb2.SessionTranscript) -> Optional[str]:
@@ -363,6 +417,8 @@ def main():
                     rf = stream_pb2.RecordingFinished()
                     rf.ParseFromString(msg.value())
 
+                    controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
+
                     logger.info(
                         "Processing RecordingFinished: session=%s url=%s dur=%.2fs sr=%d lang=%s tenant=%s",
                         rf.session_id,
@@ -473,6 +529,10 @@ def main():
                             "Worker may reprocess this RecordingFinished.",
                             rf.session_id,
                         )
+
+                    # Best-effort deletion after successful publish + commit.
+                    if not controls.store_recording:
+                        _delete_recording_url(rf.recording_url)
 
                 finally:
                     if span_cm is not None:
