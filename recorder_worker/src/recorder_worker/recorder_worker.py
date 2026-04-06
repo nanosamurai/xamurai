@@ -13,6 +13,7 @@ from proto_gen import stream_pb2
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
 from drsynth_common.logging_setup import setup_logging
+from drsynth_common.stream_controls import parse_stream_controls_from_kafka_headers
 
 try:
     from opentelemetry import trace
@@ -251,6 +252,10 @@ class SessionRecording:
     # *same* traceparent even if it happens later (idle timeout).
     trace_headers: Optional[list[tuple[str, Optional[bytes]]]] = None
 
+    # Stream controls captured from the last consumed AudioChunk headers.
+    # Used so finalize_session can propagate x-store-recording downstream.
+    store_recording: bool = True
+
     total_samples: int = 0
     last_activity: float = 0.0
 
@@ -360,7 +365,9 @@ def finalize_session(session_id: str, rec: SessionRecording, producer: Producer)
                 topic=TOPIC_RECORDING_FINISHED,
                 key=session_id.encode("utf-8"),
                 value=event.SerializeToString(),
-                headers=with_current_trace_context(),
+                headers=with_current_trace_context(
+                    [("x-store-recording", b"true" if rec.store_recording else b"false")]
+                ),
             )
             producer.poll(0)
         finally:
@@ -441,6 +448,12 @@ def main():
                     audio_chunk = stream_pb2.AudioChunk()
                     audio_chunk.ParseFromString(msg.value())
 
+                    controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
+                    if not controls.want_final:
+                        # Skip recording entirely (saves storage + downstream finalizer compute).
+                        consumer.commit(msg, asynchronous=True)
+                        continue
+
                     session_id = audio_chunk.session_id or ""
                     if not session_id:
                         logger.warning("AudioChunk without session_id, skipping.")
@@ -494,6 +507,8 @@ def main():
 
                     # Keep latest kafka headers for end-to-end propagation.
                     rec.trace_headers = msg.headers() or rec.trace_headers
+                    # Keep latest stream controls.
+                    rec.store_recording = bool(controls.store_recording)
 
                     pcm_bytes = audio_chunk.pcm16_le
                     if not pcm_bytes:
