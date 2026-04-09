@@ -19,7 +19,10 @@ from typing import Callable, Deque, Dict, List, Optional, TypedDict
 import numpy as np
 from confluent_kafka import Consumer, KafkaException, TopicPartition
 
-from drsynth_common.stream_controls import parse_stream_controls_from_kafka_headers
+from drsynth_common.stream_controls import (
+    parse_stream_controls_from_kafka_headers,
+    parse_refinement_window_sec_from_kafka_headers,
+)
 
 
 KafkaHeader = tuple[str, Optional[bytes]]
@@ -140,12 +143,16 @@ def run_decoupled(
     session_tenant: Dict[str, Optional[str]] = defaultdict(lambda: None)
     session_headers: Dict[str, Optional[list[KafkaHeader]]] = defaultdict(lambda: None)
 
+    # Per-session refinement window override.
+    session_slice_seconds: Dict[str, float] = defaultdict(lambda: float(slice_seconds))
+    session_slice_samples: Dict[str, int] = defaultdict(lambda: int(round(float(slice_seconds) * sample_rate)))
+
     pending_by_session: Dict[str, int] = defaultdict(int)
     state_lock = threading.Lock()
     last_poll_s: float = time.time()
     last_committed: Dict[tuple[str, int], int] = {}
 
-    slice_samples = int(slice_seconds * sample_rate)
+    default_slice_samples = int(round(float(slice_seconds) * sample_rate))
 
     def poll_loop() -> None:
         nonlocal last_poll_s
@@ -203,6 +210,8 @@ def run_decoupled(
                     session_bff_uri.pop(sid, None)
                     session_tenant.pop(sid, None)
                     session_headers.pop(sid, None)
+                    session_slice_seconds.pop(sid, None)
+                    session_slice_samples.pop(sid, None)
                     continue
 
                 pcm = _cut_samples_from_session_buffer(
@@ -211,7 +220,7 @@ def run_decoupled(
                     buffers=buffers,
                     buf_samples=buf_samples,
                 )
-                base_start = slice_index[sid] * slice_seconds
+                base_start = slice_index[sid] * float(session_slice_seconds.get(sid, float(slice_seconds)))
                 slice_idx = slice_index[sid]
                 slice_index[sid] += 1
 
@@ -243,6 +252,8 @@ def run_decoupled(
                 session_bff_uri.pop(sid, None)
                 session_tenant.pop(sid, None)
                 session_headers.pop(sid, None)
+                session_slice_seconds.pop(sid, None)
+                session_slice_samples.pop(sid, None)
 
             msg = consumer.poll(timeout=0.5)
             if msg is None:
@@ -270,6 +281,17 @@ def run_decoupled(
 
             # AudioChunk-like interface (protobuf)
             sid = getattr(audio, "session_id")
+
+            # Resolve per-session refinement window from headers.
+            if sid not in session_slice_seconds:
+                win_sec = parse_refinement_window_sec_from_kafka_headers(
+                    headers,
+                    default_sec=float(slice_seconds),
+                )
+                session_slice_seconds[sid] = float(win_sec)
+                session_slice_samples[sid] = int(round(float(win_sec) * sample_rate))
+
+            slice_samples = int(session_slice_samples.get(sid, default_slice_samples))
             lang = getattr(audio, "lang", "") or None
             bff_uri = getattr(audio, "bff_origin_uri", "") or None
             tenant = getattr(audio, "tenant_id", "") or None
@@ -295,7 +317,8 @@ def run_decoupled(
                     buffers=buffers,
                     buf_samples=buf_samples,
                 )
-                base_start = slice_index[sid] * slice_seconds
+                # base_start must use the per-session window.
+                base_start = slice_index[sid] * float(session_slice_seconds.get(sid, float(slice_seconds)))
                 slice_idx = slice_index[sid]
                 slice_index[sid] += 1
 

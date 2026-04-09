@@ -64,6 +64,23 @@ Current behavior in xamurai services:
 - `recorder_worker` propagates `x-store-recording` to `recordings.finished`.
 - `finalizer_worker` deletes the recording (best-effort) after successful publish+commit when false.
 
+### `x-refinement-window-sec`
+
+Optional float controlling how often **whisperx_worker** runs refinement (slice duration).
+
+Example:
+
+```
+x-refinement-window-sec: 20
+```
+
+Backwards compatibility:
+- header missing/unparseable ⇒ worker uses env `WHISPERX_SLICE_SECONDS` (default 60s)
+
+Notes:
+- xamurai clamps the value to a safe range (currently `[10, 600]` seconds).
+- Expected producer: `samuraibff` (from `/ws/audio` query param `refinement_window_sec`).
+
 ## gRPC metadata (rtservice)
 
 When the BFF calls `RealtimeASR.Stream`, it may pass per-stream metadata:

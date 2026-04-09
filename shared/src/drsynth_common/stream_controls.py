@@ -77,6 +77,53 @@ def _parse_bool(s: str, *, default: bool) -> bool:
 _KNOWN_OUTPUTS = {"realtime", "refined", "final"}
 
 
+def _parse_finite_float(s: str) -> Optional[float]:
+    if s is None:
+        return None
+    raw = str(s).strip()
+    if not raw:
+        return None
+    try:
+        x = float(raw)
+        if x != x:  # NaN
+            return None
+        if x in (float("inf"), float("-inf")):
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+
+def parse_refinement_window_sec_from_kafka_headers(
+    headers: Optional[Sequence[KafkaHeader]],
+    *,
+    default_sec: float,
+    min_sec: float = 10.0,
+    max_sec: float = 600.0,
+) -> float:
+    """Parse per-stream WhisperX refinement window (slice seconds) from Kafka headers.
+
+    Expected header key (as produced by samuraibff):
+    - x-refinement-window-sec
+
+    Backwards compatibility:
+    - header missing/unparseable => default_sec
+
+    Returns: float clamped to [min_sec, max_sec].
+    """
+
+    v = _header_value_opt(headers, "x-refinement-window-sec")
+    x = _parse_finite_float(v) if v is not None else None
+    if x is None:
+        return float(default_sec)
+    # Clamp
+    if x < float(min_sec):
+        return float(min_sec)
+    if x > float(max_sec):
+        return float(max_sec)
+    return float(x)
+
+
 @dataclass(frozen=True)
 class StreamControls:
     want_realtime: bool = True
