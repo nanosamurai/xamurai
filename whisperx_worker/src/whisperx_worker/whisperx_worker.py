@@ -19,6 +19,7 @@ import torch
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
 from drsynth_common.logging_setup import setup_logging
+from drsynth_common.stream_controls import parse_stream_controls_from_kafka_headers
 
 try:
     from opentelemetry import trace
@@ -1296,6 +1297,22 @@ def main():
             if msg.error():
                 logger.error("Kafka error: %s", msg.error())
                 raise KafkaException(msg.error())
+
+            controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
+            if not controls.want_refined:
+                # Skip refined processing entirely (saves GPU/CPU). We still commit
+                # offsets so this consumer group keeps up.
+                logger.debug(
+                    "Skipping refined processing due to x-outputs (session unknown yet) topic=%s partition=%s offset=%s",
+                    msg.topic(),
+                    msg.partition(),
+                    msg.offset(),
+                )
+                if _COMMIT_AFTER_PRODUCE:
+                    c.commit(msg, asynchronous=False)
+                else:
+                    c.commit(msg, asynchronous=True)
+                continue
 
             with extracted_context_from_headers(msg.headers()):
                 try:

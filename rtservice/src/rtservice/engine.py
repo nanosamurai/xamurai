@@ -1304,6 +1304,7 @@ class RealtimeEngine:
         rt_window_sec: Optional[float] = None,
         rt_overlap_sec: Optional[float] = None,
         rt_emit_every_sec: Optional[float] = None,
+        rt_partial_enable: Optional[bool] = None,
     ) -> List[AsrResult]:
         """Feed PCM16 audio bytes for a session.
 
@@ -1335,6 +1336,7 @@ class RealtimeEngine:
                 rt_window_sec=rt_window_sec,
                 rt_overlap_sec=rt_overlap_sec,
                 rt_emit_every_sec=rt_emit_every_sec,
+                rt_partial_enable=rt_partial_enable,
             )
             cfg_key = self._cfg_key(cfg)
             proc = self._get_or_create_processor(cfg, cfg_key)
@@ -1396,11 +1398,13 @@ class RealtimeEngine:
         rt_window_sec: Optional[float],
         rt_overlap_sec: Optional[float],
         rt_emit_every_sec: Optional[float],
+        rt_partial_enable: Optional[bool],
     ) -> RealtimeConfig:
         # Validate and apply per-session overrides.
         win = float(rt_window_sec) if rt_window_sec is not None else base.window_sec
         ov = float(rt_overlap_sec) if rt_overlap_sec is not None else base.overlap_sec
         emit = float(rt_emit_every_sec) if rt_emit_every_sec is not None else base.emit_every_sec
+        partial_enable = bool(rt_partial_enable) if rt_partial_enable is not None else bool(base.partial_enable)
 
         # Basic sanity. We keep ranges permissive and let operators enforce tighter
         # policies in the BFF.
@@ -1417,7 +1421,7 @@ class RealtimeEngine:
             sr=base.sr,
             window_sec=win,
             overlap_sec=ov,
-            partial_enable=base.partial_enable,
+            partial_enable=partial_enable,
             emit_every_sec=emit,
             partial_stability_repeats=base.partial_stability_repeats,
             partial_min_buffer_sec=base.partial_min_buffer_sec,

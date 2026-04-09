@@ -124,6 +124,7 @@ def _metadata_to_overrides(context: grpc.ServicerContext) -> dict:
     - x-rt-window-sec
     - x-rt-overlap-sec
     - x-rt-emit-every-sec
+    - x-rt-partial-enable
     """
 
     md = {}
@@ -136,6 +137,7 @@ def _metadata_to_overrides(context: grpc.ServicerContext) -> dict:
     win = _parse_finite_float(md.get("x-rt-window-sec"))
     ov = _parse_finite_float(md.get("x-rt-overlap-sec"))
     emit = _parse_finite_float(md.get("x-rt-emit-every-sec"))
+    partial_enable_raw = md.get("x-rt-partial-enable")
 
     out = {}
     if win is not None:
@@ -144,6 +146,13 @@ def _metadata_to_overrides(context: grpc.ServicerContext) -> dict:
         out["rt_overlap_sec"] = ov
     if emit is not None:
         out["rt_emit_every_sec"] = emit
+
+    if partial_enable_raw is not None:
+        raw = str(partial_enable_raw).strip().lower()
+        if raw in ("1", "true", "yes", "y", "on"):
+            out["rt_partial_enable"] = True
+        elif raw in ("0", "false", "no", "n", "off"):
+            out["rt_partial_enable"] = False
     return out
 
 
