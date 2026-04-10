@@ -19,7 +19,10 @@ import torch
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
 from drsynth_common.logging_setup import setup_logging
-from drsynth_common.stream_controls import parse_stream_controls_from_kafka_headers
+from drsynth_common.stream_controls import (
+    parse_stream_controls_from_kafka_headers,
+    parse_refinement_window_sec_from_kafka_headers,
+)
 
 try:
     from opentelemetry import trace
@@ -911,6 +914,7 @@ def run_whisperx_diarized_words(
 def _flush_session_partial(
     session_id: str,
     lang_hint: Optional[str],
+    refinement_window_sec: float,
     buffers: Dict[str, Deque[np.ndarray]],
     buf_samples: Dict[str, int],
     slice_index: Dict[str, int],
@@ -942,7 +946,7 @@ def _flush_session_partial(
     x = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
     sf.write(wav_path, x, SR, subtype="PCM_16")
 
-    base_start = slice_index[session_id] * SLICE_SECONDS
+    base_start = slice_index[session_id] * float(refinement_window_sec)
     slice_index[session_id] += 1
 
     logger.info(
@@ -1238,6 +1242,8 @@ def main():
     buffers: Dict[str, Deque[np.ndarray]] = defaultdict(deque)
     buf_samples: Dict[str, int] = defaultdict(int)
     slice_index: Dict[str, int] = defaultdict(int)
+    session_refinement_window_sec: Dict[str, float] = defaultdict(lambda: float(SLICE_SECONDS))
+    session_refinement_slice_samples: Dict[str, int] = defaultdict(lambda: int(round(float(SLICE_SECONDS) * SR)))
     last_activity: Dict[str, float] = defaultdict(lambda: 0.0)
     session_lang: Dict[str, Optional[str]] = defaultdict(lambda: None)
     bff_origin_uri: Dict[str, Optional[str]] = defaultdict(lambda: None)
@@ -1271,9 +1277,11 @@ def main():
                     SESSION_IDLE_SEC,
                 )
                 lang_hint = session_lang.get(sid)
+                win_sec = float(session_refinement_window_sec.get(sid, float(SLICE_SECONDS)))
                 _flush_session_partial(
                     sid,
                     lang_hint,
+                    win_sec,
                     buffers,
                     buf_samples,
                     slice_index,
@@ -1287,6 +1295,8 @@ def main():
                 session_lang.pop(sid, None)
                 bff_origin_uri.pop(sid, None)
                 tenant_id.pop(sid, None)
+                session_refinement_window_sec.pop(sid, None)
+                session_refinement_slice_samples.pop(sid, None)
 
             # --- 2) Normal Kafka polling ---
             logger.debug("Waiting for message from Kafka")
@@ -1298,7 +1308,8 @@ def main():
                 logger.error("Kafka error: %s", msg.error())
                 raise KafkaException(msg.error())
 
-            controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
+            hdrs = msg.headers() or None
+            controls = parse_stream_controls_from_kafka_headers(hdrs)
             if not controls.want_refined:
                 # Skip refined processing entirely (saves GPU/CPU). We still commit
                 # offsets so this consumer group keeps up.
@@ -1314,7 +1325,7 @@ def main():
                     c.commit(msg, asynchronous=True)
                 continue
 
-            with extracted_context_from_headers(msg.headers()):
+            with extracted_context_from_headers(hdrs):
                 try:
                     audio = stream_pb2.AudioChunk()
                     audio.ParseFromString(msg.value())
@@ -1335,6 +1346,21 @@ def main():
                         tenant_id[session_id] = tenant
                     last_activity[session_id] = now
 
+                    # Per-session refinement window (slice duration) override.
+                    # Expected Kafka header (samuraibff): x-refinement-window-sec
+                    if session_id not in session_refinement_window_sec:
+                        win_sec = parse_refinement_window_sec_from_kafka_headers(
+                            hdrs,
+                            default_sec=SLICE_SECONDS,
+                        )
+                        session_refinement_window_sec[session_id] = float(win_sec)
+                        session_refinement_slice_samples[session_id] = int(round(float(win_sec) * SR))
+                    else:
+                        win_sec = float(session_refinement_window_sec.get(session_id, float(SLICE_SECONDS)))
+
+                    refinement_window_sec = win_sec
+                    refinement_slice_samples = int(session_refinement_slice_samples.get(session_id, int(round(win_sec * SR))))
+
                     arr = np.frombuffer(audio.pcm16_le, dtype="<i2")
                     buffers[session_id].append(arr)
                     buf_samples[session_id] += arr.size
@@ -1345,8 +1371,8 @@ def main():
                         buf_samples[session_id],
                     )
 
-                    if buf_samples[session_id] >= int(SLICE_SECONDS * SR):
-                        need = int(SLICE_SECONDS * SR)
+                    if buf_samples[session_id] >= refinement_slice_samples:
+                        need = refinement_slice_samples
                         parts: List[np.ndarray] = []
                         while need > 0 and buffers[session_id]:
                             ch = buffers[session_id][0]
@@ -1368,13 +1394,13 @@ def main():
                         x = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
                         sf.write(wav_path, x, SR, subtype="PCM_16")
 
-                        base_start = slice_index[session_id] * SLICE_SECONDS
+                        base_start = slice_index[session_id] * refinement_window_sec
                         slice_index[session_id] += 1
 
                         logger.info(
                             "Session %s: built %0.1fs slice → %s",
                             session_id,
-                            SLICE_SECONDS,
+                            refinement_window_sec,
                             wav_path,
                         )
 
@@ -1392,7 +1418,7 @@ def main():
                                         span.set_attribute("nanosamurai.tenant_id", tenant_id.get(session_id))
                                     span.set_attribute("nanosamurai.slice_index", int(slice_index[session_id] - 1))
                                     span.set_attribute("nanosamurai.slice_start_s", float(base_start))
-                                    span.set_attribute("nanosamurai.slice_duration_s", float(SLICE_SECONDS))
+                                    span.set_attribute("nanosamurai.slice_duration_s", float(refinement_window_sec))
                                     span.set_attribute("nanosamurai.flush_reason", "slice")
                             except Exception:
                                 pass
@@ -1487,9 +1513,11 @@ def main():
     finally:
         for sid in list(buffers.keys()):
             lang_hint = session_lang.get(sid)
+            win_sec = float(session_refinement_window_sec.get(sid, float(SLICE_SECONDS)))
             _flush_session_partial(
                 sid,
                 lang_hint,
+                win_sec,
                 buffers,
                 buf_samples,
                 slice_index,
