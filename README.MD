@@ -289,6 +289,13 @@ Scalability / parallelization related vars:
   * These currently control scheduler-level collection of jobs (groundwork).
   * NOTE: this is not true multi-audio GPU batching yet.
 
+Refined diarization quality knobs:
+
+* `WHISPERX_DIAR_SPLIT_MODE` (`on|off`, default: `off`)
+  * When enabled, `whisperx_worker` uses diarization turns to drive speaker turns in refined output.
+  * This is a compute amplification knob (multiple WhisperX transcribe calls per slice).
+  * See `docs/whisperx-worker-diarization.md`.
+
 ### recorder_worker
 
 * `KAFKA_BOOTSTRAP`
