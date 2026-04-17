@@ -245,6 +245,15 @@ whisperxWorker:
     maxWaitMs: 30
     mode: sequential
 
+  # Diarization-driven re-segmentation for refined output.
+  # NOTE: enabling this increases compute (multiple WhisperX transcribes per slice).
+  diarSplit:
+    mode: "off"   # off|on
+    minTurnSec: 0.7
+    mergeGapSec: 0.15
+    maxTurns: 40
+    maxAudioSec: 90.0
+
 recorderWorker:
   enabled: true
 

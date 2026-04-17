@@ -80,6 +80,18 @@ spec:
             - name: WHISPERX_BATCH_MODE
               value: {{ .Values.whisperxWorker.batch.mode | default "sequential" | quote }}
 
+            # Diarization-driven re-segmentation for refined speaker turns.
+            - name: WHISPERX_DIAR_SPLIT_MODE
+              value: {{ .Values.whisperxWorker.diarSplit.mode | default "off" | quote }}
+            - name: WHISPERX_DIAR_SPLIT_MIN_TURN_SEC
+              value: {{ .Values.whisperxWorker.diarSplit.minTurnSec | default 0.7 | quote }}
+            - name: WHISPERX_DIAR_SPLIT_MERGE_GAP_SEC
+              value: {{ .Values.whisperxWorker.diarSplit.mergeGapSec | default 0.15 | quote }}
+            - name: WHISPERX_DIAR_SPLIT_MAX_TURNS
+              value: {{ .Values.whisperxWorker.diarSplit.maxTurns | default 40 | quote }}
+            - name: WHISPERX_DIAR_SPLIT_MAX_AUDIO_SEC
+              value: {{ .Values.whisperxWorker.diarSplit.maxAudioSec | default 90.0 | quote }}
+
             {{- include "nanosamurai-stack.enrollmentEnv" . | nindent 12 }}
 
           {{- if and .Values.whisperxWorker.gpu.enabled (gt (int .Values.whisperxWorker.gpu.count) 0) }}

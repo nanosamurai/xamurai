@@ -14,7 +14,13 @@ from proto_gen import stream_pb2
 
 import time
 
-import torch
+# NOTE: torch is not installed in lightweight unit-test environments.
+# Keep this import optional so `import whisperx_worker.whisperx_worker` works
+# even without torch.
+try:
+    import torch
+except Exception:  # pragma: no cover
+    torch = None  # type: ignore[assignment]
 
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
@@ -43,13 +49,30 @@ KafkaHeader = tuple[str, Optional[bytes]]
 # NOTE: weights_only=False can load arbitrary pickled code. Do not use this with
 # untrusted checkpoints.
 
-try:
-    from omegaconf import DictConfig, ListConfig
-    from omegaconf.base import ContainerMetadata
-
-    # Nodes show up in some serialized OmegaConf objects.
+if torch is not None:
     try:
-        from omegaconf.nodes import (
+        from omegaconf import DictConfig, ListConfig
+        from omegaconf.base import ContainerMetadata
+
+        # Nodes show up in some serialized OmegaConf objects.
+        try:
+            from omegaconf.nodes import (
+                AnyNode,
+                BooleanNode,
+                BytesNode,
+                EnumNode,
+                FloatNode,
+                IntegerNode,
+                PathNode,
+                StringNode,
+            )
+        except Exception:
+            AnyNode = BooleanNode = BytesNode = EnumNode = FloatNode = IntegerNode = PathNode = StringNode = None
+
+        safe = [
+            DictConfig,
+            ListConfig,
+            ContainerMetadata,
             AnyNode,
             BooleanNode,
             BytesNode,
@@ -58,46 +81,31 @@ try:
             IntegerNode,
             PathNode,
             StringNode,
-        )
+        ]
+        torch.serialization.add_safe_globals([c for c in safe if c is not None])
     except Exception:
-        AnyNode = BooleanNode = BytesNode = EnumNode = FloatNode = IntegerNode = PathNode = StringNode = None
+        pass
 
-    safe = [
-        DictConfig,
-        ListConfig,
-        ContainerMetadata,
-        AnyNode,
-        BooleanNode,
-        BytesNode,
-        EnumNode,
-        FloatNode,
-        IntegerNode,
-        PathNode,
-        StringNode,
-    ]
-    torch.serialization.add_safe_globals([c for c in safe if c is not None])
-except Exception:
-    pass
+if torch is not None:
+    try:
+        # Make this idempotent across module reloads (tests do importlib.reload).
+        # Store the original unwrapped torch.load on the torch module.
+        if not hasattr(torch, "_drsynth_orig_load"):
+            torch._drsynth_orig_load = torch.load  # type: ignore[attr-defined]
 
-try:
-    # Make this idempotent across module reloads (tests do importlib.reload).
-    # Store the original unwrapped torch.load on the torch module.
-    if not hasattr(torch, "_drsynth_orig_load"):
-        torch._drsynth_orig_load = torch.load  # type: ignore[attr-defined]
+        if getattr(torch.load, "__name__", "") != "_torch_load_weights_only_false_default":
+            _orig_torch_load = torch._drsynth_orig_load  # type: ignore[attr-defined]
 
-    if getattr(torch.load, "__name__", "") != "_torch_load_weights_only_false_default":
-        _orig_torch_load = torch._drsynth_orig_load  # type: ignore[attr-defined]
+            def _torch_load_weights_only_false_default(*args, **kwargs):
+                # Force weights_only=False even if a caller explicitly passes True.
+                # This is required for some Lightning/pyannote checkpoints containing
+                # objects outside the default safe allowlist.
+                kwargs["weights_only"] = False
+                return _orig_torch_load(*args, **kwargs)
 
-        def _torch_load_weights_only_false_default(*args, **kwargs):
-            # Force weights_only=False even if a caller explicitly passes True.
-            # This is required for some Lightning/pyannote checkpoints containing
-            # objects outside the default safe allowlist.
-            kwargs["weights_only"] = False
-            return _orig_torch_load(*args, **kwargs)
-
-        torch.load = _torch_load_weights_only_false_default
-except Exception:
-    pass
+            torch.load = _torch_load_weights_only_false_default
+    except Exception:
+        pass
 
 # NOTE: whisperx is heavy and not installed in all envs (e.g. drsynth-bff).
 # Import lazily inside functions so unit tests can still import this module.
@@ -215,6 +223,35 @@ _ENROLL_CACHE: Optional["EnrollmentCache"] = None
 
 ENROLL_SIM_THRESHOLD = float(os.getenv("ENROLL_SIM_THRESHOLD", "0.30"))
 
+# Refined diarization quality fix:
+#
+# When enabled, use diarization segments to drive speaker turns (re-segmentation)
+# instead of relying on WhisperX ASR segment boundaries.
+#
+# Why:
+# - For long refinement windows, WhisperX often emits 1-2 coarse ASR segments.
+# - Our default overlap-based assignment picks one speaker per ASR segment,
+#   collapsing back-and-forth turns into a single speaker label.
+#
+# With split mode ON, we:
+# - run pyannote diarization on the slice
+# - merge turns (short gaps, drop tiny turns)
+# - run WhisperX transcription per turn
+# - emit segments with speaker = diarization speaker (or enrolled mapped label)
+
+_DIAR_SPLIT_MODE = os.getenv("WHISPERX_DIAR_SPLIT_MODE", "off").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "y",
+    "on",
+)
+
+_DIAR_SPLIT_MIN_TURN_SEC = float(os.getenv("WHISPERX_DIAR_SPLIT_MIN_TURN_SEC", "0.7"))
+_DIAR_SPLIT_MERGE_GAP_SEC = float(os.getenv("WHISPERX_DIAR_SPLIT_MERGE_GAP_SEC", "0.15"))
+_DIAR_SPLIT_MAX_TURNS = int(os.getenv("WHISPERX_DIAR_SPLIT_MAX_TURNS", "40"))
+_DIAR_SPLIT_MAX_AUDIO_SEC = float(os.getenv("WHISPERX_DIAR_SPLIT_MAX_AUDIO_SEC", "90.0"))
+
 _DIAR_INIT_ATTEMPTED = False
 
 
@@ -235,6 +272,10 @@ def _init_diarization_models() -> None:
     """Best-effort initialization of diarization + embedding models."""
 
     global _DIAR_PIPE, _DIAR_DEVICE, _EMBED_INFER, _ENROLL_CACHE, _LEGACY_ENROLLED, _DIAR_INIT_ATTEMPTED
+
+    if torch is None:
+        logger.warning("torch not available; WhisperX diarization will be disabled")
+        return
 
     if not _DIAR_INIT_ATTEMPTED:
         _DIAR_INIT_ATTEMPTED = True
@@ -263,7 +304,9 @@ def _init_diarization_models() -> None:
         logger.info("WHISPERX_ENABLE_DIARIZATION=false; diarization disabled")
         return
 
-    if _DIAR_PIPE is not None and _EMBED_INFER is not None:
+    # If diarization pipeline is already initialized we keep it.
+    # Embedding inference can be absent when enrollment mapping is disabled.
+    if _DIAR_PIPE is not None:
         return
 
     hf_token = os.getenv("HF_TOKEN")
@@ -447,6 +490,9 @@ def _embed_wave(wave: np.ndarray) -> Optional[np.ndarray]:
     if _EMBED_INFER is None or wave.size < int(0.25 * SR):
         return None
 
+    if torch is None:
+        return None
+
     try:
         with _EMBED_LOCK:
             audio = {"waveform": torch.from_numpy(wave).unsqueeze(0), "sample_rate": SR}
@@ -506,6 +552,9 @@ def _diarize_audio(audio: np.ndarray) -> List[DiarizationSegment]:
     if _DIAR_PIPE is None:
         return []
 
+    if torch is None:
+        return []
+
     try:
         w = torch.from_numpy(audio.astype(np.float32, copy=False)).unsqueeze(0)
         out = _DIAR_PIPE({"waveform": w, "sample_rate": SR})
@@ -530,6 +579,95 @@ def _diarize_audio(audio: np.ndarray) -> List[DiarizationSegment]:
         return []
 
 
+def _merge_diarization_turns(
+    diar: List[DiarizationSegment],
+    *,
+    min_turn_sec: float,
+    merge_gap_sec: float,
+    max_turns: int,
+) -> List[DiarizationSegment]:
+    """Merge diarization segments into a stable set of speaker turns.
+
+    We merge consecutive segments for the same speaker when gaps are small, and
+    drop segments shorter than `min_turn_sec`.
+    """
+
+    if not diar:
+        return []
+
+    # Sort by time just in case.
+    diar_sorted = sorted(diar, key=lambda s: (float(s.start_s), float(s.end_s)))
+    out: List[DiarizationSegment] = []
+
+    for seg in diar_sorted:
+        s0 = float(seg.start_s)
+        s1 = float(seg.end_s)
+        spk = str(seg.speaker or "")
+        if s1 <= s0:
+            continue
+        # Drop tiny turns (they tend to be diarization noise and amplify compute).
+        if (s1 - s0) < float(min_turn_sec):
+            continue
+        if not spk:
+            continue
+
+        if not out:
+            out.append(DiarizationSegment(start_s=s0, end_s=s1, speaker=spk))
+            continue
+
+        prev = out[-1]
+        gap = s0 - float(prev.end_s)
+        if spk == prev.speaker and gap <= float(merge_gap_sec):
+            out[-1] = DiarizationSegment(start_s=float(prev.start_s), end_s=max(float(prev.end_s), s1), speaker=spk)
+        else:
+            out.append(DiarizationSegment(start_s=s0, end_s=s1, speaker=spk))
+
+        if len(out) >= int(max_turns):
+            # Hard bound to prevent compute amplification.
+            break
+
+    return out
+
+
+def _transcribe_audio_array(
+    audio: np.ndarray,
+    *,
+    lang: Optional[str],
+) -> Tuple[str, List[Tuple[float, float, str]]]:
+    """Transcribe a float32 waveform array with WhisperX model.
+
+    Returns (full_text, segments) where segments are relative to the input array.
+    """
+
+    if audio.size == 0:
+        return "", []
+
+    try:
+        if lang:
+            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
+        else:
+            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
+    except IndexError:
+        # WhisperX raises IndexError when no speech is detected in some versions.
+        return "", []
+
+    asr_segments = result.get("segments", []) or []
+    segs_out: List[Tuple[float, float, str]] = []
+    texts: List[str] = []
+    for seg in asr_segments:
+        try:
+            s0 = float(seg.get("start", 0.0))
+            s1 = float(seg.get("end", 0.0))
+            text = (seg.get("text") or "").strip()
+        except Exception:
+            continue
+        if not text or s1 <= s0:
+            continue
+        segs_out.append((s0, s1, text))
+        texts.append(text)
+    return " ".join(texts).strip(), segs_out
+
+
 def run_whisperx_diarized(
     wav_path: str,
     *,
@@ -541,11 +679,12 @@ def run_whisperx_diarized(
 
     _init_diarization_models()
 
-    full_text, segs = run_whisperx(wav_path, lang=lang, use_alignment=use_alignment)
-
-    if not _ENABLE_DIARIZATION or _DIAR_PIPE is None or _EMBED_INFER is None:
+    # If torch isn't available, diarization cannot run.
+    if torch is None:
+        full_text, segs = run_whisperx(wav_path, lang=lang, use_alignment=use_alignment)
         return full_text, segs
 
+    # We need the slice audio regardless: diarization may drive re-segmentation.
     _ensure_whisperx_imported()
     try:
         audio = whisperx.load_audio(wav_path)
@@ -556,36 +695,29 @@ def run_whisperx_diarized(
         audio = audio.mean(axis=1)
     audio = np.asarray(audio, dtype=np.float32).reshape(-1)
 
+    # Baseline ASR over full slice.
+    full_text, segs = run_whisperx(wav_path, lang=lang, use_alignment=use_alignment)
+
+    if not _ENABLE_DIARIZATION or _DIAR_PIPE is None:
+        return full_text, segs
+
     diar = _diarize_audio(audio)
     if not diar:
         return full_text, segs
 
-    asr_time_segs = [TimeSegment(start_s=s0, end_s=s1) for (s0, s1, _txt, _spk) in segs]
-    diar_speakers = assign_speaker_by_overlap(
-        segments=asr_time_segs,
-        diarization=diar,
-        default_speaker="",
-        min_coverage=0.1,
-    )
-
-    assigned = sum(1 for s in diar_speakers if s)
+    uniq_speakers = sorted({d.speaker for d in diar if d.speaker})
     logger.info(
-        "Overlap assignment: asr_segments=%d assigned=%d unique=%d",
-        len(asr_time_segs),
-        assigned,
-        len(set(diar_speakers)),
+        "whisperx_worker diarization: diar_segments=%d unique_speakers=%d split_mode=%s",
+        len(diar),
+        len(uniq_speakers),
+        _DIAR_SPLIT_MODE,
     )
 
+    # Compute enrollment mapping (optional, best-effort).
     enrolled = _get_enrolled_embeddings_for_tenant(tenant)
-    logger.info(
-        "Enrollment snapshot: tenant=%s labels=%d",
-        (tenant or "default"),
-        len(enrolled),
-    )
-
     cluster_map: Dict[str, str] = {}
-    if enrolled:
-        unique_clusters = sorted({s for s in diar_speakers if s})
+    if enrolled and _EMBED_INFER is not None:
+        unique_clusters = sorted({d.speaker for d in diar if d.speaker})
         for cluster in unique_clusters:
             chunks = []
             for d in diar:
@@ -611,6 +743,71 @@ def run_whisperx_diarized(
             mapped = _map_embedding_to_enrolled_label(emb, enrolled)
             if mapped:
                 cluster_map[cluster] = mapped
+
+    # If split mode is enabled and multiple speakers are present, use diarization
+    # turns to drive segmentation and transcribe per turn.
+    if _DIAR_SPLIT_MODE and len(uniq_speakers) >= 2:
+        audio_dur_s = float(audio.size) / float(SR)
+        if audio_dur_s > float(_DIAR_SPLIT_MAX_AUDIO_SEC):
+            logger.warning(
+                "WHISPERX_DIAR_SPLIT_MODE on but slice too long (%.2fs > %.2fs). Falling back to overlap assignment.",
+                audio_dur_s,
+                float(_DIAR_SPLIT_MAX_AUDIO_SEC),
+            )
+        else:
+            turns = _merge_diarization_turns(
+                diar,
+                min_turn_sec=float(_DIAR_SPLIT_MIN_TURN_SEC),
+                merge_gap_sec=float(_DIAR_SPLIT_MERGE_GAP_SEC),
+                max_turns=int(_DIAR_SPLIT_MAX_TURNS),
+            )
+
+            logger.info(
+                "whisperx_worker diar split: turns=%d min_turn=%.2fs merge_gap=%.2fs max_turns=%d",
+                len(turns),
+                float(_DIAR_SPLIT_MIN_TURN_SEC),
+                float(_DIAR_SPLIT_MERGE_GAP_SEC),
+                int(_DIAR_SPLIT_MAX_TURNS),
+            )
+
+            out2: List[Tuple[float, float, str, str]] = []
+            full_parts: List[str] = []
+            for t in turns:
+                s_idx = int(max(0.0, float(t.start_s)) * SR)
+                e_idx = int(min(float(audio.size) / SR, float(t.end_s)) * SR)
+                if e_idx <= s_idx:
+                    continue
+                wave = audio[s_idx:e_idx]
+                # Safety: WhisperX expects float32.
+                wave = np.asarray(wave, dtype=np.float32)
+                txt, segs_rel = _transcribe_audio_array(wave, lang=lang)
+                if txt:
+                    full_parts.append(txt)
+                spk = cluster_map.get(t.speaker) or t.speaker
+                for (rs0, rs1, rtxt) in segs_rel:
+                    out2.append((float(t.start_s) + rs0, float(t.start_s) + rs1, rtxt, spk))
+
+            if out2:
+                return " ".join(full_parts).strip(), out2
+
+            logger.info("whisperx_worker diar split produced 0 ASR segments; falling back")
+
+    # Default behavior: assign speakers to ASR segments via overlap.
+    asr_time_segs = [TimeSegment(start_s=s0, end_s=s1) for (s0, s1, _txt, _spk) in segs]
+    diar_speakers = assign_speaker_by_overlap(
+        segments=asr_time_segs,
+        diarization=diar,
+        default_speaker="",
+        min_coverage=0.1,
+    )
+
+    assigned = sum(1 for s in diar_speakers if s)
+    logger.info(
+        "Overlap assignment: asr_segments=%d assigned=%d unique=%d",
+        len(asr_time_segs),
+        assigned,
+        len(set(diar_speakers)),
+    )
 
     out: List[Tuple[float, float, str, str]] = []
     for (seg, cluster) in zip(segs, diar_speakers):
@@ -813,6 +1010,18 @@ def run_whisperx_diarized_words(
 
     _init_diarization_models()
 
+    # If torch isn't available, diarization cannot run.
+    if torch is None:
+        full_text, segs = run_whisperx_words(
+            wav_path,
+            lang=lang,
+            use_alignment=use_alignment,
+        )
+        return full_text, [
+            {"start_s": s["start_s"], "end_s": s["end_s"], "text": s["text"], "speaker": "", "words": s["words"]}
+            for s in segs
+        ]
+
     full_text, segs = run_whisperx_words(
         wav_path,
         lang=lang,
@@ -820,7 +1029,7 @@ def run_whisperx_diarized_words(
     )
 
     # If diarization isn't available, still return segments (speaker empty).
-    if not _ENABLE_DIARIZATION or _DIAR_PIPE is None or _EMBED_INFER is None:
+    if not _ENABLE_DIARIZATION or _DIAR_PIPE is None:
         return full_text, [
             {"start_s": s["start_s"], "end_s": s["end_s"], "text": s["text"], "speaker": "", "words": s["words"]}
             for s in segs
@@ -859,15 +1068,9 @@ def run_whisperx_diarized_words(
         len(set(diar_speakers)),
     )
 
-    enrolled = _get_enrolled_embeddings_for_tenant(tenant)
-    logger.info(
-        "Enrollment snapshot: tenant=%s labels=%d",
-        (tenant or "default"),
-        len(enrolled),
-    )
-
     cluster_map: Dict[str, str] = {}
-    if enrolled:
+    enrolled = _get_enrolled_embeddings_for_tenant(tenant)
+    if enrolled and _EMBED_INFER is not None:
         unique_clusters = sorted({s for s in diar_speakers if s})
         for cluster in unique_clusters:
             chunks = []
@@ -909,6 +1112,120 @@ def run_whisperx_diarized_words(
         )
 
     return full_text, out
+
+
+def _run_inference_and_publish(*, job: Dict[str, Any], producer: Producer) -> None:
+    """Inference path for decoupled runtime (Kafka poll decoupled from GPU inference).
+
+    NOTE: This function used to be inlined in the main loop. It exists so the
+    `decoupled_runtime` module can call back into the same publish semantics.
+    """
+
+    session_id = str(job.get("session_id") or "")
+    if not session_id:
+        return
+
+    pcm = job.get("pcm16")
+    if not isinstance(pcm, np.ndarray) or pcm.size == 0:
+        return
+
+    base_start = float(job.get("base_start_s") or 0.0)
+    lang_hint = job.get("lang") or None
+    tenant = job.get("tenant_id") or None
+    bff_uri = job.get("bff_origin_uri") or None
+    trace_headers = job.get("trace_headers")
+    flush_reason = str(job.get("flush_reason") or "slice")
+    slice_index = int(job.get("slice_index") or 0)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = tmp.name
+
+    try:
+        x = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
+        sf.write(wav_path, x, SR, subtype="PCM_16")
+
+        with extracted_context_from_headers(trace_headers):
+            slice_span_cm = None
+            if trace is not None:
+                try:
+                    tracer = trace.get_tracer("whisperx_worker")
+                    slice_span_cm = tracer.start_as_current_span("whisperx.slice")
+                    slice_span_cm.__enter__()
+                    span = trace.get_current_span()
+                    if hasattr(span, "set_attribute"):
+                        span.set_attribute("nanosamurai.session_id", session_id)
+                        if tenant:
+                            span.set_attribute("nanosamurai.tenant_id", tenant)
+                        span.set_attribute("nanosamurai.slice_index", slice_index)
+                        span.set_attribute("nanosamurai.slice_start_s", float(base_start))
+                        span.set_attribute("nanosamurai.slice_duration_s", float(pcm.size) / float(SR))
+                        span.set_attribute("nanosamurai.flush_reason", flush_reason)
+                except Exception:
+                    slice_span_cm = None
+
+            try:
+                text, segments = run_whisperx_diarized(
+                    wav_path,
+                    tenant=tenant,
+                    lang=lang_hint,
+                    use_alignment=False,
+                )
+
+                if trace is not None:
+                    try:
+                        span = trace.get_current_span()
+                        if hasattr(span, "set_attribute"):
+                            span.set_attribute("nanosamurai.segments_count", int(len(segments)))
+                            span.set_attribute("nanosamurai.text_len", int(len(text or "")))
+                    except Exception:
+                        pass
+
+                publish_span_cm = None
+                if trace is not None:
+                    try:
+                        tracer = trace.get_tracer("whisperx_worker")
+                        publish_span_cm = tracer.start_as_current_span("kafka.produce transcripts.refined")
+                        publish_span_cm.__enter__()
+                    except Exception:
+                        publish_span_cm = None
+
+                try:
+                    for (s0, s1, seg_text, speaker) in segments:
+                        ev = stream_pb2.RefinedEvent(
+                            session_id=session_id,
+                            start_s=float(base_start + s0),
+                            end_s=float(base_start + s1),
+                            text=str(seg_text or ""),
+                            speaker=str(speaker or ""),
+                            supersedes_seq=[],
+                            lang=str(lang_hint or ""),
+                            bff_origin_uri=str(bff_uri or ""),
+                            tenant_id=str(tenant or ""),
+                        )
+                        producer.produce(
+                            topic=TOPIC_REFINED,
+                            key=session_id.encode("utf-8"),
+                            value=ev.SerializeToString(),
+                            headers=with_current_trace_context(),
+                        )
+                finally:
+                    if publish_span_cm is not None:
+                        try:
+                            publish_span_cm.__exit__(None, None, None)
+                        except Exception:
+                            pass
+                producer.poll(0)
+            finally:
+                if slice_span_cm is not None:
+                    try:
+                        slice_span_cm.__exit__(None, None, None)
+                    except Exception:
+                        pass
+    finally:
+        try:
+            os.unlink(wav_path)
+        except Exception:
+            pass
 
 
 def _flush_session_partial(
@@ -1068,6 +1385,9 @@ def _ensure_whisperx_imported() -> None:
 
 
 def _init_whisperx(lang_hint: Optional[str] = None) -> None:
+    if torch is None:
+        raise RuntimeError("torch is required for whisperx_worker inference but is not installed")
+
     global _WHISPERX_MODEL, _ALIGN_MODEL, _ALIGN_METADATA, _WHISPERX_DEVICE
 
     _ensure_whisperx_imported()
@@ -1183,6 +1503,10 @@ def main():
     setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "whisperx-worker"))
 
     logger.info("Starting whisperx_worker")
+
+    if torch is None:
+        logger.exception("whisperx_worker: torch not installed; cannot start")
+        return
 
     if not torch.cuda.is_available():
         logger.warning(

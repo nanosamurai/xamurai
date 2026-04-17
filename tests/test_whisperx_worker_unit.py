@@ -60,6 +60,111 @@ def reset_globals(monkeypatch):
     whisperx_worker._ALIGN_METADATA = None
 
 
+def test_merge_diarization_turns_merges_same_speaker_and_drops_tiny() -> None:
+    diar = [
+        whisperx_worker.DiarizationSegment(start_s=0.0, end_s=0.3, speaker="A"),  # tiny -> drop
+        whisperx_worker.DiarizationSegment(start_s=0.3, end_s=1.0, speaker="A"),
+        whisperx_worker.DiarizationSegment(start_s=1.05, end_s=2.0, speaker="A"),  # merge (gap 0.05)
+        whisperx_worker.DiarizationSegment(start_s=2.2, end_s=3.0, speaker="B"),
+        whisperx_worker.DiarizationSegment(start_s=3.05, end_s=3.6, speaker="B"),  # merge (gap 0.05)
+    ]
+
+    out = whisperx_worker._merge_diarization_turns(
+        diar,
+        min_turn_sec=0.5,
+        merge_gap_sec=0.15,
+        max_turns=100,
+    )
+
+    assert [(round(s.start_s, 2), round(s.end_s, 2), s.speaker) for s in out] == [
+        (0.3, 2.0, "A"),
+        (2.2, 3.6, "B"),
+    ]
+
+
+def test_run_whisperx_diarized_split_mode_uses_diar_turns(monkeypatch, tmp_path):
+    """When split-mode is enabled and diarization yields multiple speakers,
+    expect multiple output segments with speaker labels even if baseline ASR is coarse.
+    """
+
+    # Baseline coarse ASR: a single long segment.
+    dummy_model = DummyWhisperXModel([
+        {"start": 0.0, "end": 10.0, "text": "Hello world"},
+    ])
+
+    # avoid real model init
+    monkeypatch.setattr(whisperx_worker, "_init_whisperx", lambda lang_hint=None: None)
+    whisperx_worker._WHISPERX_MODEL = dummy_model
+
+    # Ensure split mode enabled.
+    monkeypatch.setattr(whisperx_worker, "_DIAR_SPLIT_MODE", True, raising=False)
+    monkeypatch.setattr(whisperx_worker, "_DIAR_SPLIT_MAX_AUDIO_SEC", 90.0, raising=False)
+    monkeypatch.setattr(whisperx_worker, "_DIAR_SPLIT_MIN_TURN_SEC", 0.5, raising=False)
+    monkeypatch.setattr(whisperx_worker, "_DIAR_SPLIT_MERGE_GAP_SEC", 0.15, raising=False)
+    monkeypatch.setattr(whisperx_worker, "_DIAR_SPLIT_MAX_TURNS", 40, raising=False)
+
+    # Fake diarization output: A then B.
+    monkeypatch.setattr(
+        whisperx_worker,
+        "_diarize_audio",
+        lambda _audio: [
+            whisperx_worker.DiarizationSegment(start_s=0.0, end_s=2.0, speaker="A"),
+            whisperx_worker.DiarizationSegment(start_s=2.0, end_s=4.0, speaker="B"),
+        ],
+        raising=False,
+    )
+
+    # Pretend diar pipeline exists so run_whisperx_diarized treats diarization as enabled.
+    monkeypatch.setattr(whisperx_worker, "_ENABLE_DIARIZATION", True, raising=False)
+    monkeypatch.setattr(whisperx_worker, "_DIAR_PIPE", object(), raising=False)
+
+    # Split path requires torch available (otherwise worker falls back).
+    monkeypatch.setattr(whisperx_worker, "torch", object(), raising=False)
+
+    # avoid real audio load
+    monkeypatch.setattr(
+        whisperx_worker.whisperx,
+        "load_audio",
+        lambda _p: np.zeros(10 * 16000, dtype=np.float32),
+    )
+
+    # Also patch sf.read fallback just in case
+    monkeypatch.setattr(
+        whisperx_worker.sf,
+        "read",
+        lambda _p, dtype=None: (np.zeros(10 * 16000, dtype=np.float32), 16000),
+    )
+
+    # Make per-turn transcribe return different text segments so we can see they were invoked.
+    calls = {"n": 0}
+
+    def _fake_transcribe_arr(_arr, *, lang):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "aaa", [(0.0, 1.0, "aaa")]
+        return "bbb", [(0.0, 1.0, "bbb")]
+
+    monkeypatch.setattr(whisperx_worker, "_transcribe_audio_array", _fake_transcribe_arr, raising=False)
+
+    wav_path = str(tmp_path / "dummy.wav")
+    Path(wav_path).write_bytes(b"")
+
+    full_text, out_segments = whisperx_worker.run_whisperx_diarized(
+        wav_path,
+        tenant="t",
+        lang="en",
+        use_alignment=False,
+    )
+
+    assert calls["n"] == 2, "Expected per-turn transcription to run twice"
+    assert full_text == "aaa bbb"
+    # Expect 2 segments with speakers A and B.
+    assert [(round(s0, 2), round(s1, 2), txt, spk) for (s0, s1, txt, spk) in out_segments] == [
+        (0.0, 1.0, "aaa", "A"),
+        (2.0, 3.0, "bbb", "B"),
+    ]
+
+
 def test_init_whisperx_respects_env_compute_type(monkeypatch, tmp_path):
     """
     Unit-level check: _init_whisperx picks compute_type from WHISPERX_COMPUTE_TYPE,
@@ -74,8 +179,16 @@ def test_init_whisperx_respects_env_compute_type(monkeypatch, tmp_path):
         calls["vad_method"] = vad_method
         return DummyWhisperXModel([])
 
-    # Pretend we have no GPU so device="cpu"
-    monkeypatch.setattr(whisperx_worker.torch.cuda, "is_available", lambda: False)
+    # Provide a minimal torch stub so _init_whisperx can decide on device.
+    class _Cuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class _Torch:
+        cuda = _Cuda()
+
+    monkeypatch.setattr(whisperx_worker, "torch", _Torch(), raising=False)
     monkeypatch.setattr(whisperx_worker.whisperx, "load_model", fake_load_model)
 
     os.environ["WHISPERX_COMPUTE_TYPE"] = "int8_float32"
