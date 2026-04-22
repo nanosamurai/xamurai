@@ -61,6 +61,12 @@ message RefinedEvent {
   // This value is copied from AudioChunk.tenant_id by the worker.
   string tenant_id = 9;
 
+  // Removed fields (kept reserved for wire compatibility):
+  // - 10/11: window_start_s/window_end_s (redundant with start_s/end_s)
+  // - 16: full_text (redundant with text)
+  reserved 10, 11, 16;
+  reserved "window_start_s", "window_end_s", "full_text";
+
   // ----------------------------------------------------------------------
   // Window-level refined transcript (one event per refinement window slice)
   // ----------------------------------------------------------------------
@@ -73,8 +79,8 @@ message RefinedEvent {
   //
   // For backwards compatibility, the legacy scalar fields (start_s/end_s/text)
   // may be populated as:
-  // - start_s/end_s = window_start_s/window_end_s
-  // - text          = full_text
+  // - start_s/end_s = window boundaries
+  // - text          = concatenation of segments[].text
   // - speaker       = "" (speaker lives on segments[])
 
   // Identity and timing of the refinement window.
@@ -86,7 +92,6 @@ message RefinedEvent {
 
   // The refined transcript for this window.
   repeated SessionTranscriptSegment segments = 15;
-  string full_text = 16;
 
   // Optional metadata for dedupe/ordering.
   uint64 created_at_ns = 17;
