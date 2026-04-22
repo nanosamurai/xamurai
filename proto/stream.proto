@@ -78,8 +78,8 @@ message RefinedEvent {
   // - speaker       = "" (speaker lives on segments[])
 
   // Identity and timing of the refinement window.
-  double window_start_s = 10;    // absolute in-session time
-  double window_end_s   = 11;    // absolute in-session time
+  // NOTE: the window boundaries are represented by the legacy scalar fields
+  // start_s/end_s.
   double window_sec     = 12;    // configured refinement window (e.g. 60.0)
   uint32 slice_index    = 13;    // 0-based index for this window size
   string flush_reason   = 14;    // "slice" | "idle" (idle = final shorter tail)
