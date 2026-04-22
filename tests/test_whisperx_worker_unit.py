@@ -334,7 +334,7 @@ def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch
     ev.ParseFromString(msg["value"])
 
     assert ev.session_id == "s1"
-    assert ev.window_start_s == pytest.approx(10.0)
+    assert ev.start_s == pytest.approx(10.0)
     assert ev.window_sec == pytest.approx(20.0)
     assert ev.slice_index == 3
     assert ev.flush_reason == "slice"

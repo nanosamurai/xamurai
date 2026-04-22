@@ -138,7 +138,7 @@ Practical UI/BFF logic (works today):
 Known limitation: FINALs are diarization segments (multiple per window) while PARTIALs are window-prefix hypotheses.
 So a PARTIAL is not a strict “preview of exactly one FINAL segment”.
 
-Follow-up (recommended): add `window_start_s` / `window_index` and optionally `segment_id` + `revision` into the proto,
+Follow-up (recommended): add `window_index` (and optionally `segment_id` + `revision`) into the proto,
 so UI can link PARTIALs to a specific committed FINAL deterministically.
 
 **More robust rule (if needed later):**

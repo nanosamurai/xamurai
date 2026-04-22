@@ -38,7 +38,8 @@ refinement window could yield multiple `RefinedEvent` messages (one per segment)
 made refined behave too similarly to the session-level **final** transcript.
 
 Important fields:
-- `window_start_s`, `window_end_s`, `window_sec`, `slice_index`, `flush_reason`
+- `start_s`, `end_s` (window boundaries)
+- `window_sec`, `slice_index`, `flush_reason`
 - `segments[]` (per turn: `start_s`, `end_s`, `text`, `speaker`)
 - `full_text` (concatenation convenience)
 
