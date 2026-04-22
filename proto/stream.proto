@@ -61,12 +61,6 @@ message RefinedEvent {
   // This value is copied from AudioChunk.tenant_id by the worker.
   string tenant_id = 9;
 
-  // Removed fields (kept reserved for wire compatibility):
-  // - 10/11: window_start_s/window_end_s (redundant with start_s/end_s)
-  // - 16: full_text (redundant with text)
-  reserved 10, 11, 16;
-  reserved "window_start_s", "window_end_s", "full_text";
-
   // ----------------------------------------------------------------------
   // Window-level refined transcript (one event per refinement window slice)
   // ----------------------------------------------------------------------
@@ -84,18 +78,17 @@ message RefinedEvent {
   // - speaker       = "" (speaker lives on segments[])
 
   // Identity and timing of the refinement window.
-  // NOTE: the window boundaries are represented by the legacy scalar fields
-  // start_s/end_s.
-  double window_sec     = 12;    // configured refinement window (e.g. 60.0)
-  uint32 slice_index    = 13;    // 0-based index for this window size
-  string flush_reason   = 14;    // "slice" | "idle" (idle = final shorter tail)
+  // NOTE: the window boundaries are represented by start_s/end_s.
+  double window_sec     = 10;    // configured refinement window (e.g. 60.0)
+  uint32 slice_index    = 11;    // 0-based index for this window size
+  string flush_reason   = 12;    // "slice" | "idle" (idle = final shorter tail)
 
-  // The refined transcript for this window.
-  repeated SessionTranscriptSegment segments = 15;
+  // The refined transcript for this window (speaker turns).
+  repeated SessionTranscriptSegment segments = 13;
 
   // Optional metadata for dedupe/ordering.
-  uint64 created_at_ns = 17;
-  string refinement_model = 18;  // e.g. "whisperx" (future: voxstral, ...)
+  uint64 created_at_ns = 14;
+  string refinement_model = 15;  // e.g. "whisperx" (future: voxstral, ...)
 }
 
 // Recording-level metadata: “recording finished, file is available”
