@@ -8,7 +8,7 @@ Motivation
 We support multiple transcript signal layers:
 
 - realtime: rtservice gRPC AsrEvent (PARTIAL + FINAL)
-- refined:  Kafka transcripts.refined (RefinedEvent)
+- refined:  Kafka transcripts.refined (RefinedEvent; one per refinement window slice; segments carry speaker turns)
 - final:    Kafka transcripts.final (SessionTranscript)
 
 End users may want only a subset. Additionally, storing the session recording

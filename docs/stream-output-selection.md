@@ -3,7 +3,7 @@
 We support multiple transcript “signal layers”:
 
 - **realtime**: gRPC `rtservice` (`AsrEvent` PARTIAL + FINAL)
-- **refined**: Kafka `transcripts.refined` (`RefinedEvent`) from `whisperx_worker`
+- **refined**: Kafka `transcripts.refined` (`RefinedEvent`, one per refinement window; `segments[]` carry speaker turns) from `whisperx_worker`
 - **final**: Kafka `transcripts.final` (`SessionTranscript`) from `finalizer_worker`
 
 Historically, every session produced all of them. This document describes the
