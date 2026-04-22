@@ -177,7 +177,8 @@ def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
             ev.ParseFromString(msg.value())
             print(
                 f"[test] got RefinedEvent: session={ev.session_id}, "
-                f"{ev.start_s:.2f}-{ev.end_s:.2f}s, text={ev.text!r}"
+                f"{ev.start_s:.2f}-{ev.end_s:.2f}s, "
+                f"segments={len(ev.segments)}, full_text_len={len(ev.full_text)}"
             )
             received_events.append(ev)
             # For this test, one event is enough
@@ -188,7 +189,7 @@ def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
     assert received_events, "Did not receive any RefinedEvent from whisperx_worker"
 
     # Optional extra sanity checks:
-    non_empty = [e for e in received_events if e.text.strip()]
+    non_empty = [e for e in received_events if (e.full_text.strip() or e.text.strip())]
     assert non_empty, "Received RefinedEvent(s) but all had empty text"
 
 
@@ -202,7 +203,7 @@ def test_whisperx_worker_diarization_and_enrollment_on_test_wav(kafka_bootstrap,
     - runs WhisperX worker against real Kafka
     - enables diarization (requires HF_TOKEN)
     - enrolls ONLY one speaker (Miro-cz.wav) to make mapping deterministic
-    - asserts at least one emitted RefinedEvent has speaker == "Miro-cz"
+    - asserts at least one emitted RefinedEvent contains a segment with speaker == "Miro-cz"
 
     This ensures diarization+enrollment mapping actually runs on the provided sample.
     """
@@ -330,10 +331,15 @@ def test_whisperx_worker_diarization_and_enrollment_on_test_wav(kafka_bootstrap,
 
             ev = stream_pb2.RefinedEvent()
             ev.ParseFromString(msg.value())
-            seen_speakers.append(ev.speaker)
-            print(f"[test] refined speaker={ev.speaker!r} text={ev.text!r}")
+            for seg in ev.segments:
+                if seg.speaker:
+                    seen_speakers.append(seg.speaker)
+            print(
+                f"[test] refined segments={len(ev.segments)} speakers={sorted(set(seen_speakers))[:5]} "
+                f"full_text_len={len(ev.full_text)}"
+            )
 
-            if ev.speaker == "Miro-cz":
+            if any((seg.speaker == "Miro-cz") for seg in ev.segments):
                 return
     finally:
         consumer.close()
@@ -356,7 +362,7 @@ def test_whisperx_worker_diarization_and_s3_enrollment_on_test_wav(
     This validates:
     - diarization actually runs
     - enrollment cache loads from S3 manifest backend
-    - emitted RefinedEvent.speaker is the enrolled human label
+    - emitted RefinedEvent contains a segment whose speaker is the enrolled human label
 
     Requires Docker (LocalStack + Kafka).
     """
@@ -492,10 +498,15 @@ def test_whisperx_worker_diarization_and_s3_enrollment_on_test_wav(
 
             ev = stream_pb2.RefinedEvent()
             ev.ParseFromString(msg.value())
-            seen_speakers.append(ev.speaker)
-            print(f"[test] refined speaker={ev.speaker!r} text={ev.text!r}")
+            for seg in ev.segments:
+                if seg.speaker:
+                    seen_speakers.append(seg.speaker)
+            print(
+                f"[test] refined segments={len(ev.segments)} speakers={sorted(set(seen_speakers))[:5]} "
+                f"full_text_len={len(ev.full_text)}"
+            )
 
-            if ev.speaker == "Miro-cz":
+            if any((seg.speaker == "Miro-cz") for seg in ev.segments):
                 return
     finally:
         consumer.close()

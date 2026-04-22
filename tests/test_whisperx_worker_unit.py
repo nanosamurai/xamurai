@@ -11,6 +11,17 @@ import pytest
 from whisperx_worker import whisperx_worker
 
 
+class _DummyProducer:
+    def __init__(self):
+        self.produced = []
+
+    def produce(self, *, topic, key, value, headers=None):
+        self.produced.append({"topic": topic, "key": key, "value": value, "headers": headers})
+
+    def poll(self, _timeout):
+        return None
+
+
 class DummyWhisperXModule:
     def __init__(self):
         self._load_model_calls = []
@@ -277,6 +288,59 @@ def test_run_whisperx_diarized_smoke_no_diarization(monkeypatch, tmp_path):
 
     assert full_text == "Hello"
     assert out_segments == [(0.0, 1.0, "Hello", "")]
+
+
+def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch, tmp_path):
+    """Regression: whisperx_worker should publish ONE RefinedEvent per slice,
+    with segments populated (window transcript semantics).
+    """
+
+    # Make inference return 2 segments.
+    monkeypatch.setattr(
+        whisperx_worker,
+        "run_whisperx_diarized",
+        lambda *_a, **_kw: ("hello world", [(0.0, 1.0, "hello", "A"), (1.0, 2.0, "world", "B")]),
+        raising=False,
+    )
+
+    # Avoid creating/cleaning a real tmp wav.
+    monkeypatch.setattr(whisperx_worker.sf, "write", lambda *_a, **_kw: None, raising=False)
+    monkeypatch.setattr(whisperx_worker.os, "unlink", lambda *_a, **_kw: None, raising=False)
+
+    # Avoid trace context complications.
+    monkeypatch.setattr(whisperx_worker, "extracted_context_from_headers", lambda _h: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(whisperx_worker, "with_current_trace_context", lambda: [])
+
+    producer = _DummyProducer()
+
+    job = {
+        "session_id": "s1",
+        "pcm16": np.zeros(16000, dtype="<i2"),
+        "base_start_s": 10.0,
+        "window_sec": 20.0,
+        "lang": "en",
+        "tenant_id": "t1",
+        "bff_origin_uri": "http://bff",
+        "trace_headers": [],
+        "flush_reason": "slice",
+        "slice_index": 3,
+    }
+
+    whisperx_worker._run_inference_and_publish(job=job, producer=producer)
+
+    assert len(producer.produced) == 1
+    msg = producer.produced[0]
+    ev = whisperx_worker.stream_pb2.RefinedEvent()
+    ev.ParseFromString(msg["value"])
+
+    assert ev.session_id == "s1"
+    assert ev.window_start_s == pytest.approx(10.0)
+    assert ev.window_sec == pytest.approx(20.0)
+    assert ev.slice_index == 3
+    assert ev.flush_reason == "slice"
+    assert len(ev.segments) == 2
+    assert [s.speaker for s in ev.segments] == ["A", "B"]
+    assert ev.full_text.strip() == "hello world"
 
 
 def test_should_evict_idle_session_true_when_idle_and_polling_recently():
