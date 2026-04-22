@@ -1231,7 +1231,6 @@ def _run_inference_and_publish(*, job: Dict[str, Any], producer: Producer) -> No
                         slice_index=int(slice_index),
                         flush_reason=str(flush_reason),
                         segments=seg_msgs,
-                        full_text=full_text,
                         created_at_ns=int(time.time_ns()),
                         refinement_model="whisperx",
                     )
@@ -1399,7 +1398,6 @@ def _flush_session_partial(
                     slice_index=int(slice_idx),
                     flush_reason="idle",
                     segments=seg_msgs,
-                    full_text=full_text,
                     created_at_ns=int(time.time_ns()),
                     refinement_model="whisperx",
                 )
@@ -1874,7 +1872,6 @@ def main():
                                     slice_index=int(slice_index[session_id] - 1),
                                     flush_reason="slice",
                                     segments=seg_msgs,
-                                    full_text=full_text,
                                     created_at_ns=int(time.time_ns()),
                                     refinement_model="whisperx",
                                 )

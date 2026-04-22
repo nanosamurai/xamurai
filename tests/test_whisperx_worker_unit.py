@@ -340,7 +340,7 @@ def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch
     assert ev.flush_reason == "slice"
     assert len(ev.segments) == 2
     assert [s.speaker for s in ev.segments] == ["A", "B"]
-    assert ev.full_text.strip() == "hello world"
+    assert ev.text.strip() == "hello world"
 
 
 def test_should_evict_idle_session_true_when_idle_and_polling_recently():

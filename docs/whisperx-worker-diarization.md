@@ -41,11 +41,11 @@ Important fields:
 - `start_s`, `end_s` (window boundaries)
 - `window_sec`, `slice_index`, `flush_reason`
 - `segments[]` (per turn: `start_s`, `end_s`, `text`, `speaker`)
-- `full_text` (concatenation convenience)
+- `text` (concatenation convenience)
 
 Backwards compatibility:
 - `start_s`/`end_s` are set to the window boundaries.
-- `text` is set to `full_text`.
+- `text` is the concatenation of `segments[].text`.
 - `speaker` is left empty; speaker labels are per segment (`segments[].speaker`).
 
 ### Configuration (environment variables)

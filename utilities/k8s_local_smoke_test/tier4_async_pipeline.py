@@ -193,14 +193,14 @@ def main() -> int:
                         print(
                             f"[tier4] PASS(signal=refined): got RefinedEvent "
                             f"for session={session_id} speakers={speakers[:5]} segments={len(ev.segments)} "
-                            f"text_len={len(ev.full_text or ev.text)}"
+                            f"text_len={len(ev.text)}"
                         )
                         return 0
 
                     print(
                         f"[tier4] PASS(signal=refined): got RefinedEvent "
                         f"for session={session_id} segments={len(ev.segments)} "
-                        f"text_len={len(ev.full_text or ev.text)}"
+                        f"text_len={len(ev.text)}"
                     )
                     return 0
 

@@ -178,7 +178,7 @@ def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
             print(
                 f"[test] got RefinedEvent: session={ev.session_id}, "
                 f"{ev.start_s:.2f}-{ev.end_s:.2f}s, "
-                f"segments={len(ev.segments)}, full_text_len={len(ev.full_text)}"
+                f"segments={len(ev.segments)}, text_len={len(ev.text)}"
             )
             received_events.append(ev)
             # For this test, one event is enough
@@ -189,7 +189,7 @@ def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
     assert received_events, "Did not receive any RefinedEvent from whisperx_worker"
 
     # Optional extra sanity checks:
-    non_empty = [e for e in received_events if (e.full_text.strip() or e.text.strip())]
+    non_empty = [e for e in received_events if (e.text.strip())]
     assert non_empty, "Received RefinedEvent(s) but all had empty text"
 
 
@@ -336,7 +336,7 @@ def test_whisperx_worker_diarization_and_enrollment_on_test_wav(kafka_bootstrap,
                     seen_speakers.append(seg.speaker)
             print(
                 f"[test] refined segments={len(ev.segments)} speakers={sorted(set(seen_speakers))[:5]} "
-                f"full_text_len={len(ev.full_text)}"
+                f"text_len={len(ev.text)}"
             )
 
             if any((seg.speaker == "Miro-cz") for seg in ev.segments):
@@ -501,9 +501,9 @@ def test_whisperx_worker_diarization_and_s3_enrollment_on_test_wav(
             for seg in ev.segments:
                 if seg.speaker:
                     seen_speakers.append(seg.speaker)
-            print(
                 f"[test] refined segments={len(ev.segments)} speakers={sorted(set(seen_speakers))[:5]} "
-                f"full_text_len={len(ev.full_text)}"
+
+                f"text_len={len(ev.text)}"
             )
 
             if any((seg.speaker == "Miro-cz") for seg in ev.segments):
