@@ -23,6 +23,30 @@ To improve speaker turn quality in refined output, `whisperx_worker` can use dia
 
 This produces multiple speaker turns within a single refinement window.
 
+## RefinedEvent semantics (window-level)
+
+Refined output is **window-based**:
+
+- The worker buffers audio per session and cuts it into refinement windows
+  (default `WHISPERX_SLICE_SECONDS=60`, overrideable per-stream via Kafka header
+  `x-refinement-window-sec`).
+- The worker emits **exactly one** Kafka message (`RefinedEvent`) per window slice.
+
+Within that single `RefinedEvent`, speaker turns / silence-separated parts are represented
+as `segments[]` (`SessionTranscriptSegment`). This avoids the previous ambiguity where one
+refinement window could yield multiple `RefinedEvent` messages (one per segment), which
+made refined behave too similarly to the session-level **final** transcript.
+
+Important fields:
+- `window_start_s`, `window_end_s`, `window_sec`, `slice_index`, `flush_reason`
+- `segments[]` (per turn: `start_s`, `end_s`, `text`, `speaker`)
+- `full_text` (concatenation convenience)
+
+Backwards compatibility:
+- `start_s`/`end_s` are set to the window boundaries.
+- `text` is set to `full_text`.
+- `speaker` is left empty; speaker labels are per segment (`segments[].speaker`).
+
 ### Configuration (environment variables)
 
 Main toggle:
