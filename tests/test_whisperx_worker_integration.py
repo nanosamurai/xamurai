@@ -501,8 +501,9 @@ def test_whisperx_worker_diarization_and_s3_enrollment_on_test_wav(
             for seg in ev.segments:
                 if seg.speaker:
                     seen_speakers.append(seg.speaker)
-                f"[test] refined segments={len(ev.segments)} speakers={sorted(set(seen_speakers))[:5]} "
 
+            print(
+                f"[test] refined segments={len(ev.segments)} speakers={sorted(set(seen_speakers))[:5]} "
                 f"text_len={len(ev.text)}"
             )
 
