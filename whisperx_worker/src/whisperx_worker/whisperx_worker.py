@@ -1130,6 +1130,7 @@ def _run_inference_and_publish(*, job: Dict[str, Any], producer: Producer) -> No
         return
 
     base_start = float(job.get("base_start_s") or 0.0)
+    window_sec = float(job.get("window_sec") or 0.0)
     lang_hint = job.get("lang") or None
     tenant = job.get("tenant_id") or None
     bff_uri = job.get("bff_origin_uri") or None
@@ -1190,24 +1191,58 @@ def _run_inference_and_publish(*, job: Dict[str, Any], producer: Producer) -> No
                         publish_span_cm = None
 
                 try:
+                    # Publish ONE refined event per refinement window slice.
+                    seg_msgs: List[stream_pb2.SessionTranscriptSegment] = []
                     for (s0, s1, seg_text, speaker) in segments:
-                        ev = stream_pb2.RefinedEvent(
-                            session_id=session_id,
-                            start_s=float(base_start + s0),
-                            end_s=float(base_start + s1),
-                            text=str(seg_text or ""),
-                            speaker=str(speaker or ""),
-                            supersedes_seq=[],
-                            lang=str(lang_hint or ""),
-                            bff_origin_uri=str(bff_uri or ""),
-                            tenant_id=str(tenant or ""),
+                        seg_msgs.append(
+                            stream_pb2.SessionTranscriptSegment(
+                                start_s=float(base_start + s0),
+                                end_s=float(base_start + s1),
+                                text=str(seg_text or ""),
+                                speaker=str(speaker or ""),
+                                words=[],
+                            )
                         )
-                        producer.produce(
-                            topic=TOPIC_REFINED,
-                            key=session_id.encode("utf-8"),
-                            value=ev.SerializeToString(),
-                            headers=with_current_trace_context(),
-                        )
+
+                    # Window end is best-effort:
+                    # - use the max segment end when segments exist
+                    # - otherwise fall back to base_start + slice duration
+                    if seg_msgs:
+                        window_end_s = max(float(s.end_s) for s in seg_msgs)
+                    else:
+                        window_end_s = float(base_start) + (float(pcm.size) / float(SR))
+
+                    window_start_s = float(base_start)
+                    effective_window_sec = float(window_sec) if float(window_sec) > 0 else float(pcm.size) / float(SR)
+                    full_text = " ".join([s.text for s in seg_msgs if (s.text or "").strip()]).strip()
+
+                    ev = stream_pb2.RefinedEvent(
+                        session_id=session_id,
+                        # Legacy scalar fields filled for backwards compatibility.
+                        start_s=window_start_s,
+                        end_s=float(window_end_s),
+                        text=full_text,
+                        speaker="",
+                        supersedes_seq=[],
+                        lang=str(lang_hint or ""),
+                        bff_origin_uri=str(bff_uri or ""),
+                        tenant_id=str(tenant or ""),
+                        window_start_s=window_start_s,
+                        window_end_s=float(window_end_s),
+                        window_sec=float(effective_window_sec),
+                        slice_index=int(slice_index),
+                        flush_reason=str(flush_reason),
+                        segments=seg_msgs,
+                        full_text=full_text,
+                        created_at_ns=int(time.time_ns()),
+                        refinement_model="whisperx",
+                    )
+                    producer.produce(
+                        topic=TOPIC_REFINED,
+                        key=session_id.encode("utf-8"),
+                        value=ev.SerializeToString(),
+                        headers=with_current_trace_context(),
+                    )
                 finally:
                     if publish_span_cm is not None:
                         try:
@@ -1264,6 +1299,7 @@ def _flush_session_partial(
     sf.write(wav_path, x, SR, subtype="PCM_16")
 
     base_start = slice_index[session_id] * float(refinement_window_sec)
+    slice_idx = int(slice_index[session_id])
     slice_index[session_id] += 1
 
     logger.info(
@@ -1290,7 +1326,7 @@ def _flush_session_partial(
                     span.set_attribute("nanosamurai.session_id", session_id)
                     if tenant_id.get(session_id):
                         span.set_attribute("nanosamurai.tenant_id", tenant_id.get(session_id))
-                    span.set_attribute("nanosamurai.slice_index", slice_index.get(session_id, 0))
+                    span.set_attribute("nanosamurai.slice_index", int(slice_idx))
                     span.set_attribute("nanosamurai.slice_start_s", float(base_start))
                     span.set_attribute("nanosamurai.slice_duration_s", float(len(pcm) / SR))
                     span.set_attribute("nanosamurai.flush_reason", "idle")
@@ -1331,26 +1367,52 @@ def _flush_session_partial(
                     publish_span_cm = None
 
             try:
+                seg_msgs: List[stream_pb2.SessionTranscriptSegment] = []
                 for (s0, s1, seg_text, speaker) in segments:
-                    abs_start = base_start + s0
-                    abs_end = base_start + s1
-                    ev = stream_pb2.RefinedEvent(
-                        session_id=session_id,
-                        start_s=abs_start,
-                        end_s=abs_end,
-                        text=seg_text,
-                        speaker=speaker,
-                        supersedes_seq=[],
-                        lang=session_lang.get(session_id),
-                        bff_origin_uri=bff_origin_uri.get(session_id),
-                        tenant_id=tenant_id.get(session_id),
+                    seg_msgs.append(
+                        stream_pb2.SessionTranscriptSegment(
+                            start_s=float(base_start + s0),
+                            end_s=float(base_start + s1),
+                            text=str(seg_text or ""),
+                            speaker=str(speaker or ""),
+                            words=[],
+                        )
                     )
-                    producer.produce(
-                        topic=TOPIC_REFINED,
-                        key=session_id.encode("utf-8"),
-                        value=ev.SerializeToString(),
-                        headers=with_current_trace_context(),
-                    )
+
+                if seg_msgs:
+                    window_end_s = max(float(s.end_s) for s in seg_msgs)
+                else:
+                    window_end_s = float(base_start) + (float(len(pcm)) / float(SR))
+
+                window_start_s = float(base_start)
+                full_text = " ".join([s.text for s in seg_msgs if (s.text or "").strip()]).strip()
+
+                ev = stream_pb2.RefinedEvent(
+                    session_id=session_id,
+                    start_s=window_start_s,
+                    end_s=float(window_end_s),
+                    text=full_text,
+                    speaker="",
+                    supersedes_seq=[],
+                    lang=session_lang.get(session_id) or "",
+                    bff_origin_uri=bff_origin_uri.get(session_id) or "",
+                    tenant_id=tenant_id.get(session_id) or "",
+                    window_start_s=window_start_s,
+                    window_end_s=float(window_end_s),
+                    window_sec=float(refinement_window_sec),
+                    slice_index=int(slice_idx),
+                    flush_reason="idle",
+                    segments=seg_msgs,
+                    full_text=full_text,
+                    created_at_ns=int(time.time_ns()),
+                    refinement_model="whisperx",
+                )
+                producer.produce(
+                    topic=TOPIC_REFINED,
+                    key=session_id.encode("utf-8"),
+                    value=ev.SerializeToString(),
+                    headers=with_current_trace_context(),
+                )
             finally:
                 if publish_span_cm is not None:
                     try:
@@ -1553,6 +1615,7 @@ def main():
                 "trace_headers": kw.get("trace_headers"),
                 "pcm16": kw["pcm16"],
                 "base_start_s": float(kw["base_start_s"]),
+                "window_sec": float(kw.get("window_sec") or float(SLICE_SECONDS)),
                 "slice_index": int(kw["slice_index"]),
                 "flush_reason": kw.get("flush_reason", "slice"),
                 "topic": kw.get("msg_topic", TOPIC_AUDIO),
@@ -1719,6 +1782,7 @@ def main():
                         sf.write(wav_path, x, SR, subtype="PCM_16")
 
                         base_start = slice_index[session_id] * refinement_window_sec
+                        slice_idx = int(slice_index[session_id])
                         slice_index[session_id] += 1
 
                         logger.info(
@@ -1740,7 +1804,7 @@ def main():
                                     span.set_attribute("nanosamurai.session_id", session_id)
                                     if tenant_id.get(session_id):
                                         span.set_attribute("nanosamurai.tenant_id", tenant_id.get(session_id))
-                                    span.set_attribute("nanosamurai.slice_index", int(slice_index[session_id] - 1))
+                                    span.set_attribute("nanosamurai.slice_index", int(slice_idx))
                                     span.set_attribute("nanosamurai.slice_start_s", float(base_start))
                                     span.set_attribute("nanosamurai.slice_duration_s", float(refinement_window_sec))
                                     span.set_attribute("nanosamurai.flush_reason", "slice")
@@ -1780,32 +1844,59 @@ def main():
                                     publish_span_cm = None
 
                             try:
+                                seg_msgs: List[stream_pb2.SessionTranscriptSegment] = []
                                 for (s0, s1, seg_text, speaker) in segments:
-                                    abs_start = base_start + s0
-                                    abs_end = base_start + s1
-                                    ev = stream_pb2.RefinedEvent(
-                                        session_id=session_id,
-                                        start_s=abs_start,
-                                        end_s=abs_end,
-                                        text=seg_text,
-                                        speaker=speaker,
-                                        supersedes_seq=[],
-                                        lang=session_lang.get(session_id),
-                                        bff_origin_uri=bff_origin_uri.get(session_id),
-                                        tenant_id=tenant_id.get(session_id),
+                                    seg_msgs.append(
+                                        stream_pb2.SessionTranscriptSegment(
+                                            start_s=float(base_start + s0),
+                                            end_s=float(base_start + s1),
+                                            text=str(seg_text or ""),
+                                            speaker=str(speaker or ""),
+                                            words=[],
+                                        )
                                     )
-                                    logger.debug(
-                                        "Sending refined message start_s=%.1f, speaker=%s, text=%s",
-                                        abs_start,
-                                        speaker,
-                                        seg_text,
-                                    )
-                                    p.produce(
-                                        topic=TOPIC_REFINED,
-                                        key=session_id.encode("utf-8"),
-                                        value=ev.SerializeToString(),
-                                        headers=with_current_trace_context(),
-                                    )
+
+                                if seg_msgs:
+                                    window_end_s = max(float(s.end_s) for s in seg_msgs)
+                                else:
+                                    window_end_s = float(base_start) + (float(pcm.size) / float(SR))
+
+                                window_start_s = float(base_start)
+                                full_text = " ".join([s.text for s in seg_msgs if (s.text or "").strip()]).strip()
+
+                                ev = stream_pb2.RefinedEvent(
+                                    session_id=session_id,
+                                    start_s=window_start_s,
+                                    end_s=float(window_end_s),
+                                    text=full_text,
+                                    speaker="",
+                                    supersedes_seq=[],
+                                    lang=session_lang.get(session_id) or "",
+                                    bff_origin_uri=bff_origin_uri.get(session_id) or "",
+                                    tenant_id=tenant_id.get(session_id) or "",
+                                    window_start_s=window_start_s,
+                                    window_end_s=float(window_end_s),
+                                    window_sec=float(refinement_window_sec),
+                                    slice_index=int(slice_index[session_id] - 1),
+                                    flush_reason="slice",
+                                    segments=seg_msgs,
+                                    full_text=full_text,
+                                    created_at_ns=int(time.time_ns()),
+                                    refinement_model="whisperx",
+                                )
+                                logger.debug(
+                                    "Sending refined window message slice=%d start_s=%.1f segments=%d text_len=%d",
+                                    int(slice_index[session_id] - 1),
+                                    window_start_s,
+                                    len(seg_msgs),
+                                    len(full_text),
+                                )
+                                p.produce(
+                                    topic=TOPIC_REFINED,
+                                    key=session_id.encode("utf-8"),
+                                    value=ev.SerializeToString(),
+                                    headers=with_current_trace_context(),
+                                )
                             finally:
                                 if publish_span_cm is not None:
                                     try:
