@@ -37,6 +37,9 @@ class SliceJob(TypedDict):
     bff_origin_uri: Optional[str]
     trace_headers: Optional[list[KafkaHeader]]
 
+    # Refinement window config for this job.
+    window_sec: float
+
     pcm16: np.ndarray
     base_start_s: float
     slice_index: int
@@ -230,6 +233,8 @@ def run_decoupled(
                     "lang": session_lang.get(sid),
                     "bff_origin_uri": session_bff_uri.get(sid),
                     "trace_headers": session_headers.get(sid),
+
+                    "window_sec": float(session_slice_seconds.get(sid, float(slice_seconds))),
                     "pcm16": pcm,
                     "base_start_s": float(base_start),
                     "slice_index": int(slice_idx),
@@ -328,6 +333,7 @@ def run_decoupled(
                     base_start_s=base_start,
                     slice_index=slice_idx,
                     flush_reason="slice",
+                    window_sec=float(session_slice_seconds.get(sid, float(slice_seconds))),
                     lang=session_lang.get(sid),
                     bff_uri=session_bff_uri.get(sid),
                     tenant=session_tenant.get(sid),

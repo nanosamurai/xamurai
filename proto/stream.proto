@@ -60,6 +60,35 @@ message RefinedEvent {
   // Tenant id for routing/isolation.
   // This value is copied from AudioChunk.tenant_id by the worker.
   string tenant_id = 9;
+
+  // ----------------------------------------------------------------------
+  // Window-level refined transcript (one event per refinement window slice)
+  // ----------------------------------------------------------------------
+  //
+  // Historical note:
+  // - Refined output is intended to be emitted once per refinement window
+  //   (default 60s, configurable via x-refinement-window-sec).
+  // - This event therefore represents a mini transcript for that window and
+  //   should carry per-speaker turns as segments.
+  //
+  // For backwards compatibility, the legacy scalar fields (start_s/end_s/text)
+  // may be populated as:
+  // - start_s/end_s = window boundaries
+  // - text          = concatenation of segments[].text
+  // - speaker       = "" (speaker lives on segments[])
+
+  // Identity and timing of the refinement window.
+  // NOTE: the window boundaries are represented by start_s/end_s.
+  double window_sec     = 10;    // configured refinement window (e.g. 60.0)
+  uint32 slice_index    = 11;    // 0-based index for this window size
+  string flush_reason   = 12;    // "slice" | "idle" (idle = final shorter tail)
+
+  // The refined transcript for this window (speaker turns).
+  repeated SessionTranscriptSegment segments = 13;
+
+  // Optional metadata for dedupe/ordering.
+  uint64 created_at_ns = 14;
+  string refinement_model = 15;  // e.g. "whisperx" (future: voxstral, ...)
 }
 
 // Recording-level metadata: “recording finished, file is available”

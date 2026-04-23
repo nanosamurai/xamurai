@@ -180,23 +180,27 @@ def main() -> int:
                 ev = stream_pb2.RefinedEvent()
                 ev.ParseFromString(payload)
                 if ev.session_id == session_id:
-                    spk = ev.speaker or ""
-                    observed_speakers[spk] = observed_speakers.get(spk, 0) + 1
+                    for seg in ev.segments:
+                        spk = seg.speaker or ""
+                        observed_speakers[spk] = observed_speakers.get(spk, 0) + 1
 
                     if args.expect_speaker:
                         accepted = [args.expect_speaker] + list(args.expect_speaker_alias or [])
-                        if ev.speaker not in accepted:
+                        if not any((seg.speaker in accepted) for seg in ev.segments):
                             # not good enough yet; keep waiting for a matching label
                             continue
+                        speakers = sorted({s.speaker for s in ev.segments if s.speaker})
                         print(
                             f"[tier4] PASS(signal=refined): got RefinedEvent "
-                            f"for session={session_id} speaker={ev.speaker!r} text_len={len(ev.text)}"
+                            f"for session={session_id} speakers={speakers[:5]} segments={len(ev.segments)} "
+                            f"text_len={len(ev.text)}"
                         )
                         return 0
 
                     print(
                         f"[tier4] PASS(signal=refined): got RefinedEvent "
-                        f"for session={session_id} text_len={len(ev.text)}"
+                        f"for session={session_id} segments={len(ev.segments)} "
+                        f"text_len={len(ev.text)}"
                     )
                     return 0
 
