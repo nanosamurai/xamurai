@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
 from drsynth_common.logging_setup import setup_logging
+from drsynth_common.pyannote_telemetry import disable_pyannote_telemetry
 from drsynth_common.stream_controls import (
     parse_stream_controls_from_kafka_headers,
     parse_refinement_window_sec_from_kafka_headers,
@@ -34,6 +35,11 @@ try:
     from opentelemetry import trace
 except Exception:  # pragma: no cover
     trace = None  # type: ignore[assignment]
+
+
+# Security: pyannote.audio may try to export telemetry to a remote OTLP endpoint.
+# Force-disable it as early as possible in the process.
+disable_pyannote_telemetry()
 
 KafkaHeader = tuple[str, Optional[bytes]]
 
