@@ -88,6 +88,10 @@ spec:
             - name: RT_PARTIAL_IDLE_RESET_SEC
               value: {{ .Values.rtservice.partial.idleResetSec | default 3.0 | quote }}
 
+            # Security: disable pyannote.audio telemetry/metrics exporter.
+            - name: PYANNOTE_METRICS_ENABLED
+              value: "0"
+
             {{- if .Values.observability.enabled }}
             - name: OTEL_SERVICE_NAME
               value: "rtservice"

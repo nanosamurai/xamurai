@@ -183,6 +183,8 @@ services:
     container_name: xamurai-rtservice
     restart: unless-stopped
     environment:
+      # Security: disable pyannote.audio telemetry/metrics exporter.
+      PYANNOTE_METRICS_ENABLED: "0"
       KAFKA_BOOTSTRAP: broker:29092
       KAFKA_TOPIC_AUDIO: audio.raw
       RT_GRPC_PORT: 50052
@@ -254,6 +256,8 @@ services:
     container_name: xamurai-whisperx-worker
     restart: unless-stopped
     environment:
+      # Security: disable pyannote.audio telemetry/metrics exporter.
+      PYANNOTE_METRICS_ENABLED: "0"
       KAFKA_BOOTSTRAP: broker:29092
       KAFKA_TOPIC_AUDIO: audio.raw
       KAFKA_TOPIC_REFINED: transcripts.refined
@@ -332,6 +336,8 @@ services:
     container_name: xamurai-finalizer-worker
     restart: unless-stopped
     environment:
+      # Security: disable pyannote.audio telemetry/metrics exporter.
+      PYANNOTE_METRICS_ENABLED: "0"
       KAFKA_BOOTSTRAP: broker:29092
       KAFKA_TOPIC_RECORDING_FINISHED: recordings.finished
       KAFKA_TOPIC_TRANSCRIPTS_FINAL: transcripts.final

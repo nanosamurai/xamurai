@@ -71,6 +71,19 @@ Notes:
 
 ## Security / abuse considerations
 
+### Pyannote telemetry
+
+`pyannote.audio` includes an optional telemetry feature that (by default) exports
+anonymous usage metrics to an upstream OTLP endpoint.
+
+In xamurai we **force-disable** this to prevent unexpected outbound connections:
+
+- `PYANNOTE_METRICS_ENABLED=0`
+
+This is enforced in two places:
+1) Runtime hardening in our service entrypoints.
+2) Explicit env var in docker-compose, Helm chart, and CI workflows.
+
 Split mode can amplify compute on highly fragmented diarization output.
 
 We mitigate this via:
