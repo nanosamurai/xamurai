@@ -51,6 +51,9 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+          # Security: disable pyannote.audio telemetry/metrics exporter.
+          PYANNOTE_METRICS_ENABLED: "0"
+
           # Keep CI feasible on CPU.
           RT_ASR_MODEL: "tiny"
         run: |

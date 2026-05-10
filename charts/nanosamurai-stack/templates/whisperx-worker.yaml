@@ -25,6 +25,10 @@ spec:
           env:
             - name: KAFKA_BOOTSTRAP
               value: {{ .Values.infra.kafkaBootstrapServers | quote }}
+
+            # Security: disable pyannote.audio telemetry/metrics exporter.
+            - name: PYANNOTE_METRICS_ENABLED
+              value: "0"
             - name: KAFKA_TOPIC_AUDIO
               value: "audio.raw"
             - name: KAFKA_TOPIC_REFINED

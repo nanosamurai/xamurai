@@ -48,6 +48,8 @@ jobs:
       - name: Run integration tests (whisperx) - real E2E
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Security: disable pyannote.audio telemetry/metrics exporter.
+          PYANNOTE_METRICS_ENABLED: "0"
           WHISPERX_MODEL: "tiny"
           WHISPERX_COMPUTE_TYPE: "int8"
           WHISPERX_VAD_METHOD: "silero"
@@ -63,6 +65,8 @@ jobs:
       - name: Run integration tests (whisperx) - diarization + local enrollment
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Security: disable pyannote.audio telemetry/metrics exporter.
+          PYANNOTE_METRICS_ENABLED: "0"
           WHISPERX_MODEL: "tiny"
           WHISPERX_COMPUTE_TYPE: "int8"
           WHISPERX_VAD_METHOD: "silero"
@@ -75,6 +79,8 @@ jobs:
       - name: Run integration tests (whisperx) - diarization + S3 enrollment (LocalStack)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Security: disable pyannote.audio telemetry/metrics exporter.
+          PYANNOTE_METRICS_ENABLED: "0"
           WHISPERX_MODEL: "tiny"
           WHISPERX_COMPUTE_TYPE: "int8"
           WHISPERX_VAD_METHOD: "silero"

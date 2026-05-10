@@ -17,6 +17,12 @@ from rtservice.engine import RealtimeEngine
 
 from drsynth_common.logging_setup import setup_logging, set_session_id_for_logging
 from drsynth_common.otel_setup import setup_otel, extract_trace_context_from_headers
+from drsynth_common.pyannote_telemetry import disable_pyannote_telemetry
+
+
+# Security: pyannote.audio may try to export telemetry to a remote OTLP endpoint.
+# Force-disable it as early as possible in the process.
+disable_pyannote_telemetry()
 
 try:
     from opentelemetry import context as otel_context
