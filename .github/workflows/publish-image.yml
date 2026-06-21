@@ -1,26 +1,21 @@
-name: Publish images (ECR)
+name: Publish images (GHCR)
 
 on:
   push:
     branches:
       - master
 
-# Needed for GitHub OIDC.
 permissions:
   contents: read
-  id-token: write
+  packages: write
 
 concurrency:
   group: publish-images-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-
 jobs:
   publish:
-    name: Build + push images to ECR
+    name: Build + push images to GHCR
     runs-on: ubuntu-latest
 
     strategy:
@@ -30,38 +25,36 @@ jobs:
           - image: rtservice
             dockerfile: rtservice/Dockerfile
             context: .
-            ecr_repo: xamurai-rtservice
+            ghcr_repo: xamurai-rtservice
           - image: whisperx-worker
             dockerfile: whisperx_worker/Dockerfile
             context: .
-            ecr_repo: xamurai-whisperx-worker
+            ghcr_repo: xamurai-whisperx-worker
           - image: recorder-worker
             dockerfile: recorder_worker/Dockerfile
             context: .
-            ecr_repo: xamurai-recorder-worker
+            ghcr_repo: xamurai-recorder-worker
           - image: finalizer-worker
             dockerfile: finalizer_worker/Dockerfile
             context: .
-            ecr_repo: xamurai-finalizer-worker
+            ghcr_repo: xamurai-finalizer-worker
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set image tags
         id: tags
         run: |
           echo "sha_tag=sha-${GITHUB_SHA}" >> $GITHUB_OUTPUT
-          echo "image_uri=${ECR_REGISTRY}/${{ matrix.ecr_repo }}:sha-${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          echo "image_uri=ghcr.io/nanosamurai/${{ matrix.ghcr_repo }}:sha-${GITHUB_SHA}" >> $GITHUB_OUTPUT
 
       - name: Docker build
         run: |
