@@ -8,7 +8,7 @@ Please **do not** open public GitHub issues for suspected security vulnerabiliti
 
 Instead, report privately by emailing:
 
-- security@nanosamurai.org (preferred)
+- security@nanosamur.ai (preferred)
 
 If that address is not yet available, contact the maintainers via GitHub.
 
