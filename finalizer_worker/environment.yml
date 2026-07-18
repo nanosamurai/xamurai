@@ -1,4 +1,4 @@
-name: drsynth-finalizer
+name: xamurai-finalizer
 channels:
   - pytorch
   - nvidia

@@ -1,4 +1,4 @@
-name: drsynth
+name: xamurai
 channels:
   - pytorch
   - nvidia

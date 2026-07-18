@@ -82,7 +82,7 @@ In xamurai we **force-disable** this to prevent unexpected outbound connections:
 
 This is enforced in two places:
 1) Runtime hardening in our service entrypoints.
-2) Explicit env var in docker-compose, Helm chart, and CI workflows.
+2) Explicit environment configuration in integration workflows.
 
 Split mode can amplify compute on highly fragmented diarization output.
 

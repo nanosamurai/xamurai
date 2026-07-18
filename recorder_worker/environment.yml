@@ -1,4 +1,4 @@
-name: drsynth-recorder
+name: xamurai-recorder
 channels:
   - conda-forge
 dependencies:

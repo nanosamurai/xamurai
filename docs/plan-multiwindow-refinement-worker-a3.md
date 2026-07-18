@@ -85,13 +85,13 @@ Since GPU is shared, a per-process job queue is needed:
 - Keep only up to `max_window_sec + overlap` in memory per session.
 - Evict idle sessions after `WHISPERX_IDLE_SECONDS` (already exists).
 
-## Kubernetes / infra implications
+## Runtime scaling implications
 
-- Still a single Deployment (`whisperx-worker`), but now it can do multiple windows per session.
-- Scale horizontally by increasing replica count.
+- A single `whisperx-worker` process can handle multiple windows per session.
+- Scale horizontally with additional worker instances and distinct consumer-group members.
 - Consider:
-  - GPU requests/limits per pod
-  - HPA based on GPU utilization (future)
+  - GPU resource isolation per worker
+  - queue lag and GPU utilization as autoscaling signals
 
 ## Other repos impacted
 

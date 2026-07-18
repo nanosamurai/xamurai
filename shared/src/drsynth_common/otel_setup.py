@@ -1,10 +1,10 @@
 """Minimal OpenTelemetry SDK setup for Python services.
 
 We intentionally keep this small and explicit (no auto-instrumentation CLI) so
-it works the same in k8s, local tests, and in workers.
+it works the same in local tests and deployed workers.
 
 - Reads standard OTEL env vars (OTEL_SERVICE_NAME, OTEL_EXPORTER_OTLP_ENDPOINT, etc.)
-- Configures OTLP exporter (gRPC) to the in-cluster collector
+- Configures an OTLP exporter (gRPC) when an endpoint is provided
 - Installs W3C TraceContext propagator by default
 
 This module is safe to import even if opentelemetry deps are missing; setup()
@@ -47,8 +47,8 @@ def setup_otel(*, service_name: Optional[str] = None) -> None:
         return
 
     # The Python gRPC exporter expects a gRPC target (host:port) or a URL.
-    # In our Helm chart we set OTEL_EXPORTER_OTLP_ENDPOINT to an HTTP URL
-    # (e.g. http://otel-collector...:4317) for compatibility with other SDKs.
+    # Some runtimes set OTEL_EXPORTER_OTLP_ENDPOINT to an HTTP URL for
+    # compatibility with other SDKs.
     # Normalize it here to avoid gRPC channel target parsing issues.
     if endpoint.startswith("http://") or endpoint.startswith("https://"):
         endpoint = endpoint.split("://", 1)[1]

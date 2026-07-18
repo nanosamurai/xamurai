@@ -70,13 +70,15 @@ Additional perf/overload knobs:
 
 - Per-chunk `np.concatenate` buffer growth is still O(n) copying; a ring-buffer would reduce CPU overhead under high chunk rates.
 - GPU scheduling/fairness across many concurrent sessions is still “best effort” in a single process.
-- True multi-GPU scaling needs multiple rtservice pods and session stickiness at the LB layer.
+- True multi-GPU scaling needs multiple rtservice instances and session
+  stickiness at the load-balancing layer.
 
 ---
 
-## Observability / crash diagnostics (EKS dev)
+## Observability and crash diagnostics
 
-In EKS dev we observed rtservice crashing under load with exit code 139 (SIGSEGV).
+In a containerized GPU load test, rtservice crashed with exit code 139
+(SIGSEGV).
 This is a **native crash** (likely a C/CUDA stack) and bypasses normal Python exception logs.
 
 rtservice therefore supports the following observability knobs:
@@ -86,8 +88,7 @@ rtservice therefore supports the following observability knobs:
 Env vars:
 - `RT_FAULTHANDLER_ENABLE` (default `true`)
   - enables `faulthandler.enable(all_threads=True)`
-  - registers SIGUSR1 so you can dump stacks on demand:
-    - `kubectl exec -it <pod> -- kill -USR1 1`
+  - registers SIGUSR1 so an operator can request a stack dump from the process
 
 ### Prometheus metrics
 
@@ -98,9 +99,7 @@ Env vars:
 - `RT_METRICS_PORT` (default `8008`)
 - `RT_METRICS_ADDR`
   - recommended for local runs: `127.0.0.1` (security-first)
-  - default in k8s Helm: `0.0.0.0` (so port-forward/scraping works)
-
-In Kubernetes, prefer accessing this via `kubectl port-forward`.
+  - broader binds must be protected by the runtime network boundary
 
 ### Trace/log correlation
 

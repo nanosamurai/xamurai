@@ -1,160 +1,124 @@
-# xamurai (Vox Samurai)
+# Xamurai
 
-Speach-to-text and speaker diarization services for Nanosamur.ai solution - provides both real-time transcription as well as near-real-time refinement. 
+Xamurai provides the speech-to-text and speaker-diarization services used by
+the nanosamurai platform. It supports realtime transcription over gRPC and
+asynchronous refinement, recording, and finalization over Kafka.
 
-Streaming audio → real-time transcript updates → session recording → session finalization (full-session transcript + optional alignment).
+For a complete self-hosted Community Edition stack, use the public
+[`nanosamurai/nanosamurai`](https://github.com/nanosamurai/nanosamurai)
+repository. Deployment orchestration and environment-specific infrastructure
+do not live in this service repository.
 
-This repo contains services that respond via gRPC and/or consume/produce on dedicated Kafka topics. Database persistence is handled by a separate service (**samuraipersistor** - https://github.com/mikub/samuraipersistor), which consumes from all relevant Kafka topics (`transcripts.refined`, `transcripts.final`) and stores the data in Postgres.
+## Services
 
-The architecture is planned to support multiple layers of "refinement" workers (such as `whisperx_worker`) that might refine different windows of the audio (e.g., 60secs, 300secs) using different models (WhisperX, Voxstral, etc.)).
+- `rtservice` exposes the bidirectional `RealtimeASR` gRPC API and emits
+  replaceable partial and committed final realtime events.
+- `whisperx_worker` consumes `audio.raw` and emits window-based
+  `transcripts.refined` events.
+- `recorder_worker` consumes `audio.raw`, stores session audio, and emits
+  `recordings.finished`.
+- `finalizer_worker` consumes `recordings.finished`, produces the canonical
+  session transcript, and emits `transcripts.final`.
+- `shared` contains the compatibility package `drsynth_common`, including
+  Kafka tracing, enrollment, logging, and stream-control helpers. The import
+  name is retained to avoid breaking downstream consumers.
 
-This repo is a Python monorepo with multiple packages (realtime service + workers) and a shared library (`drsynth_common`). The system is Kafka-centric for dataflow between services, while realtime client interaction is done via gRPC (`RealtimeASR`).
+Persistence is handled by the separate SamuraiPersistor service. Browser and
+API traffic is handled by SamuraiBFF.
 
-Xamurai used to be called "drsynth", so do not be confused if you do see this name somewhere.
+## Processing pipeline
 
-# About Nanosamur.ai
-Nanosamurai solution currently consists of 
-- **SamuraiBFF** (https://github.com/mikub/samuraibff ; locally usually at `%USERPROFILE%\IdeaProjects\samuraibff`), 
-- **xamurai** services connected via Kafka/gRPC and  
-- **samuraipersistor** (https://github.com/mikub/samuraipersistor ; locally usually at `%USERPROFILE%\IdeaProjects\samuraipersistor`) for persistence.
-- **nanodeploy** - Helm charts for local k8s  and aws EKS deployments and also local docker compose setup (https://github.com/mikub/nanodeploy ; locally usually at `%USERPROFILE%\PycharmProjects\nanodeploy`)
-- **nanplatform** - Pulumi infra setup in AWS (https://github.com/mikub/nanplatform ; locally usually at `%USERPROFILE%\PycharmProjects\nanplatform`)
-- **nanosamurai-sdk** - A python sdk client for nanosamur.ai (uses client credentials for m2m access) (https://github.com/mikub/nanosamurai-sdk ; locally usually at `%USERPROFILE%\PycharmProjects\nanosamurai-sdk`)
-- **webhook-router** - java service for filtering kafka message which should trigger webhooks configured by a user (locally usually at `%USERPROFILE%\IdeaProjects\webhook-router`)
-- **webhook-dispatcher** - java service for dispatching webhooks (locally usually at `%USERPROFILE%\IdeaProjects\webhook-dispatcher`)
+1. SamuraiBFF streams PCM16 audio to `rtservice` and publishes `AudioChunk`
+   messages to `audio.raw`.
+2. `rtservice` streams low-latency `AsrEvent` updates back over gRPC.
+3. `whisperx_worker` buffers configurable windows and publishes
+   `RefinedEvent` messages to `transcripts.refined`.
+4. `recorder_worker` finalizes the session recording and publishes
+   `RecordingFinished` to `recordings.finished`.
+5. `finalizer_worker` transcribes the completed recording and publishes
+   `SessionTranscript` to `transcripts.final`.
 
----
+Kafka messages propagate W3C `traceparent` headers. Services also attach the
+session and tenant identifiers needed for correlation and isolation.
 
-## High-level architecture
+## Repository layout
 
-### Kafka topics (current)
+- `proto/` and `proto_gen/`: protobuf contract and generated Python bindings
+- `rtservice/`: realtime gRPC service
+- `whisperx_worker/`: near-realtime refinement worker
+- `recorder_worker/`: session recording worker
+- `finalizer_worker/`: full-session finalization worker
+- `shared/`: shared Python package
+- `tests/`: unit and integration tests
+- `utilities/`: service-level development and diagnostic helpers
+- `docs/`: service behavior, performance, and interface documentation
 
-* `audio.raw`
-  Raw audio stream (`AudioChunk`). Produced by realtime ingress and consumed by:
+## Development
 
-  * `whisperx_worker` (real-time slicing)
-  * `recorder_worker` (records full-session WAV)
+The checked-in Conda specifications use Xamurai environment names:
 
-* `transcripts.refined`
-  Real-time segment events (`RefinedEvent`) from `whisperx_worker` (per slice).
+```powershell
+conda env create -f environment.yml
+conda env create -f rtservice/environment.yml
+conda env create -f whisperx_worker/environment.yml
+conda env create -f recorder_worker/environment.yml
+conda env create -f finalizer_worker/environment.yml
+```
 
-* `recordings.finished`
-  Emitted by `recorder_worker` when a session becomes idle/ends and WAV is finalized.
+Heavy ML tests require the environment matching the service under test.
+`HF_TOKEN` is required for gated pyannote models. Grant it only the minimum
+model-read permissions required by the test.
 
-* `transcripts.final`
-  Emitted by `finalizer_worker` as the canonical finished transcript event (`SessionTranscript`).
+### Generate protobuf bindings
 
-  Persisted to Postgres by **samuraipersistor** (separate service) into
-  `sessions`, `recordings`, and `session_transcripts`.
+From the repository root:
 
-  Note: **samuraipersistor** consumes from both `transcripts.refined` and `transcripts.final` topics to provide DB persistence.
+```bash
+python -m grpc_tools.protoc \
+  -I proto \
+  --python_out=proto_gen \
+  --grpc_python_out=proto_gen \
+  proto/stream.proto
+```
 
-### Processing pipeline
+Generated bindings must be committed together with any contract change.
 
-1. **BFF** serves UI/API needs (sessions list/detail, transcript retrieval, future auth/tenant/user logic).
+## Tests
 
-   * Session creation is expected to happen at session start (BFF).
-   * UI in the browser streams sound via Web Socket, BFF then stores the chunks onto Kafka for further processing by workers, while also using rtservice for realtime transcription (currently not stored into DB, just sent back to UI)
-2. **rtservice** exposes the gRPC service **`RealtimeASR`** and acts as the realtime ingestion layer.
+Install the lightweight CI dependencies and run the unit suite:
 
-   * It receives streaming audio frames (PCM16) from clients and publishes `AudioChunk` messages to Kafka (`audio.raw`).
-   * It can also subscribe to `transcripts.refined` and stream partial results back to the client (depending on our current implementation).
+```bash
+python -m pip install -r requirements.ci.txt
+pytest -q -m "not integration" \
+  tests/test_diarization_assign_unit.py \
+  tests/test_enrollment_cache_unit.py \
+  tests/test_rtservice_session_isolation_unit.py \
+  tests/test_stream_controls_unit.py
+```
 
-3. **whisperx_worker** consumes `audio.raw`, buffers per session, and every `WHISPERX_SLICE_SECONDS` emits `RefinedEvent` segments to `transcripts.refined`.
+The integration requirements are split by ML stack:
 
-4. **recorder_worker** consumes `audio.raw`, writes the full session WAV, and after idle timeout emits `RecordingFinished` to `recordings.finished`.
+```bash
+python -m pip install -r requirements.integration.fastwhisper.txt
+pytest -q -m integration tests/test_realtime_asr_grpc.py
 
-5. **finalizer_worker** consumes `recordings.finished`, runs full-session WhisperX (+ optional alignment) on the finalized WAV, stores a JSON transcript artifact, and emits a `SessionTranscript` to `transcripts.final`.
+python -m pip install -r requirements.integration.whisperx.txt
+pytest -q -m integration tests/test_whisperx_worker_integration.py
+```
 
----
+Kafka and object-storage integration tests use Testcontainers and therefore
+require a working Docker daemon. The canonical audio fixture is
+`tests/data/test_cs.wav`; its provenance and publication consent are documented
+in `tests/data/README.md`.
 
-## Repo structure
+End-to-end stack smoke tests live with their owning environments:
 
-* (moved) BFF/API lives in the **samuraibff** repo.
+- public Community Edition smoke tests: `nanosamurai/nanosamurai`
+- private deployment smoke tests: the deployment repository
 
-* `rtservice/`
-  Realtime (5 sec chunks) ingestion service (gRPC `RealtimeASR` ) - uses fast whisper and separate diarization.
+## Build service images
 
-* `whisperx_worker/`
-  Almost real-time (60 sec chunks) slice transcription worker (using WhisperX).
-
-* `recorder_worker/`
-  Session WAV recorder + emits `recordings.finished`.
-
-* `finalizer_worker/`
-  Full-session transcription + JSON artifact + emits `transcripts.final`.
-
-* `shared/`
-  Shared package: `drsynth_common` (IDs, DB helpers, Kafka helpers, config, shared utilities).
-
-* (moved) DB migrations live in the **samuraipersistor** repo.
-
-* `tests/`
-  Integration tests (Kafka via testcontainers) + test data.
-
-* `utilities/`
-  Local scripts / WIP helpers (run under the `drsynth` env).
-
-* `enrolled_speaklers/`
-  Speakers' voice samples for diarization - currently is used only by rtservice, to be further standardized in DB (per tenant/user) and used by also the other workers.
-
----
-
-## Protobufs & gRPC (`stream.proto`)
-
-Workers and services communicate using protobuf messages (`AudioChunk`, `RefinedEvent`, `RecordingFinished`, `SessionTranscript`, …).
-
-In addition, realtime ingress uses the gRPC service **`RealtimeASR`** (defined in the proto). The intended flow is:
-
-* client streams audio frames in
-* server streams partial transcript updates out (or emits updates separately)
-
-### Generating Python code
-
-We generally use one of these approaches:
-
-1. Generate into `proto_gen` folder - in `./proto_gen`, run:
-
-* `python -m grpc_tools.protoc -I ../proto --python_out=. --grpc_python_out=. ../proto/stream.proto`
-
----
-
-## Local development (conda)
-
-### Conda envs (current)
-
-Each subsystem has its own conda env. **To run the full test suite**, run the relevant tests
-in the matching env (don't expect a single env to run everything).
-
-Test commands (Windows):
-
-* Recorder/Kafka integration (lightweight):
-  * `conda run -n drsynth-bff python -m pytest -q tests/test_recorder_worker_integration.py`
-
-* rtservice gRPC integration (heavy; requires `HF_TOKEN`):
-  * `conda run -n xamurai-rtservice python -m pytest -q tests/test_realtime_asr_grpc.py`
-
-* WhisperX worker tests (GPU/heavy):
-  * `conda run -n drsynth-whisperx python -m pytest -q tests/test_whisperx_worker_unit.py tests/test_whisperx_worker_integration.py`
-
-* Finalizer worker integration (GPU/heavy):
-  * Prefer running it in `drsynth-whisperx` (known-good Torch/WhisperX stack):
-    * `conda run -n drsynth-whisperx python -m pytest -q tests/test_finalizer_worker_integration.py`
-
-Notes:
-* Kafka integration tests use **Testcontainers Kafka** by default. To run against a real Kafka,
-  set `KAFKA_BOOTSTRAP=localhost:9092`.
-* `HF_TOKEN` must be visible in the conda env for `xamurai-rtservice` tests.
-
----
-
-## Docker (k8s-friendly)
-
-This repo is intended to run on Kubernetes. Each service has its own **Dockerfile** (built with **venv + pip**, independent from the conda setups).
-
-### Build images
-
-From repo root:
+Each service has a standalone Dockerfile:
 
 ```bash
 docker build -t xamurai-rtservice:dev -f rtservice/Dockerfile .
@@ -163,270 +127,66 @@ docker build -t xamurai-recorder-worker:dev -f recorder_worker/Dockerfile .
 docker build -t xamurai-finalizer-worker:dev -f finalizer_worker/Dockerfile .
 ```
 
-Note: WhisperX pins `torch~=2.8.0`, so the Dockerfiles align Torch/Torchaudio to `2.8.0+cu128` to avoid resolver downgrades/conflicts.
+The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 
-### Run locally (recommended entrypoints)
+- `ghcr.io/nanosamurai/xamurai-rtservice`
+- `ghcr.io/nanosamurai/xamurai-whisperx-worker`
+- `ghcr.io/nanosamurai/xamurai-recorder-worker`
+- `ghcr.io/nanosamurai/xamurai-finalizer-worker`
 
-For day-to-day development, use the runbooks in `docs/`:
+## Configuration
 
-- **Full local stack (all Docker Compose):** `docs/local-stack.md`
-- **Compose infra + Minikube apps:** `docs/minikube-setup.md`
-- **Long-term Kubernetes plan:** `docs/k8s-roadmap.md`
+Shared Kafka settings:
 
-The short version (Mode A / full compose):
+- `KAFKA_BOOTSTRAP`
+- `KAFKA_TOPIC_AUDIO` (default `audio.raw`)
+- `LOG_LEVEL`
+- standard OpenTelemetry exporter variables
 
-Prereqs:
-- Docker installed
-- `HF_TOKEN` exported in your environment (needed by **rtservice** / pyannote)
-- Repos checked out side-by-side (defaults can be overridden in `.env`):
-  - `C:/Users/miros/PycharmProjects/xamurai`
-  - `C:/Users/miros/IdeaProjects/samuraibff`
-  - `C:/Users/miros/IdeaProjects/samuraipersistor`
+Realtime service settings include:
 
-```bash
-# Linux/macOS
-export HF_TOKEN=...
+- `RT_GRPC_PORT` (default `50052`)
+- `HF_TOKEN`
+- `RT_WINDOW_SEC`, `RT_OVERLAP_SEC`, and `RT_EMIT_EVERY_SEC`
+- `RT_PARTIAL_ENABLE`, `RT_PARTIAL_MODE`, and overload guardrails
+- `ENROLL_BACKEND` plus local or S3 enrollment settings
 
-# Windows PowerShell
-# $env:HF_TOKEN = "..."
+Worker settings include:
 
-# from repo root
-copy .env.example .env
-# edit .env and set HF_TOKEN
+- `WHISPERX_SLICE_SECONDS`, `WHISPERX_IDLE_SECONDS`, and diarization guardrails
+- `RECORDING_STORAGE_BACKEND` (`local` or `s3`)
+- `RECORDING_DIR` or the corresponding S3 bucket, region, endpoint, and prefix
+- topic and consumer-group overrides for each worker
 
-docker compose up --build
-```
-
-The compose file now starts the **full local system**, including cross-repo services:
-- **Kafka** (`broker`)
-  - containers: `broker:29092`
-  - host tools: `localhost:9092`
-  - minikube pods: `host.minikube.internal:39092`
-- **Postgres** (`postgres`) on `localhost:5432`
-- **Schema init + seed** (one-shot helpers):
-  - `db_migrate` (applies SQL migrations)
-  - `db_seed` (inserts the dev tenant/user needed by unauth local BFF)
-- **drsynth services**:
-  - `rtservice` gRPC on `localhost:50052`
-  - `whisperx_worker`, `recorder_worker`, `finalizer_worker`
-- **App layer**:
-  - `samuraibff` UI/API on `localhost:8000`
-  - `samuraipersistor` on `127.0.0.1:8010`
+Per-stream output selection and compute controls are documented in
+[`docs/stream-output-selection.md`](docs/stream-output-selection.md).
 
-#### Why the helper services exist (and what they do)
+## Security
 
-**1) `kafka_init`**
-- **Problem:** relying on Kafka topic auto-creation causes flaky bring-up and inconsistent topic configs.
-- **What it does:** waits for Kafka to respond, then creates required topics idempotently (`--if-not-exists`).
-- **Why it matters long-term:** the same “explicit init” concept maps cleanly to k8s Jobs/Helm hooks later.
+- Treat Kafka headers and gRPC metadata as untrusted input.
+- Enforce tenant quotas and clamp compute-amplifying stream controls at the
+  authenticated API boundary.
+- Never commit tokens, recordings, transcripts, enrollment samples, or
+  customer data.
+- Prefer workload identity over static object-storage credentials.
+- Pyannote telemetry is force-disabled to prevent unexpected outbound metric
+  export.
+- Bind diagnostic endpoints to localhost for local development. Any broader
+  exposure is an explicit deployment decision and must have access controls.
 
-**2) `db_migrate`**
-- **Problem:** the BFF and persistor assume the DB schema exists; without migrations the stack boots but fails at runtime.
-- **What it does:** applies vendored SQL migrations (from `samuraipersistor`) using `psql`.
-  - It is **idempotent**: if the schema already exists it exits 0.
-- **Why we use `psql` instead of Migratus here:** Migratus can batch multi-statement SQL files and fail with
-  `Too many update results were returned` in containerized runs.
+Report vulnerabilities privately as described in
+[`SECURITY.md`](SECURITY.md).
 
-**3) `db_seed`**
-- **Problem:** in unauth local mode, the BFF expects a “dev tenant” row to exist; otherwise session creation fails on FK constraints.
-- **What it does:** inserts a known tenant/user (see `docker/postgres/seed.sql`).
-  - It is **idempotent**: if tenant `00000000-0000-0000-0000-000000000000` exists it exits 0.
+## Additional documentation
 
-#### Slow startup notes (especially without GPU)
-The first startup of these services can be slow because they download and initialize ML models:
-- `rtservice` (Faster-Whisper + Pyannote diarization + optional VAD/enrollment)
-- `whisperx_worker` (WhisperX stack)
-- `finalizer_worker` (full-session WhisperX)
+- [`docs/stream-output-selection.md`](docs/stream-output-selection.md)
+- [`docs/whisperx-worker-diarization.md`](docs/whisperx-worker-diarization.md)
+- [`docs/rtservice-performance.md`](docs/rtservice-performance.md)
+- [`docs/enrolled-speakers-multi-tenant.md`](docs/enrolled-speakers-multi-tenant.md)
+- [`docs/word-level-timing.md`](docs/word-level-timing.md)
+- [`docs/ci-cd.md`](docs/ci-cd.md)
 
-On CPU-only machines (or when CUDA isn’t available), initialization and inference can be **unbearably slow**.
-For local “it feels like prod” dev, prefer running them with GPU where possible.
+## License
 
-Compose mounts a persistent HuggingFace cache volume (`nanosamurai_hf_cache`) to avoid re-downloading models on restarts.
-
-Also: until `rtservice` finishes initialization, BFF `/ready` may return `503` with `grpc.up?=false`.
-
-For more details and troubleshooting tips (Kafka ports, ffmpeg/torio warnings, etc.) see `docs/local-stack.md`.
-
----
-
-## Configuration (environment variables)
-
-## Stream-level configuration (per session/stream)
-
-Some behavior is configured per audio stream (set by **samuraibff** when streaming audio):
-
-- Output selection (realtime/refined/final) and recording retention are documented in:
-  - `docs/stream-output-selection.md`
-
-Spec for the required **samuraibff + UI** changes is in:
-- `docs/spec-bff-ui-stream-controls.md`
-
-### Kafka (shared across services)
-
-* `KAFKA_BOOTSTRAP` (default in code: `localhost:9092`; in compose: `broker:9092`)
-* `KAFKA_TOPIC_AUDIO` (default: `audio.raw`)
-
-### rtservice
-
-* `RT_GRPC_PORT` (default: `50052`)
-* `HF_TOKEN` (**required**) – used to download pyannote models
-* `FW_LANG_DEFAULT` (optional) – default ISO language code
-* `ENROLL_DIR` (default: `enrolled_speakers`) – directory with speaker enrollment WAVs
-
-### whisperx_worker
-
-* `KAFKA_BOOTSTRAP`
-* `KAFKA_TOPIC_AUDIO` (default: `audio.raw`)
-* `KAFKA_TOPIC_REFINED` (default: `transcripts.refined`)
-* `KAFKA_GROUP_ID` (default: `whisperx-async`)
-* `WHISPERX_SLICE_SECONDS` (default: `60.0`)
-* `WHISPERX_IDLE_SECONDS` (default: `30.0`)
-* `WHISPERX_COMPUTE_TYPE` (optional)
-
-Scalability / parallelization related vars:
-
-* `WHISPERX_DECOUPLE_IO` (default: `false`)
-  * When enabled, Kafka polling/buffering runs in a dedicated thread and inference runs in a separate loop.
-  * This prevents “idle” eviction from triggering just because WhisperX inference is slow/blocked.
-* `WHISPERX_COMMIT_AFTER_PRODUCE` (default: `true`)
-  * When enabled, offsets are committed only after refined events are produced.
-  * Safer (reduces message loss) but can reprocess messages after crash.
-* `WHISPERX_BATCH_MAX_ITEMS` (default: `1`)
-* `WHISPERX_BATCH_MAX_WAIT_MS` (default: `30`)
-* `WHISPERX_BATCH_MODE` (default: `sequential`)
-  * These currently control scheduler-level collection of jobs (groundwork).
-  * NOTE: this is not true multi-audio GPU batching yet.
-
-Refined diarization quality knobs:
-
-* `WHISPERX_DIAR_SPLIT_MODE` (`on|off`, default: `off`)
-  * When enabled, `whisperx_worker` uses diarization turns to drive speaker turns in refined output.
-  * This is a compute amplification knob (multiple WhisperX transcribe calls per slice).
-  * See `docs/whisperx-worker-diarization.md`.
-
-### recorder_worker
-
-* `KAFKA_BOOTSTRAP`
-* `KAFKA_TOPIC_AUDIO` (default: `audio.raw`)
-* `KAFKA_TOPIC_RECORDING_FINISHED` (default: `recordings.finished`)
-* `KAFKA_GROUP_ID_RECORDER` (default: `recorder-worker`)
-* `RECORDER_IDLE_SECONDS` (default: `30.0`)
-
-Storage:
-
-* `RECORDING_STORAGE_BACKEND` (`local` | `s3`, default: `local`)
-* `RECORDING_DIR` (default in code: `recordings`; in containers set it to `/data/recordings`)
-
-S3 (used when `RECORDING_STORAGE_BACKEND=s3`):
-
-* `S3_ENDPOINT` (optional; empty means AWS S3)
-* `S3_BUCKET` (**required**)
-* `S3_REGION` (optional)
-* `S3_ACCESS_KEY` / `S3_SECRET_KEY` (optional)
-  * If these are **not** set, boto3 falls back to its default credential chain (e.g. IRSA/Pod Identity/instance role)
-* `S3_FORCE_PATH_STYLE` (default: `true`) – helps compatibility with S3-like storage (Ceph/MinIO)
-* `S3_PREFIX` (optional) – key prefix for uploaded recordings
-
-### finalizer_worker
-
-* `KAFKA_BOOTSTRAP`
-* `KAFKA_TOPIC_RECORDING_FINISHED` (default: `recordings.finished`)
-* `KAFKA_TOPIC_TRANSCRIPTS_FINAL` (default: `transcripts.final`)
-* `KAFKA_GROUP_ID_FINALIZER` (default: `finalizer-worker`)
-
-Important:
-- finalizer currently supports only `file://` recording URLs
-- therefore it needs access to the **same recordings volume** as `recorder_worker`
-
----
-
-## Kubernetes notes
-
-### Volumes
-
-If you use `RECORDING_STORAGE_BACKEND=local`, both `recorder_worker` and `finalizer_worker` must mount the same PVC at the same path (recommended: `/data/recordings`).
-
-### GPU scheduling
-
-`rtservice`, `whisperx_worker`, and `finalizer_worker` are designed to use CUDA if available.
-
-In Kubernetes, schedule them on GPU nodes (example):
-
-```yaml
-resources:
-  limits:
-    nvidia.com/gpu: 1
-```
-
-### Health checks
-
-- `rtservice` is gRPC-only; use a `tcpSocket` probe on port `50052` (or your `RT_GRPC_PORT`).
-- workers are long-running Kafka consumers; liveness is typically based on the process staying up.
-
----
-
-## Tests
-
-### LocalStack-backed enrollment integration tests (S3)
-
-These tests validate that **whisperx_worker** and **rtservice** can load per-tenant enrolled speakers from an S3-compatible backend.
-Locally we run S3 using **LocalStack** (`localstack/localstack`) via **testcontainers**, so you only need Docker running.
-
-Prereqs:
-- Docker Desktop running
-- `HF_TOKEN` set (pyannote models)
-
-Run WhisperX worker strict S3 enrollment test:
-```bat
-conda run -n drsynth-whisperx python -m pytest -q -m integration \
-  tests/test_whisperx_worker_integration.py::test_whisperx_worker_diarization_and_s3_enrollment_on_test_wav
-```
-
-Run rtservice strict S3 enrollment gRPC test:
-```bat
-conda run -n xamurai-rtservice python -m pytest -q -m integration \
-  tests/test_realtime_asr_grpc.py::test_realtime_asr_stream_s3_enrollment
-```
-
-Notes:
-- Both tests create a tenant enrollment structure under:
-  `s3://<bucket>/<prefix>/<tenant_id>/speakers/<speaker_id>/speaker.json`
-  with samples under `.../samples/*.wav`.
-- Default test bucket/prefix can be overridden with:
-  `TEST_ENROLL_S3_BUCKET`, `TEST_ENROLL_S3_PREFIX`, `TEST_AWS_REGION`.
-
-## Tests
-
-### Integration tests
-
-Integration tests run Kafka via Testcontainers and execute real worker codepaths.
-
-* `pytest -m integration -o log_cli=true --log-cli-level=DEBUG`
-
-Key test data:
-
-* `tests/data/test_cs.wav` (canonical sample audio)
-
----
-
-## Known gotchas
-
-* Topic creation timing: we should not rely on Kafka auto-create in tests; topics should be created in fixtures.
-* Windows + Torch DLL issues: Torch import can fail if envs diverge. `drsynth-whisperx` is the "known-good" heavy env.
-* `PYTHONPATH` vs editable installs: editable installs (`pip install -e`) are the cleanest way to avoid module import issues (including protobuf modules).
-* Cline has issues with running tests - it has to use correct conda env: for instance for running bff-related tests it has to run: `conda activate drsynth-bff && "C:\Users\miros\miniconda3\envs\drsynth-bff\python.exe" -m pytest tests/test_bff_session_persistence.py -v`
-
----
-
-## Suggested next steps
-
-* Build DB-backed session APIs in BFF (list sessions, session detail, transcript detail).
-* Add diarization/speaker model later (speakers table already anticipated).
-
----
-
-## CI/CD
-
-CI/CD scaffolding and the proposed repo split for the full **nanosamurai** stack is documented in:
-
-- `docs/ci-cd.md`
+Licensed under Apache License 2.0. See [`LICENSE`](LICENSE) and
+[`NOTICE`](NOTICE).

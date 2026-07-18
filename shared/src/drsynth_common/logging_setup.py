@@ -1,7 +1,7 @@
 """Common logging setup for xamurai Python services.
 
-We control verbosity via env var so Kubernetes/Helm can configure it without
-rebuilding images.
+We control verbosity through an environment variable so runtimes can configure
+it without rebuilding images.
 
 Env vars:
 - LOG_LEVEL: standard Python level name (DEBUG|INFO|WARNING|ERROR|CRITICAL)
