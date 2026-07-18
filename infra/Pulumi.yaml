@@ -1,3 +1,0 @@
-name: xamurai-infra
-runtime: python
-description: Infrastructure for xamurai (BFF, realtime, Kafka, workers, Keycloak ALB)

@@ -1,8 +1,0 @@
-# Deprecated: The full local stack is now consolidated into ./docker-compose.yml.
-#
-# This file is intentionally kept as a placeholder to prevent accidental use.
-# Please use:
-#
-#   docker compose up --build
-#
-# See docs/local-stack.md for details.
