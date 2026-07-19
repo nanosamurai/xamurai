@@ -1,0 +1,23 @@
+# Reviewed legacy findings retained by the targeted history-preservation policy.
+# These fingerprints cover local-only paths, private-repository references,
+# localhost test authentication, and a zero-filled UUID. New occurrences are
+# still reported because no path or rule is broadly allowlisted.
+4550d83e7878a22e1814996ff86e397d21f03ff5:README.MD:private-deployment-repository:20
+4550d83e7878a22e1814996ff86e397d21f03ff5:README.MD:private-deployment-repository:21
+518dfebf0fff20608506576b875aaabf514facff:rt_service/environment.yml:developer-home-path:188
+67b8c086ba0aa5cbf7dfa3185a0d9819f35ab6d6:README.MD:developer-home-path:339
+6d6b67f424e257933b0c8b3d18605db7fab68b14:README.MD:developer-home-path:161
+6d6b67f424e257933b0c8b3d18605db7fab68b14:README.MD:developer-home-path:162
+6d6b67f424e257933b0c8b3d18605db7fab68b14:README.MD:developer-home-path:163
+7590c40ea63cacb23cf4c579cc48fac20a5cc262:AGENTS.MD:developer-home-path:3
+7a45acb659ba45df9890681e23e5e6f1d5fccf5b:docs/local-k8s-setup.md:private-deployment-repository:5
+89c4ad514905e34a00e66b13ec53207669b5dbbc:docker/postgres/seed.sql:aws-account-id:16
+89c4ad514905e34a00e66b13ec53207669b5dbbc:docs/local-stack.md:developer-home-path:10
+89c4ad514905e34a00e66b13ec53207669b5dbbc:docs/local-stack.md:developer-home-path:11
+89c4ad514905e34a00e66b13ec53207669b5dbbc:docs/local-stack.md:developer-home-path:9
+8c40dad66dd4f390e30c4c53bddb02f1b8ae55ba:docs/local-k8s-observability.md:curl-auth-user:211
+a61fde948821fb8803f26676664e419b8630db9a:docs/local-stack.md:developer-home-path:8
+a61fde948821fb8803f26676664e419b8630db9a:README.MD:developer-home-path:169
+b5023b97037f5c8fec4e0e5d878f253d7fc8dfe1:AGENTS.MD:developer-home-path:3
+bde6871a3d05d244d872e6836cd21d369dadb291:docs/local-k8s-observability.md:curl-auth-user:39
+ef424f47537ac75baefc6909f55e95d3ecd9901e:rtservice/environment.yml:developer-home-path:189

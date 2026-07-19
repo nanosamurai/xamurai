@@ -91,7 +91,7 @@ def localstack_s3():
 
     # LocalStack defaults
     region = os.getenv("TEST_AWS_REGION", "us-east-1")
-    bucket = os.getenv("TEST_ENROLL_S3_BUCKET", "drsynth-enrollment-test")
+    bucket = os.getenv("TEST_ENROLL_S3_BUCKET", "xamurai-enrollment-test")
     prefix = os.getenv("TEST_ENROLL_S3_PREFIX", "enrollment")
 
     # NOTE:

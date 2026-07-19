@@ -113,7 +113,7 @@ if torch is not None:
     except Exception:
         pass
 
-# NOTE: whisperx is heavy and not installed in all envs (e.g. drsynth-bff).
+# NOTE: whisperx is heavy and is not installed in every service environment.
 # Import lazily inside functions so unit tests can still import this module.
 whisperx = None
 

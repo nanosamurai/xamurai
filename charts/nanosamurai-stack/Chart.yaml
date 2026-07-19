@@ -1,6 +1,0 @@
-apiVersion: v2
-name: nanosamurai-stack
-description: Local/dev Helm chart to run drsynth + samuraibff + samuraipersistor (apps only; infra external by default)
-type: application
-version: 0.1.0
-appVersion: "dev"

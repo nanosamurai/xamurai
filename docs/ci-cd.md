@@ -1,208 +1,60 @@
-# CI/CD scaffolding and repo split (nanosamurai)
+# Xamurai CI and image publication
 
-This repo currently contains both application code (xamurai services/workers) and a temporary
-umbrella Helm chart (`charts/nanosamurai-stack`) that deploys the **whole nanosamurai stack**
-(BFF + persistor + xamurai services).
+Xamurai owns validation and container-image publication for its four speech
+services. Full-stack orchestration, infrastructure provisioning, and
+environment-specific release configuration are intentionally outside this
+repository.
 
-Long-term, we want to avoid coupling service code changes to environment wiring. This document
-describes a CI/CD structure that:
+## Continuous integration
 
-- keeps **service repos** autonomous for build/test/image publication
-- keeps a single **deploy repo** as the “compatibility lockfile” for coherent stack releases
-- keeps **Pulumi** focused on AWS foundation and managed services (MSK/RDS/EKS)
-- supports fast "merge → deploy → smoke tests" for **dev** while allowing promotions later
+The lightweight CI workflow runs on pull requests and pushes to `master`. It:
 
-> Note: xamurai used to be called **drsynth** in older docs and legacy file names.
+- installs the pinned dependencies from `requirements.ci.txt`
+- runs unit tests that do not require Kafka, model downloads, or a GPU
 
----
+Separate integration workflows cover the two ML dependency stacks:
 
-## A) Repos and ownership
+- `integration-fastwhisper.yml` validates realtime gRPC behavior
+- `integration-whisperx.yml` validates WhisperX refinement, diarization, and
+  local/S3 enrollment behavior
 
-### 1) Service repos
+The integration workflows disable pyannote telemetry and use constrained model
+settings suitable for CI. Gated model access is provided through the minimum
+required `HF_TOKEN` repository secret.
 
-Examples:
-- `xamurai` (this repo)
-- `samuraibff`
-- `samuraipersistor`
+## Image publication
 
-Own:
-- application code
-- unit/component tests
-- Docker image build + publish to ECR
+On pushes to `master`, `publish-image.yml` builds each service from its own
+Dockerfile and publishes an immutable `sha-<git-sha>` tag:
 
-Do not own (initially):
-- per-environment Helm values
-- ingress, HPA, PDB, service accounts, cluster wiring
+- `ghcr.io/nanosamurai/xamurai-rtservice`
+- `ghcr.io/nanosamurai/xamurai-whisperx-worker`
+- `ghcr.io/nanosamurai/xamurai-recorder-worker`
+- `ghcr.io/nanosamurai/xamurai-finalizer-worker`
 
-### 2) `nanosamurai-platform` (Pulumi) — AWS foundation
+The workflow grants only `contents: read` and `packages: write`. Authentication
+uses the workflow-scoped `GITHUB_TOKEN`; no external registry credential is
+stored in the repository.
 
-Pulumi should own AWS resources and cluster foundation:
-- VPC/subnets/NAT/RTs
-- EKS cluster + node groups (CPU + GPU pools)
-- IAM + IRSA / Pod Identity
-- **Managed RDS Postgres** (optionally RDS Proxy)
-- **Managed MSK**
-- S3 buckets (recordings/artifacts, enrollment manifests)
-- Route53 + ACM (if doing managed TLS)
+## Ownership boundary
 
-Pulumi should *not* manage day-to-day Kubernetes Deployments/Services if Helm is already used.
+Service Dockerfiles, dependency locks, unit tests, integration tests, and image
+publication belong here. Stack wiring and local Community Edition smoke tests
+belong in the public
+[`nanosamurai/nanosamurai`](https://github.com/nanosamurai/nanosamurai)
+repository.
 
-Recommended layout: one Pulumi project with multiple stacks:
+This boundary keeps service changes independently testable and prevents
+environment topology or deployment credentials from leaking into the public
+service source.
 
-```
-platform/dev
-platform/staging
-platform/prod
-```
+## Release checks
 
-For starters: only `platform/dev` is needed.
+Before publishing or promoting an image:
 
-### 3) `nanosamurai-deploy` — Kubernetes apps & releases
-
-This repo owns the umbrella chart and environment overlays.
-
-Own:
-- umbrella Helm chart (`nanosamurai-stack`)
-- per-environment values overlays (dev/staging/prod)
-- ingress/controller integration, network policies, HPAs, PDBs
-- (optional) smoke test Jobs/manifests
-
----
-
-## B) Helm chart placement: umbrella first
-
-For our current stage, keep the umbrella chart centralized in the deploy repo.
-
-Reason: it encodes cross-service wiring (Kafka/RDS endpoints, ingress/auth issuer, S3 settings, etc.) and we are OK with **stack releases**.
-
-Later evolution (optional):
-- each service repo publishes a small chart (OCI)
-- umbrella chart depends on versioned subcharts
-
----
-
-## C) CD trigger model (no env branches)
-
-### Service repo CI (build + publish)
-
-On merge to `master`/`main`:
-- run tests
-- build image
-- push to ECR tagged immutably: `sha-<GIT_SHA>` (avoid `latest`)
-- open a PR to `nanosamurai-deploy` updating **dev** pinned image tags
-
-### Deploy repo CD (deploy/promote)
-
-Deploys are driven by changes in `nanosamurai-deploy`.
-
-**Dev** (automated):
-- merging the “bump image tags” PR triggers:
-  - `helm upgrade --install ... --atomic --wait`
-  - smoke tests (Job or scripted)
-
-**Staging/Prod** (later):
-- promotion PR copies a coherent set of image tags dev → staging → prod
-- use **GitHub Environments approvals** for staging/prod deploy jobs
-
-This avoids branch-per-env drift while preserving “merge → deploy quickly” in dev.
-
----
-
-## D) Compatibility risk: deploy repo is the lockfile
-
-The deploy repo pins a coherent set of:
-- `samuraibff` image tag
-- `samuraipersistor` image tag
-- all xamurai service/worker image tags
-
-This allows you to deploy only one service change in dev, but you always *can* promote a known-good set.
-
----
-
-## E) Migrations and rollback policy
-
-Stateless rollback is handled by Helm:
-- use `helm upgrade --atomic` in CD
-- rollback by reverting deploy repo commit or `helm rollback`
-
-DB migrations (RDS) should follow expand/contract:
-- run migrations as a Kubernetes Job or controlled pipeline step
-- do not rely on down-migrations as your primary rollback mechanism in prod
-
----
-
-## F) GitHub Actions scaffolding (this repo)
-
-This repo now contains:
-- `.github/workflows/ci.yml` — fast PR gate
-  - Helm lint + Helm template unit tests
-  - lightweight Python unit tests (no GPU / no Kafka / no LocalStack)
-- `.github/workflows/integration-fastwhisper.yml` — integration lane for `rtservice`
-  - requires Docker (Testcontainers) + HF_TOKEN + Torch CPU wheels
-  - runs `tests/test_realtime_asr_grpc.py`
-- `.github/workflows/integration-whisperx.yml` — integration lane for `whisperx_worker`
-  - requires Docker (Testcontainers) + HF_TOKEN + WhisperX stack
-  - runs `tests/test_whisperx_worker_integration.py` with per-test pytest invocations
-
-Notes:
-- These integration lanes are heavier (Torch + model downloads) and will typically run on PRs to gate merges.
-- Keep them dependency-split to avoid unnecessary installs (fast-whisper vs whisperx).
-
----
-
-## G) AWS auth from GitHub Actions (OIDC)
-
-For deploy workflows (in `nanosamurai-deploy`), prefer:
-- GitHub OIDC → assume AWS role
-- no static AWS keys in GitHub
-
----
-
-## H) Observability (Grafana) access and security
-
-### Baseline rules
-- Grafana should not be publicly accessible by default.
-- Prefer **private access** via VPN / SSO-aware ingress.
-
-### Recommended options (in order)
-1) **Internal-only access**
-   - expose Grafana via an internal load balancer (private subnets)
-   - access via VPN / SSM / corporate network
-
-2) **Ingress + SSO/OIDC auth**
-   - put Grafana behind an auth proxy or an ingress that supports OIDC
-   - integrate with your IdP (Keycloak / Cognito / Google Workspace)
-
-3) **Public endpoint with IP allowlist (only as a stopgap)**
-   - still keep Grafana login enabled
-   - restrict via ALB/NLB security group + WAF / ingress allowlist
-
-Notes:
-- Grafana has its own auth; but for admin access you typically want SSO and to avoid managing local users.
-- Treat datasource credentials as secrets (Kubernetes Secret / ExternalSecrets).
-
----
-
-## I) Future `nanosamurai-deploy` repo layout (reference)
-
-```
-nanosamurai-deploy/
-  charts/
-    nanosamurai-stack/
-  environments/
-    dev/
-      values.yaml
-    staging/
-      values.yaml
-    prod/
-      values.yaml
-  k8s/
-    smoke-tests/
-      tier1-job.yaml
-      tier2-job.yaml
-  .github/workflows/
-    deploy-dev.yaml
-    promote.yaml
-```
-
-Dev namespace recommendation: `nanosamurai`.
+1. Run lightweight and applicable integration tests.
+2. Run gitleaks against the complete branch history.
+3. Build all four Dockerfiles from the repository root.
+4. Confirm generated protobuf bindings match `proto/stream.proto`.
+5. Use immutable image tags; do not publish mutable production references from
+   unreviewed commits.

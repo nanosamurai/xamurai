@@ -64,10 +64,9 @@ Use rtservice environment variables for defaults:
 
 ### Environment variables reference (single source of truth)
 
-The following table documents **every rtservice env var introduced for Plan C partials**.
-These are wired in:
-- `docker-compose.yml` (compose local stack)
-- `charts/nanosamurai-stack/values.yaml` + `templates/rtservice.yaml` (Helm for local k8s + EKS)
+The following table documents every rtservice environment variable introduced
+for Plan C partials. Runtime owners should pass these settings directly to the
+service process. The public Community Edition stack provides a local example.
 
 | Env var | Default | Meaning | Notes / gotchas |
 |---|---:|---|---|

@@ -105,24 +105,21 @@ Commits:
   - `WHISPERX_COMMIT_AFTER_PRODUCE` (default true)
   - When `WHISPERX_DECOUPLE_IO=true`, worker runs `run_decoupled(...)` and returns.
 
-## Cline / Tooling Stability Note
+## Maintainability note
 
-We observed repeated Cline instability and UI lockups due to large state payloads:
+The worker implementation is large enough that isolated modules reduce review
+cost and regression risk.
 
-> `Large gRPC response: cline.StateService.subscribeToState size=4.2MB`
-
-`apply_patch` returns full `final_file_content`, so editing a large file like `whisperx_worker.py` frequently can push responses into multi-MB.
-
-### Recommended editing strategy for Phase 2
+### Recommended editing strategy
 1) Keep `whisperx_worker.py` edits minimal.
 2) Move new logic to small new module(s), e.g.:
    - `whisperx_worker/src/whisperx_worker/decoupled_runtime.py`
 3) Only add a small wiring call in `whisperx_worker.py` to select mode.
 4) Avoid non-ASCII characters in logs / source code.
 
-## Helm / Compose follow-ups
+## Runtime configuration follow-ups
 
-Update charts/compose to expose new env vars:
+Runtime owners should expose these environment variables:
 - `WHISPERX_DECOUPLE_IO`
 - `WHISPERX_COMMIT_AFTER_PRODUCE` (default true)
 - `WHISPERX_BATCH_MAX_ITEMS`
@@ -145,10 +142,11 @@ Operational:
 
 ### Test runs (evidence)
 
-Ran integration suite in the documented conda env (`drsynth-whisperx`):
+Ran the integration suite in the documented Conda environment
+(`xamurai-whisperx`):
 
 ```bat
-conda run -n drsynth-whisperx python -m pytest -q -m integration tests/test_whisperx_worker_integration.py
+conda run -n xamurai-whisperx python -m pytest -q -m integration tests/test_whisperx_worker_integration.py
 ```
 
 Result (2026-04-03):
