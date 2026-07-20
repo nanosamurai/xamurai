@@ -2,8 +2,12 @@ name: gitleaks
 
 on:
   pull_request:
-  push:
-    branches: [master]
+    branches:
+      - master
+  workflow_call:
+    secrets:
+      GITLEAKS_LICENSE:
+        required: true
 
 permissions:
   contents: read
