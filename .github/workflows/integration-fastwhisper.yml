@@ -1,9 +1,6 @@
 name: Integration tests (fast-whisper / rtservice)
 
 on:
-  pull_request:
-    branches:
-      - master
   workflow_call:
     secrets:
       HF_TOKEN:
