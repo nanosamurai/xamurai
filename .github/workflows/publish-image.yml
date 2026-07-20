@@ -7,16 +7,51 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: publish-images-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  unit-tests:
+    name: Unit test gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  secret-scan:
+    name: Gitleaks gate
+    uses: ./.github/workflows/gitleaks.yml
+    permissions:
+      contents: read
+
+  fastwhisper-integration:
+    name: Fast-whisper integration gate
+    uses: ./.github/workflows/integration-fastwhisper.yml
+    permissions:
+      contents: read
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  whisperx-integration:
+    name: WhisperX integration gate
+    uses: ./.github/workflows/integration-whisperx.yml
+    permissions:
+      contents: read
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
   publish:
     name: Build + push images to GHCR
+    needs:
+      - unit-tests
+      - secret-scan
+      - fastwhisper-integration
+      - whisperx-integration
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
     strategy:
       fail-fast: false

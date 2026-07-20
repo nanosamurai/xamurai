@@ -1,16 +1,17 @@
 name: Integration tests (whisperx worker)
 
 on:
-  pull_request:
-    branches:
-      - master
+  workflow_call:
+    secrets:
+      HF_TOKEN:
+        required: true
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: integration-whisperx-${{ github.ref }}
+  group: integration-whisperx-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
