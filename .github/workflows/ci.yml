@@ -36,4 +36,5 @@ jobs:
           pytest -q -m "not integration" \
             tests/test_diarization_assign_unit.py \
             tests/test_enrollment_cache_unit.py \
-            tests/test_rtservice_session_isolation_unit.py
+            tests/test_rtservice_session_isolation_unit.py \
+            tests/test_stream_controls_unit.py
