@@ -1,6 +1,6 @@
 # Xamurai
 
-Xamurai provides the speech-to-text and speaker-diarization services used by
+Xamurai (voX samurai) provides the speech-to-text and speaker-diarization services used by
 the nanosamurai platform. It supports realtime transcription over gRPC and
 asynchronous refinement, recording, and finalization over Kafka.
 
