@@ -50,7 +50,10 @@ jobs:
       - whisperx-integration
     runs-on: ubuntu-latest
     permissions:
+      artifact-metadata: write
+      attestations: write
       contents: read
+      id-token: write
       packages: write
 
     strategy:
@@ -85,23 +88,63 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
       - name: Set image tags
         id: tags
         run: |
-          echo "sha_tag=sha-${GITHUB_SHA}" >> $GITHUB_OUTPUT
-          echo "image_uri=ghcr.io/nanosamurai/${{ matrix.ghcr_repo }}:sha-${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          {
+            echo "sha_tag=sha-${GITHUB_SHA}"
+            echo "image_name=ghcr.io/nanosamurai/${{ matrix.ghcr_repo }}"
+            echo "image_uri=ghcr.io/nanosamurai/${{ matrix.ghcr_repo }}:sha-${GITHUB_SHA}"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Docker build
-        run: |
-          docker build \
-            -f "${{ matrix.dockerfile }}" \
-            -t "${{ steps.tags.outputs.image_uri }}" \
-            "${{ matrix.context }}"
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          provenance: mode=max
+          push: true
+          sbom: true
+          tags: ${{ steps.tags.outputs.image_uri }}
 
-      - name: Docker push
+      - name: Export and validate SPDX SBOM
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ steps.tags.outputs.image_name }}
+          SBOM_PATH: ${{ runner.temp }}/${{ matrix.image }}.spdx.json
         run: |
-          docker push "${{ steps.tags.outputs.image_uri }}"
+          docker buildx imagetools inspect \
+            "${IMAGE_NAME}@${IMAGE_DIGEST}" \
+            --format "{{ json .SBOM.SPDX }}" \
+            > "${SBOM_PATH}"
+          jq -e \
+            '.SPDXID == "SPDXRef-DOCUMENT" and ((.packages // []) | length > 0)' \
+            "${SBOM_PATH}" > /dev/null
+
+      - name: Upload SPDX SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          name: sbom-${{ matrix.image }}-${{ github.sha }}
+          path: ${{ runner.temp }}/${{ matrix.image }}.spdx.json
+
+      - name: Attest SPDX SBOM
+        if: ${{ github.event.repository.private == false }}
+        uses: actions/attest@v4
+        with:
+          push-to-registry: true
+          sbom-path: ${{ runner.temp }}/${{ matrix.image }}.spdx.json
+          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-name: ${{ steps.tags.outputs.image_name }}
 
       - name: Summary
         run: |
-          echo "Pushed: ${{ steps.tags.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "Pushed: ${{ steps.tags.outputs.image_uri }}"
+            echo "Digest: ${{ steps.build.outputs.digest }}"
+            echo "SPDX SBOM: attached in GHCR and uploaded as a workflow artifact"
+          } >> "$GITHUB_STEP_SUMMARY"
