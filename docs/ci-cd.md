@@ -54,15 +54,32 @@ publish an immutable `sha-<git-sha>` tag:
 - `ghcr.io/nanosamurai/xamurai-recorder-worker`
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
 
-The workflow grants only `contents: read` and `packages: write`. Authentication
-uses the workflow-scoped `GITHUB_TOKEN`; no external registry credential is
-stored in the repository.
+The publication job grants `contents: read`, `packages: write`, and the GitHub
+attestation permissions. Authentication uses the workflow-scoped
+`GITHUB_TOKEN`; no external registry credential is stored in the repository.
 
 `packages: write` is limited to the image publication job. Validation jobs are
 read-only; only the post-merge integration gates receive `HF_TOKEN`. A failed,
 cancelled, or misconfigured gate skips every image build and push. The four
 image matrix entries remain independent after the shared gate succeeds, so one
 Dockerfile failure does not cancel the other service builds.
+
+### Image SBOMs
+
+Each published image includes an SPDX JSON software bill of materials as a
+GHCR-attached OCI attestation. The workflow validates the SBOM after the push
+and also uploads it as a workflow artifact named
+`sbom-<service>-<git-sha>`. Public repositories additionally publish a signed
+GitHub artifact attestation; that signing step is skipped while the repository
+is private.
+
+Retrieve the canonical SBOM attached to an image with:
+
+```bash
+docker buildx imagetools inspect \
+  ghcr.io/nanosamurai/<image>:sha-<git-sha> \
+  --format "{{ json .SBOM.SPDX }}" > sbom.spdx.json
+```
 
 ## Ownership boundary
 
