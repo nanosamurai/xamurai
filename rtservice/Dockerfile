@@ -45,7 +45,7 @@ RUN pip install \
       protobuf \
       grpcio \
       grpcio-tools \
-      faster-whisper \
+      "faster-whisper==1.2.0" \
       pyannote-audio \
       omegaconf \
       hydra-core \

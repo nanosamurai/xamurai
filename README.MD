@@ -92,6 +92,7 @@ python -m pip install -r requirements.ci.txt
 pytest -q -m "not integration" \
   tests/test_diarization_assign_unit.py \
   tests/test_enrollment_cache_unit.py \
+  tests/test_rtservice_decode_config_unit.py \
   tests/test_rtservice_session_isolation_unit.py \
   tests/test_stream_controls_unit.py
 ```
@@ -149,6 +150,7 @@ Realtime service settings include:
 - `HF_TOKEN`
 - `RT_WINDOW_SEC`, `RT_OVERLAP_SEC`, and `RT_EMIT_EVERY_SEC`
 - `RT_PARTIAL_ENABLE`, `RT_PARTIAL_MODE`, and overload guardrails
+- `RT_ASR_TEMPERATURES` and `RT_ASR_COMPRESSION_RATIO_THRESHOLD`
 - `ENROLL_BACKEND` plus local or S3 enrollment settings
 
 Worker settings include:

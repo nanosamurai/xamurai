@@ -55,6 +55,19 @@ rtservice uses two decode settings:
 
 This is intentional: PARTIALs should be fast and replaceable; FINALs are the converged results.
 
+### Repetition fallback
+
+Both FINAL and PARTIAL decoding use faster-whisper's native compression-ratio
+check and temperature fallback. Decoding starts deterministically at temperature
+`0.0`. When faster-whisper classifies that decode as excessively repetitive, it
+retries at the remaining configured temperatures instead of returning the first
+failed decode immediately.
+
+Normal decodes stop after the first successful attempt and therefore have no
+additional inference cost. A pathological or otherwise failed decode can require
+multiple attempts and temporarily increase latency. rtservice does not rewrite,
+trim, or otherwise post-process repeated transcript text.
+
 ## Related environment variables
 
 Existing Plan C variables (see `docs/plan-rtservice-cumulative-refinement.md`) still apply.
@@ -63,6 +76,8 @@ Additional perf/overload knobs:
 
 | Env var | Default | Meaning |
 |---|---:|---|
+| `RT_ASR_TEMPERATURES` | `0.0,0.2,0.4,0.6,0.8,1.0` | Non-decreasing faster-whisper fallback schedule used by FINAL and PARTIAL decoding. |
+| `RT_ASR_COMPRESSION_RATIO_THRESHOLD` | `2.4` | Faster-whisper threshold above which a decode is treated as too repetitive and retried. |
 | `RT_PARTIAL_MAX_BEHIND_SEC` | `2.0` | If wall clock minus audio time exceeds this, skip PARTIALs (FINALs still run). |
 | `RT_PARTIAL_IDLE_RESET_SEC` | `3.0` | If no audio arrives for this many seconds, treat it as a pause and reset lag baseline. |
 
