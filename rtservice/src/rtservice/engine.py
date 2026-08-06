@@ -1,5 +1,6 @@
 import io
 import logging
+import math
 import os
 import threading
 import time
@@ -92,8 +93,65 @@ def _bool_env(name: str, *, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "y")
 
 
+DEFAULT_ASR_TEMPERATURES = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD = 2.4
+
+
+def _parse_asr_temperatures(raw: Optional[str]) -> Tuple[float, ...]:
+    """Parse a non-decreasing faster-whisper temperature fallback schedule.
+
+    ``raw`` is a comma-separated string. ``None`` selects the production
+    default. Invalid, non-finite, negative, greater-than-one, empty, or
+    decreasing schedules raise ``ValueError`` during process startup.
+    """
+
+    if raw is None:
+        return DEFAULT_ASR_TEMPERATURES
+
+    parts = [part.strip() for part in raw.split(",")]
+    if not parts or any(not part for part in parts):
+        raise ValueError("RT_ASR_TEMPERATURES must be a non-empty comma-separated list")
+
+    try:
+        temperatures = tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError("RT_ASR_TEMPERATURES must contain only numbers") from exc
+
+    if any(not math.isfinite(value) or value < 0.0 or value > 1.0 for value in temperatures):
+        raise ValueError("RT_ASR_TEMPERATURES values must be finite and between 0.0 and 1.0")
+    if any(current < previous for previous, current in zip(temperatures, temperatures[1:])):
+        raise ValueError("RT_ASR_TEMPERATURES values must be non-decreasing")
+
+    return temperatures
+
+
+def _parse_asr_compression_ratio_threshold(raw: Optional[str]) -> float:
+    """Parse the positive faster-whisper compression-ratio threshold.
+
+    ``None`` selects the production default. Invalid, non-finite, zero, or
+    negative values raise ``ValueError`` during process startup.
+    """
+
+    if raw is None:
+        return DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD
+
+    try:
+        threshold = float(raw.strip())
+    except ValueError as exc:
+        raise ValueError("RT_ASR_COMPRESSION_RATIO_THRESHOLD must be a number") from exc
+
+    if not math.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("RT_ASR_COMPRESSION_RATIO_THRESHOLD must be finite and greater than zero")
+
+    return threshold
+
+
 RT_ASR_SERIALIZE = _bool_env("RT_ASR_SERIALIZE", default=False)
 RT_DIAR_SERIALIZE = _bool_env("RT_DIAR_SERIALIZE", default=False)
+RT_ASR_TEMPERATURES = _parse_asr_temperatures(os.getenv("RT_ASR_TEMPERATURES"))
+RT_ASR_COMPRESSION_RATIO_THRESHOLD = _parse_asr_compression_ratio_threshold(
+    os.getenv("RT_ASR_COMPRESSION_RATIO_THRESHOLD")
+)
 
 # VAD hardening / experimentation
 RT_USE_SILERO_VAD = _bool_env("RT_USE_SILERO_VAD", default=True)
@@ -836,6 +894,12 @@ class RealtimeModelBundle:
         )
 
         logger.info(
+            "rtservice ASR decode config: temperatures=%s compression_ratio_threshold=%.3f",
+            ",".join(f"{temperature:g}" for temperature in RT_ASR_TEMPERATURES),
+            RT_ASR_COMPRESSION_RATIO_THRESHOLD,
+        )
+
+        logger.info(
             "rtservice VAD config: enabled=%s backend=%s serialize=%s reset_states=%s no_grad=%s min_speech_ms=%d min_silence_ms=%d",
             USE_SILERO_VAD,
             "onnx" if RT_SILERO_VAD_ONNX else "torch",
@@ -993,7 +1057,8 @@ class RealtimeModelBundle:
                 language=(lang or None),
                 task="transcribe",
                 beam_size=int(beam_size),
-                temperature=[0.0],
+                temperature=RT_ASR_TEMPERATURES,
+                compression_ratio_threshold=RT_ASR_COMPRESSION_RATIO_THRESHOLD,
                 condition_on_previous_text=False,
                 vad_filter=False,
                 word_timestamps=bool(word_timestamps),
