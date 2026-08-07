@@ -7,25 +7,53 @@ import rtservice.engine as engine_module
 from rtservice.engine import (
     DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD,
     DEFAULT_ASR_TEMPERATURES,
+    DEFAULT_FINAL_DIAR_MERGE_GAP_SEC,
+    DEFAULT_FINAL_DIAR_MIN_TRANSCRIBE_SEC,
     RealtimeConfig,
     RealtimeModelBundle,
-    _parse_asr_compression_ratio_threshold,
+    _nonnegative_float_env,
     _parse_asr_temperatures,
 )
 
 
-def test_asr_decode_config_defaults():
-    """Missing ASR decode settings use the documented production defaults."""
+def test_float_config_uses_defaults_and_accepts_custom_values(monkeypatch):
+    """Validated float settings support their defaults and documented custom values."""
+
+    settings = [
+        (
+            "RT_ASR_COMPRESSION_RATIO_THRESHOLD",
+            DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD,
+            False,
+            "3.1",
+            3.1,
+        ),
+        (
+            "RT_FINAL_DIAR_MERGE_GAP_SEC",
+            DEFAULT_FINAL_DIAR_MERGE_GAP_SEC,
+            True,
+            "0.5",
+            0.5,
+        ),
+        (
+            "RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC",
+            DEFAULT_FINAL_DIAR_MIN_TRANSCRIBE_SEC,
+            True,
+            "0",
+            0.0,
+        ),
+    ]
+    for name, default, allow_zero, custom, expected in settings:
+        monkeypatch.delenv(name, raising=False)
+        assert _nonnegative_float_env(name, default, allow_zero=allow_zero) == default
+        monkeypatch.setenv(name, custom)
+        assert _nonnegative_float_env(name, default, allow_zero=allow_zero) == expected
+
+
+def test_asr_temperature_config_uses_default_and_accepts_custom_values():
+    """The temperature schedule keeps its production default and custom parsing."""
 
     assert _parse_asr_temperatures(None) == DEFAULT_ASR_TEMPERATURES
-    assert _parse_asr_compression_ratio_threshold(None) == DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD
-
-
-def test_asr_decode_config_accepts_custom_values():
-    """Operators can provide a valid fallback schedule and threshold."""
-
     assert _parse_asr_temperatures("0, 0.35, 0.7") == (0.0, 0.35, 0.7)
-    assert _parse_asr_compression_ratio_threshold(" 3.1 ") == 3.1
 
 
 @pytest.mark.parametrize(
@@ -39,12 +67,22 @@ def test_asr_temperature_config_rejects_invalid_values(raw):
         _parse_asr_temperatures(raw)
 
 
-@pytest.mark.parametrize("raw", ["", "not-a-number", "nan", "inf", "0", "-1"])
-def test_asr_compression_threshold_rejects_invalid_values(raw):
-    """Invalid compression thresholds fail instead of changing decode behavior."""
+@pytest.mark.parametrize("raw", ["", "not-a-number", "nan", "inf", "-1"])
+def test_float_config_rejects_invalid_values(monkeypatch, raw):
+    """Malformed validated float settings fail clearly during startup."""
 
+    name = "RT_TEST_NONNEGATIVE_FLOAT"
+    monkeypatch.setenv(name, raw)
+    with pytest.raises(ValueError, match=name):
+        _nonnegative_float_env(name, 1.0)
+
+
+def test_compression_threshold_rejects_zero(monkeypatch):
+    """The faster-whisper compression threshold remains strictly positive."""
+
+    monkeypatch.setenv("RT_ASR_COMPRESSION_RATIO_THRESHOLD", "0")
     with pytest.raises(ValueError, match="RT_ASR_COMPRESSION_RATIO_THRESHOLD"):
-        _parse_asr_compression_ratio_threshold(raw)
+        _nonnegative_float_env("RT_ASR_COMPRESSION_RATIO_THRESHOLD", 2.4, allow_zero=False)
 
 
 class _FakeWhisperModel:

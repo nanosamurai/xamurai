@@ -4,34 +4,11 @@ import numpy as np
 import pytest
 
 from rtservice.engine import (
-    DEFAULT_FINAL_DIAR_MERGE_GAP_SEC,
-    DEFAULT_FINAL_DIAR_MIN_TRANSCRIBE_SEC,
     RealtimeConfig,
     RealtimeEngine,
     RealtimeSessionProcessor,
     _normalize_and_merge_diarization_turns,
-    _parse_final_diar_merge_gap_sec,
-    _parse_final_diar_min_transcribe_sec,
 )
-
-
-def test_final_diar_config_uses_defaults_and_accepts_custom_values():
-    """FINAL diarization settings expose stable defaults and allow zero as a kill switch."""
-
-    assert _parse_final_diar_merge_gap_sec(None) == DEFAULT_FINAL_DIAR_MERGE_GAP_SEC
-    assert _parse_final_diar_min_transcribe_sec(None) == DEFAULT_FINAL_DIAR_MIN_TRANSCRIBE_SEC
-    assert _parse_final_diar_merge_gap_sec(" 0.5 ") == 0.5
-    assert _parse_final_diar_min_transcribe_sec("0") == 0.0
-
-
-@pytest.mark.parametrize("raw", ["", "invalid", "-0.1", "nan", "inf", "-inf"])
-def test_final_diar_config_rejects_invalid_values(raw):
-    """Malformed FINAL diarization settings fail clearly during process startup."""
-
-    with pytest.raises(ValueError, match="RT_FINAL_DIAR_MERGE_GAP_SEC"):
-        _parse_final_diar_merge_gap_sec(raw)
-    with pytest.raises(ValueError, match="RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC"):
-        _parse_final_diar_min_transcribe_sec(raw)
 
 
 def test_normalize_and_merge_keeps_speaker_boundaries_and_large_gaps():

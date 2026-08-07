@@ -99,6 +99,25 @@ DEFAULT_FINAL_DIAR_MERGE_GAP_SEC = 0.75
 DEFAULT_FINAL_DIAR_MIN_TRANSCRIBE_SEC = 0.7
 
 
+def _nonnegative_float_env(
+    name: str,
+    default: float,
+    *,
+    allow_zero: bool = True,
+) -> float:
+    """Read a finite non-negative float setting or raise ``ValueError``."""
+
+    try:
+        value = float(os.getenv(name, str(default)).strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+
+    if not math.isfinite(value) or value < 0.0 or (not allow_zero and value == 0.0):
+        requirement = "non-negative" if allow_zero else "greater than zero"
+        raise ValueError(f"{name} must be finite and {requirement}")
+    return value
+
+
 def _parse_asr_temperatures(raw: Optional[str]) -> Tuple[float, ...]:
     """Parse a non-decreasing faster-whisper temperature fallback schedule.
 
@@ -127,86 +146,21 @@ def _parse_asr_temperatures(raw: Optional[str]) -> Tuple[float, ...]:
     return temperatures
 
 
-def _parse_asr_compression_ratio_threshold(raw: Optional[str]) -> float:
-    """Parse the positive faster-whisper compression-ratio threshold.
-
-    ``None`` selects the production default. Invalid, non-finite, zero, or
-    negative values raise ``ValueError`` during process startup.
-    """
-
-    if raw is None:
-        return DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD
-
-    try:
-        threshold = float(raw.strip())
-    except ValueError as exc:
-        raise ValueError("RT_ASR_COMPRESSION_RATIO_THRESHOLD must be a number") from exc
-
-    if not math.isfinite(threshold) or threshold <= 0.0:
-        raise ValueError("RT_ASR_COMPRESSION_RATIO_THRESHOLD must be finite and greater than zero")
-
-    return threshold
-
-
-def _parse_nonnegative_float_setting(
-    raw: Optional[str],
-    *,
-    name: str,
-    default: float,
-) -> float:
-    """Parse a finite non-negative process setting.
-
-    ``raw`` is an optional environment value, ``name`` identifies the setting
-    in validation errors, and ``default`` is returned when ``raw`` is absent.
-    Empty, non-numeric, non-finite, or negative values raise ``ValueError``
-    during process startup.
-    """
-
-    if raw is None:
-        return float(default)
-
-    try:
-        value = float(raw.strip())
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a number") from exc
-
-    if not math.isfinite(value) or value < 0.0:
-        raise ValueError(f"{name} must be finite and non-negative")
-
-    return value
-
-
-def _parse_final_diar_merge_gap_sec(raw: Optional[str]) -> float:
-    """Parse the maximum same-speaker diarization gap merged for FINAL ASR."""
-
-    return _parse_nonnegative_float_setting(
-        raw,
-        name="RT_FINAL_DIAR_MERGE_GAP_SEC",
-        default=DEFAULT_FINAL_DIAR_MERGE_GAP_SEC,
-    )
-
-
-def _parse_final_diar_min_transcribe_sec(raw: Optional[str]) -> float:
-    """Parse the minimum merged diarization duration sent to FINAL ASR."""
-
-    return _parse_nonnegative_float_setting(
-        raw,
-        name="RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC",
-        default=DEFAULT_FINAL_DIAR_MIN_TRANSCRIBE_SEC,
-    )
-
-
 RT_ASR_SERIALIZE = _bool_env("RT_ASR_SERIALIZE", default=False)
 RT_DIAR_SERIALIZE = _bool_env("RT_DIAR_SERIALIZE", default=False)
 RT_ASR_TEMPERATURES = _parse_asr_temperatures(os.getenv("RT_ASR_TEMPERATURES"))
-RT_ASR_COMPRESSION_RATIO_THRESHOLD = _parse_asr_compression_ratio_threshold(
-    os.getenv("RT_ASR_COMPRESSION_RATIO_THRESHOLD")
+RT_ASR_COMPRESSION_RATIO_THRESHOLD = _nonnegative_float_env(
+    "RT_ASR_COMPRESSION_RATIO_THRESHOLD",
+    DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD,
+    allow_zero=False,
 )
-RT_FINAL_DIAR_MERGE_GAP_SEC = _parse_final_diar_merge_gap_sec(
-    os.getenv("RT_FINAL_DIAR_MERGE_GAP_SEC")
+RT_FINAL_DIAR_MERGE_GAP_SEC = _nonnegative_float_env(
+    "RT_FINAL_DIAR_MERGE_GAP_SEC",
+    DEFAULT_FINAL_DIAR_MERGE_GAP_SEC,
 )
-RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC = _parse_final_diar_min_transcribe_sec(
-    os.getenv("RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC")
+RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC = _nonnegative_float_env(
+    "RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC",
+    DEFAULT_FINAL_DIAR_MIN_TRANSCRIBE_SEC,
 )
 
 # VAD hardening / experimentation
