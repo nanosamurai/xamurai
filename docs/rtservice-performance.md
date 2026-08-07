@@ -68,6 +68,20 @@ additional inference cost. A pathological or otherwise failed decode can require
 multiple attempts and temporarily increase latency. rtservice does not rewrite,
 trim, or otherwise post-process repeated transcript text.
 
+### FINAL diarization turn stabilization
+
+Before FINAL ASR, rtservice normalizes and orders the diarization turns for the
+current window. Consecutive turns with the same raw diarization speaker are
+merged when their gap is at most `RT_FINAL_DIAR_MERGE_GAP_SEC`. Duration
+filtering, overlapping-window ownership, speaker enrollment mapping, and ASR
+then operate on the merged span. The waveform includes the short gaps between
+the merged turns so faster-whisper receives useful speech context.
+
+Merged turns shorter than `RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC` are not sent to
+ASR or speaker embedding. Different-speaker turns are never merged. If no
+eligible diarization turn produces FINAL text, the existing full-window FINAL
+fallback still runs. End-of-stream tail finalization is unchanged.
+
 ## Related environment variables
 
 Existing Plan C variables (see `docs/plan-rtservice-cumulative-refinement.md`) still apply.
@@ -78,6 +92,8 @@ Additional perf/overload knobs:
 |---|---:|---|
 | `RT_ASR_TEMPERATURES` | `0.0,0.2,0.4,0.6,0.8,1.0` | Non-decreasing faster-whisper fallback schedule used by FINAL and PARTIAL decoding. |
 | `RT_ASR_COMPRESSION_RATIO_THRESHOLD` | `2.4` | Faster-whisper threshold above which a decode is treated as too repetitive and retried. |
+| `RT_FINAL_DIAR_MERGE_GAP_SEC` | `0.75` | Maximum gap between consecutive same-speaker diarization turns merged before FINAL ASR. Set to `0` to disable positive-gap merging. |
+| `RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC` | `0.7` | Minimum merged diarization duration sent to FINAL ASR and speaker mapping. Set to `0` to disable this additional guard; the internal FINAL safety floor still applies. |
 | `RT_PARTIAL_MAX_BEHIND_SEC` | `2.0` | If wall clock minus audio time exceeds this, skip PARTIALs (FINALs still run). |
 | `RT_PARTIAL_IDLE_RESET_SEC` | `3.0` | If no audio arrives for this many seconds, treat it as a pause and reset lag baseline. |
 
