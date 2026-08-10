@@ -1,5 +1,6 @@
 import io
 import logging
+import math
 import os
 import threading
 import time
@@ -92,8 +93,75 @@ def _bool_env(name: str, *, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "y")
 
 
+DEFAULT_ASR_TEMPERATURES = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD = 2.4
+DEFAULT_FINAL_DIAR_MERGE_GAP_SEC = 0.75
+DEFAULT_FINAL_DIAR_MIN_TRANSCRIBE_SEC = 0.7
+
+
+def _nonnegative_float_env(
+    name: str,
+    default: float,
+    *,
+    allow_zero: bool = True,
+) -> float:
+    """Read a finite non-negative float setting or raise ``ValueError``."""
+
+    try:
+        value = float(os.getenv(name, str(default)).strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+
+    if not math.isfinite(value) or value < 0.0 or (not allow_zero and value == 0.0):
+        requirement = "non-negative" if allow_zero else "greater than zero"
+        raise ValueError(f"{name} must be finite and {requirement}")
+    return value
+
+
+def _parse_asr_temperatures(raw: Optional[str]) -> Tuple[float, ...]:
+    """Parse a non-decreasing faster-whisper temperature fallback schedule.
+
+    ``raw`` is a comma-separated string. ``None`` selects the production
+    default. Invalid, non-finite, negative, greater-than-one, empty, or
+    decreasing schedules raise ``ValueError`` during process startup.
+    """
+
+    if raw is None:
+        return DEFAULT_ASR_TEMPERATURES
+
+    parts = [part.strip() for part in raw.split(",")]
+    if not parts or any(not part for part in parts):
+        raise ValueError("RT_ASR_TEMPERATURES must be a non-empty comma-separated list")
+
+    try:
+        temperatures = tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError("RT_ASR_TEMPERATURES must contain only numbers") from exc
+
+    if any(not math.isfinite(value) or value < 0.0 or value > 1.0 for value in temperatures):
+        raise ValueError("RT_ASR_TEMPERATURES values must be finite and between 0.0 and 1.0")
+    if any(current < previous for previous, current in zip(temperatures, temperatures[1:])):
+        raise ValueError("RT_ASR_TEMPERATURES values must be non-decreasing")
+
+    return temperatures
+
+
 RT_ASR_SERIALIZE = _bool_env("RT_ASR_SERIALIZE", default=False)
 RT_DIAR_SERIALIZE = _bool_env("RT_DIAR_SERIALIZE", default=False)
+RT_ASR_TEMPERATURES = _parse_asr_temperatures(os.getenv("RT_ASR_TEMPERATURES"))
+RT_ASR_COMPRESSION_RATIO_THRESHOLD = _nonnegative_float_env(
+    "RT_ASR_COMPRESSION_RATIO_THRESHOLD",
+    DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD,
+    allow_zero=False,
+)
+RT_FINAL_DIAR_MERGE_GAP_SEC = _nonnegative_float_env(
+    "RT_FINAL_DIAR_MERGE_GAP_SEC",
+    DEFAULT_FINAL_DIAR_MERGE_GAP_SEC,
+)
+RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC = _nonnegative_float_env(
+    "RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC",
+    DEFAULT_FINAL_DIAR_MIN_TRANSCRIBE_SEC,
+)
 
 # VAD hardening / experimentation
 RT_USE_SILERO_VAD = _bool_env("RT_USE_SILERO_VAD", default=True)
@@ -227,6 +295,8 @@ class RealtimeConfig:
     partial_max_behind_sec: float = PARTIAL_MAX_BEHIND_SEC
     partial_idle_reset_sec: float = PARTIAL_IDLE_RESET_SEC
     finalize_min_dur_sec: float = FINALIZE_MIN_DUR_SEC
+    final_diar_merge_gap_sec: float = RT_FINAL_DIAR_MERGE_GAP_SEC
+    final_diar_min_transcribe_sec: float = RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC
     key_resolution_sec: float = KEY_RES
 
     @property
@@ -316,6 +386,66 @@ class SessionState:
 # ---------------------------------------------------------------------------
 
 DiarSeg = Dict[str, object]  # {start: float, end: float, speaker: str}
+
+
+def _normalize_and_merge_diarization_turns(
+    diarization: List[DiarSeg],
+    *,
+    window_duration_sec: float,
+    merge_gap_sec: float,
+) -> List[DiarSeg]:
+    """Return valid, ordered diarization turns with short same-speaker gaps merged.
+
+    Input timestamps are clipped to ``[0, window_duration_sec]`` and invalid
+    or speaker-less turns are discarded. Consecutive turns with the same raw
+    diarization speaker are merged when they overlap or their gap is at most
+    ``merge_gap_sec``. Individual duration filtering intentionally happens
+    later so short fragments can first gain enough ASR context through merging.
+    """
+
+    window_end = max(0.0, float(window_duration_sec))
+    max_gap = max(0.0, float(merge_gap_sec))
+    normalized: List[DiarSeg] = []
+
+    for turn in diarization:
+        try:
+            start = float(turn.get("start", 0.0))
+            end = float(turn.get("end", 0.0))
+        except (TypeError, ValueError):
+            continue
+
+        speaker = str(turn.get("speaker") or "").strip()
+        if not speaker or not math.isfinite(start) or not math.isfinite(end):
+            continue
+
+        start = max(0.0, min(window_end, start))
+        end = max(0.0, min(window_end, end))
+        if end <= start:
+            continue
+
+        normalized.append({"start": start, "end": end, "speaker": speaker})
+
+    normalized.sort(
+        key=lambda turn: (
+            float(turn["start"]),
+            float(turn["end"]),
+            str(turn["speaker"]),
+        )
+    )
+    merged: List[DiarSeg] = []
+
+    for turn in normalized:
+        if merged:
+            previous = merged[-1]
+            gap = float(turn["start"]) - float(previous["end"])
+            if str(turn["speaker"]) == str(previous["speaker"]) and gap <= max_gap:
+                previous["end"] = max(float(previous["end"]), float(turn["end"]))
+                continue
+
+        merged.append(dict(turn))
+
+    return merged
+
 
 # Gate functions for realtime processing.
 # - partial_gate_fn: typically RMS + VAD (avoid hallucinated partials)
@@ -420,13 +550,23 @@ class RealtimeSessionProcessor:
                     )
                     diar_segs = []
 
+                diar_segs = _normalize_and_merge_diarization_turns(
+                    diar_segs,
+                    window_duration_sec=float(window.size) / float(cfg.sr),
+                    merge_gap_sec=cfg.final_diar_merge_gap_sec,
+                )
+                final_min_transcribe_sec = max(
+                    float(cfg.finalize_min_dur_sec),
+                    float(cfg.final_diar_min_transcribe_sec),
+                )
+
                 for d in diar_segs:
                     seg_start = float(d.get("start") or 0.0)
                     seg_end = float(d.get("end") or 0.0)
                     diar_label = str(d.get("speaker") or "")
 
                     dur = seg_end - seg_start
-                    if dur < cfg.finalize_min_dur_sec:
+                    if dur < final_min_transcribe_sec:
                         continue
 
                     s_abs = window_offset + seg_start
@@ -836,6 +976,18 @@ class RealtimeModelBundle:
         )
 
         logger.info(
+            "rtservice ASR decode config: temperatures=%s compression_ratio_threshold=%.3f",
+            ",".join(f"{temperature:g}" for temperature in RT_ASR_TEMPERATURES),
+            RT_ASR_COMPRESSION_RATIO_THRESHOLD,
+        )
+
+        logger.info(
+            "rtservice FINAL diarization config: merge_gap_sec=%.3f min_transcribe_sec=%.3f",
+            RT_FINAL_DIAR_MERGE_GAP_SEC,
+            RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC,
+        )
+
+        logger.info(
             "rtservice VAD config: enabled=%s backend=%s serialize=%s reset_states=%s no_grad=%s min_speech_ms=%d min_silence_ms=%d",
             USE_SILERO_VAD,
             "onnx" if RT_SILERO_VAD_ONNX else "torch",
@@ -993,7 +1145,8 @@ class RealtimeModelBundle:
                 language=(lang or None),
                 task="transcribe",
                 beam_size=int(beam_size),
-                temperature=[0.0],
+                temperature=RT_ASR_TEMPERATURES,
+                compression_ratio_threshold=RT_ASR_COMPRESSION_RATIO_THRESHOLD,
                 condition_on_previous_text=False,
                 vad_filter=False,
                 word_timestamps=bool(word_timestamps),
@@ -1388,6 +1541,8 @@ class RealtimeEngine:
             r(cfg.partial_max_behind_sec),
             r(cfg.partial_idle_reset_sec),
             r(cfg.finalize_min_dur_sec),
+            r(cfg.final_diar_merge_gap_sec),
+            r(cfg.final_diar_min_transcribe_sec),
             r(cfg.key_resolution_sec),
         )
 
@@ -1431,6 +1586,8 @@ class RealtimeEngine:
             partial_max_behind_sec=base.partial_max_behind_sec,
             partial_idle_reset_sec=base.partial_idle_reset_sec,
             finalize_min_dur_sec=base.finalize_min_dur_sec,
+            final_diar_merge_gap_sec=base.final_diar_merge_gap_sec,
+            final_diar_min_transcribe_sec=base.final_diar_min_transcribe_sec,
             key_resolution_sec=base.key_resolution_sec,
         )
 
