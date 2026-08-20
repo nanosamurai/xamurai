@@ -194,7 +194,7 @@ OVERLAP_SEC = float(os.getenv("RT_OVERLAP_SEC", "0.5"))
 
 # Cumulative refinement: emit partial hypotheses on shorter cadence.
 PARTIAL_ENABLE = _bool_env("RT_PARTIAL_ENABLE") if os.getenv("RT_PARTIAL_ENABLE") is not None else True
-EMIT_EVERY_SEC = float(os.getenv("RT_EMIT_EVERY_SEC", "0.7"))
+EMIT_EVERY_SEC = float(os.getenv("RT_EMIT_EVERY_SEC", "1.5"))
 
 # Partial stability: require the same hypothesis to appear N times before emitting.
 # Default is 1 so PARTIALs flow freely; set >1 if you want extra stability.

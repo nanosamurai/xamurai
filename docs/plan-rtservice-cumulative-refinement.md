@@ -4,7 +4,7 @@ This document captures the implementation plan for **Plan C** discussed in the a
 
 > rtservice has two dimensions:
 > - timespan it runs on (5s currently)
-> - latency: it starts already after ~0.7s, but keeps refining that chunk until the 5s block is finished
+> - latency: it starts after ~1.5s by default, but keeps refining that chunk until the 5s block is finished
 
 Goal: make the realtime stream feel “live”, while still converging to a higher-quality transcript for the same time span.
 
@@ -20,7 +20,7 @@ Goal: make the realtime stream feel “live”, while still converging to a high
 ## Target behavior
 
 For a given session:
-- Start emitting **PARTIAL** updates after `emit_every_sec` (e.g. 0.7s) from session start.
+- Start emitting **PARTIAL** updates after `emit_every_sec` (1.5s by default) from session start.
 - Continue to emit updated PARTIALs as more audio arrives.
 - Once `window_sec` is complete (e.g. 5.0s), emit a **FINAL** event for that window/time span.
 - Slide the window and repeat.
@@ -31,7 +31,7 @@ For a given session:
 
 The intended PARTIAL behavior is **cumulative-within-window**:
 
-- For each realtime window (default **5s**), the server emits multiple `PARTIAL` hypotheses on a shorter cadence (default **0.7s**).
+- For each realtime window (default **5s**), the server emits multiple `PARTIAL` hypotheses on a shorter cadence (default **1.5s**).
 - Each subsequent `PARTIAL` is meant to **supersede** the previous one:
   - `start_s` stays constant (the current window start)
   - `end_s` grows as more audio arrives
@@ -54,7 +54,7 @@ Use rtservice environment variables for defaults:
 
 - `RT_WINDOW_SEC` (default `5.0`)
 - `RT_OVERLAP_SEC` (default `0.5`)
-- `RT_EMIT_EVERY_SEC` (default `0.7`)
+- `RT_EMIT_EVERY_SEC` (default `1.5`)
 - `RT_PARTIAL_ENABLE` (default `true`)
 - `RT_PARTIAL_MODE` (default `cumulative`) - `cumulative` produces monotonic-within-window PARTIALs; `tail` produces non-cumulative lookback PARTIALs.
 - `RT_PARTIAL_MIN_BUFFER_SEC` (default `0.7`) - do not emit PARTIAL until this much audio accumulates.
@@ -71,7 +71,7 @@ service process. The public Community Edition stack provides a local example.
 | Env var | Default | Meaning | Notes / gotchas |
 |---|---:|---|---|
 | `RT_PARTIAL_ENABLE` | `true` | Enable/disable PARTIAL emission entirely. | Use this as the “kill switch” during rollout. |
-| `RT_EMIT_EVERY_SEC` | `0.7` | How often to *attempt* emitting a PARTIAL (cadence). | Smaller values amplify compute; should be clamped in BFF for untrusted clients. |
+| `RT_EMIT_EVERY_SEC` | `1.5` | How often to *attempt* emitting a PARTIAL (cadence). | Smaller values amplify compute; should be clamped in BFF for untrusted clients. |
 | `RT_WINDOW_SEC` | `5.0` | Window length for FINAL processing. | Together with overlap determines hop size. |
 | `RT_OVERLAP_SEC` | `0.5` | Overlap between windows. | Hop = `window - overlap`. |
 | `RT_PARTIAL_MIN_BUFFER_SEC` | `0.7` | Minimum buffered audio before emitting any PARTIAL. | Avoids extremely-early hallucinations. |
@@ -98,7 +98,7 @@ Per-session overrides (optional for phase 1):
 - gRPC metadata from `samuraibff` to `rtservice`:
   - `x-rt-window-sec: 5.0`
   - `x-rt-overlap-sec: 0.5`
-  - `x-rt-emit-every-sec: 0.7`
+  - `x-rt-emit-every-sec: 1.5`
 
 Implementation status:
 - ✅ `rtservice` reads these from gRPC invocation metadata per stream

@@ -30,15 +30,15 @@ In `RT_PARTIAL_MODE=cumulative`, each PARTIAL re-runs ASR on the **entire prefix
 Example (illustrative):
 
 - `RT_WINDOW_SEC=10`
-- `RT_EMIT_EVERY_SEC=0.7` → ~14 PARTIAL attempts per window
+- `RT_EMIT_EVERY_SEC=1.5` → ~6–7 PARTIAL attempts per window
 
 Average prefix duration is ~5s, so total audio transcribed per 10s window is roughly:
 
 ```
-14 * 5s ≈ 70 seconds of audio transcribed
+6.7 * 5s ≈ 33 seconds of audio transcribed
 ```
 
-That’s ~**7× compute amplification** for the PARTIALs alone. If the GPU throughput cannot sustain that, the gRPC stream lags (server-side backlog).
+That’s ~**3.3× compute amplification** for the PARTIALs alone. If the GPU throughput cannot sustain that, the gRPC stream lags (server-side backlog).
 
 ## Implementation notes (what rtservice does)
 
