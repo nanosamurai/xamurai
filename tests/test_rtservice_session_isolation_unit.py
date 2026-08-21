@@ -1,10 +1,12 @@
 import numpy as np
+from types import SimpleNamespace
 
 from rtservice.engine import (
     RealtimeConfig,
     RealtimeEngine,
     RealtimeSessionProcessor,
 )
+from rtservice.providers import LocalFasterWhisperProvider, ProviderRegistry
 
 
 def test_rtservice_engine_isolates_sessions_without_audio_mix():
@@ -90,9 +92,6 @@ def test_rtservice_engine_per_session_overrides_affect_partial_emission():
         # No diarization segments: forces fallback final path only when window completes.
         return []
 
-    def asr_fn(_chunk, _lang):
-        return "hello"
-
     def map_speaker_fn(_tenant_id, diar_label, _chunk):
         return diar_label
 
@@ -106,15 +105,21 @@ def test_rtservice_engine_per_session_overrides_affect_partial_emission():
         def diarize_window(self, w):
             return diarize_fn(w)
 
-        def asr_text(self, w, lang):
-            return asr_fn(w, lang)
-
         def map_speaker_label(self, tenant_id, diar_label, chunk):
             return map_speaker_fn(tenant_id, diar_label, chunk)
 
+    class _FakeWhisper:
+        def transcribe(self, _wave, **_kwargs):
+            return iter([SimpleNamespace(words=None, text="hello")]), SimpleNamespace()
+
     # IMPORTANT: we do NOT inject a fixed processor here, because per-session
     # overrides are implemented by selecting a processor per effective cfg.
-    engine = RealtimeEngine(cfg=cfg, model_bundle=_FakeBundle())
+    provider = LocalFasterWhisperProvider(model=_FakeWhisper())
+    engine = RealtimeEngine(
+        cfg=cfg,
+        model_bundle=_FakeBundle(),
+        provider_registry=ProviderRegistry((provider,), default_profile_id=provider.profile_id),
+    )
 
     # Feed 0.3s worth of audio; should trigger partial for emit_every_sec=0.2.
     pcm16_03 = (np.ones(int(cfg.sr * 0.3), dtype=np.int16)).tobytes()

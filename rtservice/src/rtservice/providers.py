@@ -26,6 +26,19 @@ FASTER_WHISPER_MEDIUM_PROFILE = "faster-whisper-medium-ctranslate2-r1"
 QWEN3_ASR_06B_VLLM_PROFILE = "qwen3-asr-0.6b-vllm-r1"
 
 
+def _trace_metadata() -> tuple[tuple[str, str], ...]:
+    try:
+        from opentelemetry.propagate import inject
+
+        carrier: dict[str, str] = {}
+        inject(carrier)
+        return tuple(
+            (name, carrier[name]) for name in ("traceparent", "tracestate") if carrier.get(name)
+        )
+    except Exception:
+        return ()
+
+
 @dataclass(frozen=True)
 class ProviderCapabilities:
     windowed_realtime: bool
@@ -131,8 +144,11 @@ class ProviderRegistry:
 
 def _decode_config() -> tuple[tuple[float, ...], float]:
     raw = os.getenv("RT_ASR_TEMPERATURES", "0,0.2,0.4,0.6,0.8,1")
+    parts = [item.strip() for item in raw.split(",")]
+    if any(not item for item in parts):
+        raise ValueError("RT_ASR_TEMPERATURES must be a non-empty comma-separated list")
     try:
-        temperatures = tuple(float(item.strip()) for item in raw.split(",") if item.strip())
+        temperatures = tuple(float(item) for item in parts)
     except ValueError as exc:
         raise ValueError("RT_ASR_TEMPERATURES must contain only numbers") from exc
     if not temperatures or any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in temperatures):
@@ -181,6 +197,7 @@ class LocalFasterWhisperProvider:
         self._model_lock = threading.Lock()
         self._serialize = os.getenv("RT_ASR_SERIALIZE", "false").strip().lower() in {"1", "true", "yes", "y"}
         self._temperatures, self._compression_threshold = _decode_config()
+        self._load()
 
     def _load(self):
         if self._model is not None:
@@ -340,6 +357,7 @@ class GrpcSpeechProvider:
                     partial=request.partial,
                 ),
                 timeout=self._timeout,
+                metadata=_trace_metadata(),
             )
         except grpc.RpcError as exc:
             code = "timeout" if exc.code() == grpc.StatusCode.DEADLINE_EXCEEDED else "unavailable"
@@ -384,7 +402,7 @@ class _GrpcStreamingSession:
         self._requests: queue.Queue[object] = queue.Queue(maxsize=2)
         self._responses: queue.Queue[object] = queue.Queue(maxsize=2)
         self._closed = False
-        self._call = stub.StreamTranscribe(self._request_iterator())
+        self._call = stub.StreamTranscribe(self._request_iterator(), metadata=_trace_metadata())
         self._reader = threading.Thread(target=self._read_responses, name="speech-provider-stream", daemon=True)
         self._reader.start()
 

@@ -14,6 +14,7 @@ import grpc
 from proto_gen import stream_pb2
 from proto_gen import stream_pb2_grpc
 from rtservice.engine import RealtimeEngine
+from rtservice.providers import SpeechProviderError
 
 from drsynth_common.logging_setup import setup_logging, set_session_id_for_logging
 from drsynth_common.otel_setup import setup_otel, extract_trace_context_from_headers
@@ -225,9 +226,13 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
         """
         md = _metadata_to_dict(context)
         overrides = _metadata_to_overrides(context)
+        provider_profile_id = md.get("x-rt-provider-profile") or None
+        if provider_profile_id is not None:
+            overrides["provider_profile_id"] = provider_profile_id
 
         stats = _StreamStats()
         started_s = time.time()
+        sessions: set[tuple[str, Optional[str]]] = set()
 
         if _M_STREAMS_TOTAL:
             _M_STREAMS_TOTAL.inc()
@@ -269,6 +274,7 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                     session_id = chunk.session_id or "unknown"
                     tenant_id = getattr(chunk, "tenant_id", "") or None
                     lang = getattr(chunk, "lang", "") or None
+                    sessions.add((session_id, tenant_id))
 
                     if stats.first_session_id == "-":
                         stats.first_session_id = session_id
@@ -308,6 +314,7 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                         chunk.pcm16_le,
                         lang=lang,
                         tenant_id=tenant_id,
+                        sample_rate=getattr(chunk, "sample_rate", 0) or self._engine.cfg.sr,
                         **overrides,
                     )
                     dt = max(0.0, time.time() - t0)
@@ -328,6 +335,24 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                         if _M_SEND_EVENT_SECONDS:
                             _M_SEND_EVENT_SECONDS.observe(send_dt)
 
+            except SpeechProviderError as e:
+                statuses = {
+                    "invalid_request": grpc.StatusCode.INVALID_ARGUMENT,
+                    "unsupported_capability": grpc.StatusCode.UNIMPLEMENTED,
+                    "overloaded": grpc.StatusCode.RESOURCE_EXHAUSTED,
+                    "timeout": grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "unavailable": grpc.StatusCode.UNAVAILABLE,
+                }
+                status = statuses.get(e.code, grpc.StatusCode.INTERNAL)
+                if _M_STREAM_ERRORS_TOTAL:
+                    _M_STREAM_ERRORS_TOTAL.labels(code=status.name).inc()
+                self._log.warning(
+                    "speech provider ended realtime stream session=%s code=%s retryable=%s",
+                    stats.first_session_id,
+                    e.code,
+                    e.retryable,
+                )
+                context.abort(status, e.safe_message)
             except Exception as e:
                 code = "unknown"
                 try:
@@ -353,6 +378,8 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                         pass
                 raise
             finally:
+                for session_id, tenant_id in sessions:
+                    self._engine.close_session(session_id, tenant_id=tenant_id)
                 dur = max(0.0, time.time() - started_s)
                 self._log.info(
                     "rtservice stream ended session=%s dur=%.3fs chunks=%d audio_bytes=%d partial=%d final=%d",
@@ -399,7 +426,9 @@ def create_realtime_asr_server(
         server,
     )
 
-    server.add_insecure_port(f"[::]:{port}")
+    bind_addr = os.getenv("RT_GRPC_BIND_ADDR", "[::]").strip() or "[::]"
+    bound_port = server.add_insecure_port(f"{bind_addr}:{port}")
+    server.bound_port = bound_port  # type: ignore[attr-defined]
     logger.info("RealtimeASR gRPC server created on port: %s", port)
     return server
 
