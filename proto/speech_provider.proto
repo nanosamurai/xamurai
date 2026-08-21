@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package nanosamurai.speech.v1;
+
+message CapabilitiesRequest {
+  string profile_id = 1;
+}
+
+message ProviderCapabilities {
+  bool windowed_realtime = 1;
+  bool native_streaming = 2;
+  bool batch = 3;
+  bool segment_timestamps = 4;
+  bool word_timestamps = 5;
+  bool language_detection = 6;
+  repeated string supported_languages = 7;
+  bool stateful = 8;
+  uint32 preferred_sample_rate = 9;
+  double maximum_audio_seconds = 10;
+  uint32 maximum_concurrent_sessions = 11;
+}
+
+message ProviderProvenance {
+  string profile_id = 1;
+  string runtime = 2;
+  string model_revision = 3;
+  string model_digest = 4;
+  string implementation_revision = 5;
+}
+
+message CapabilitiesResponse {
+  ProviderCapabilities capabilities = 1;
+  ProviderProvenance provenance = 2;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ready = 1;
+  string status = 2;
+  ProviderProvenance provenance = 3;
+}
+
+enum ProviderErrorCode {
+  PROVIDER_ERROR_UNSPECIFIED = 0;
+  PROVIDER_ERROR_INVALID_REQUEST = 1;
+  PROVIDER_ERROR_UNSUPPORTED_CAPABILITY = 2;
+  PROVIDER_ERROR_OVERLOADED = 3;
+  PROVIDER_ERROR_TIMEOUT = 4;
+  PROVIDER_ERROR_UNAVAILABLE = 5;
+  PROVIDER_ERROR_INTERNAL = 6;
+}
+
+message ProviderError {
+  ProviderErrorCode code = 1;
+  string safe_message = 2;
+  bool retryable = 3;
+}
+
+message TranscribeWindowRequest {
+  string request_id = 1;
+  string profile_id = 2;
+  uint64 provider_sequence = 3;
+  uint32 sample_rate = 4;
+  bytes pcm16_le = 5;
+  string language = 6;
+  uint64 start_sample = 7;
+  uint64 end_sample = 8;
+  bool partial = 9;
+}
+
+message ProviderTranscriptEvent {
+  string request_id = 1;
+  string provider_session_id = 2;
+  uint64 provider_sequence = 3;
+  string text = 4;
+  string language = 5;
+  uint64 start_sample = 6;
+  uint64 end_sample = 7;
+  bool terminal = 8;
+  optional float stability = 9;
+  ProviderProvenance provenance = 10;
+  ProviderError error = 11;
+}
+
+message TranscribeWindowResponse {
+  ProviderTranscriptEvent candidate = 1;
+  ProviderError error = 2;
+}
+
+message ProviderAudioFrame {
+  string request_id = 1;
+  string profile_id = 2;
+  string provider_session_id = 3;
+  uint64 provider_sequence = 4;
+  uint32 sample_rate = 5;
+  bytes pcm16_le = 6;
+  string language = 7;
+  bool end_of_stream = 8;
+}
+
+service SpeechProvider {
+  rpc GetCapabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc TranscribeWindow(TranscribeWindowRequest) returns (TranscribeWindowResponse);
+  rpc StreamTranscribe(stream ProviderAudioFrame)
+      returns (stream ProviderTranscriptEvent);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
