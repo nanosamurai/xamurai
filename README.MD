@@ -45,6 +45,7 @@ session and tenant identifiers needed for correlation and isolation.
 
 - `proto/` and `proto_gen/`: protobuf contract and generated Python bindings
 - `rtservice/`: realtime gRPC service
+- `qwen_provider/`: isolated Qwen3-ASR/vLLM provider for native streaming
 - `whisperx_worker/`: near-realtime refinement worker
 - `recorder_worker/`: session recording worker
 - `finalizer_worker/`: full-session finalization worker
@@ -78,7 +79,7 @@ python -m grpc_tools.protoc \
   -I proto \
   --python_out=proto_gen \
   --grpc_python_out=proto_gen \
-  proto/stream.proto
+  proto/stream.proto proto/speech_provider.proto
 ```
 
 Generated bindings must be committed together with any contract change.
@@ -95,6 +96,8 @@ pytest -q -m "not integration" \
   tests/test_rtservice_decode_config_unit.py \
   tests/test_rtservice_final_segmentation_unit.py \
   tests/test_rtservice_session_isolation_unit.py \
+  tests/test_speech_provider_integration.py \
+  tests/test_qwen_provider_integration.py \
   tests/test_stream_controls_unit.py
 ```
 
@@ -127,6 +130,7 @@ docker build -t xamurai-rtservice:dev -f rtservice/Dockerfile .
 docker build -t xamurai-whisperx-worker:dev -f whisperx_worker/Dockerfile .
 docker build -t xamurai-recorder-worker:dev -f recorder_worker/Dockerfile .
 docker build -t xamurai-finalizer-worker:dev -f finalizer_worker/Dockerfile .
+docker build -t xamurai-qwen-provider:dev -f qwen_provider/Dockerfile .
 ```
 
 The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
@@ -135,6 +139,7 @@ The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 - `ghcr.io/nanosamurai/xamurai-whisperx-worker`
 - `ghcr.io/nanosamurai/xamurai-recorder-worker`
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
+- `ghcr.io/nanosamurai/xamurai-qwen-provider`
 
 ## Configuration
 
@@ -148,6 +153,8 @@ Shared Kafka settings:
 Realtime service settings include:
 
 - `RT_GRPC_PORT` (default `50052`)
+- `RT_PROVIDER_PROFILE` (default `faster-whisper-medium-ctranslate2-r1`)
+- `RT_PROVIDER_ENDPOINT` and `RT_PROVIDER_REQUEST_TIMEOUT_SECONDS` for remote profiles
 - `HF_TOKEN`
 - `RT_WINDOW_SEC`, `RT_OVERLAP_SEC`, and `RT_EMIT_EVERY_SEC`
 - `RT_PARTIAL_ENABLE`, `RT_PARTIAL_MODE`, and overload guardrails
@@ -164,6 +171,8 @@ Worker settings include:
 
 Per-stream output selection and compute controls are documented in
 [`docs/stream-output-selection.md`](docs/stream-output-selection.md).
+Provider profiles and the native Qwen path are documented in
+[`docs/modular-asr-providers.md`](docs/modular-asr-providers.md).
 
 ## Security
 
@@ -186,6 +195,7 @@ Report vulnerabilities privately as described in
 - [`docs/stream-output-selection.md`](docs/stream-output-selection.md)
 - [`docs/whisperx-worker-diarization.md`](docs/whisperx-worker-diarization.md)
 - [`docs/rtservice-performance.md`](docs/rtservice-performance.md)
+- [`docs/modular-asr-providers.md`](docs/modular-asr-providers.md)
 - [`docs/enrolled-speakers-multi-tenant.md`](docs/enrolled-speakers-multi-tenant.md)
 - [`docs/word-level-timing.md`](docs/word-level-timing.md)
 - [`docs/ci-cd.md`](docs/ci-cd.md)
