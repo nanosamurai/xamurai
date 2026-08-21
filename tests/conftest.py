@@ -20,6 +20,7 @@ for rel in [
     "whisperx_worker/src",
     "finalizer_worker/src",
     "shared/src",
+    "qwen_provider/src",
 ]:
     p = (_REPO_ROOT / rel).resolve()
     if p.exists() and str(p) not in sys.path:
