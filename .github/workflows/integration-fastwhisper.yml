@@ -55,8 +55,6 @@ jobs:
           # Security: disable pyannote.audio telemetry/metrics exporter.
           PYANNOTE_METRICS_ENABLED: "0"
 
-          # Keep CI feasible on CPU.
-          RT_ASR_MODEL: "tiny"
         run: |
           pytest -q --maxfail=1 -o log_cli=true --log-cli-level=INFO \
             -m integration \

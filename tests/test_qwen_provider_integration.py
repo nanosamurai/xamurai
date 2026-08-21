@@ -1,9 +1,10 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from qwen_provider.server import MODEL_DIGEST, MODEL_REVISION, create_server
-from rtservice.providers import GrpcSpeechProvider, QWEN3_ASR_06B_VLLM_PROFILE
+from rtservice.providers import GrpcSpeechProvider, QWEN3_ASR_06B_VLLM_PROFILE, SpeechProviderError
 
 
 class _FakeQwenBackend:
@@ -47,4 +48,38 @@ def test_qwen_servicer_exposes_native_vllm_profile(monkeypatch):
         assert (final.text, final.terminal, final.end_sample) == ("native final", True, 1600)
         provider.close()
     finally:
+        server.stop(grace=None).wait()
+
+
+def test_qwen_inference_failure_does_not_kill_the_provider(monkeypatch):
+    backend = _FakeQwenBackend()
+    original_push = backend.push
+    failures_remaining = 1
+
+    def fail_once(pcm16, state):
+        nonlocal failures_remaining
+        if failures_remaining:
+            failures_remaining -= 1
+            raise RuntimeError("sensitive backend detail")
+        return original_push(pcm16, state)
+
+    backend.push = fail_once
+    monkeypatch.setenv("QWEN_PROVIDER_BIND_ADDR", "127.0.0.1")
+    server = create_server(backend, port=0)
+    server.start()
+    provider = GrpcSpeechProvider(
+        endpoint=f"127.0.0.1:{server.bound_port}",
+        profile_id=QWEN3_ASR_06B_VLLM_PROFILE,
+        request_timeout_seconds=2,
+    )
+    pcm = np.ones(1600, dtype=np.int16).tobytes()
+    try:
+        with pytest.raises(SpeechProviderError, match="Qwen provider inference failed"):
+            provider.open_stream().push(pcm, sample_rate=16000, language="English")
+
+        recovered = provider.open_stream()
+        assert recovered.push(pcm, sample_rate=16000, language="English").text == "native partial"
+        assert recovered.push(b"", sample_rate=16000, language="English", end_of_stream=True).terminal
+    finally:
+        provider.close()
         server.stop(grace=None).wait()
