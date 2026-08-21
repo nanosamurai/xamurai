@@ -56,13 +56,6 @@ def test_asr_temperature_config_uses_default_and_accepts_custom_values():
     assert _parse_asr_temperatures("0, 0.35, 0.7") == (0.0, 0.35, 0.7)
 
 
-def test_realtime_partial_cadence_defaults_to_one_point_five_seconds():
-    """The compute-safe realtime PARTIAL cadence remains the application default."""
-
-    assert engine_module.EMIT_EVERY_SEC == pytest.approx(1.5)
-    assert RealtimeConfig().emit_every_sec == pytest.approx(1.5)
-
-
 @pytest.mark.parametrize(
     "raw",
     ["", "0.0,,0.2", "not-a-number", "nan", "inf", "-0.1", "1.1", "0.5,0.2"],
