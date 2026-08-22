@@ -232,7 +232,7 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
 
         stats = _StreamStats()
         started_s = time.time()
-        sessions: set[tuple[str, Optional[str]]] = set()
+        sessions: dict[tuple[str, Optional[str]], tuple[Optional[str], int]] = {}
 
         if _M_STREAMS_TOTAL:
             _M_STREAMS_TOTAL.inc()
@@ -270,11 +270,26 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                 if overrides:
                     self._log.info("RealtimeASR stream overrides enabled: %s", sorted(overrides.keys()))
 
+                def events_for(session_id, results):
+                    for result in results:
+                        event = self._engine.to_asr_events(session_id, result)
+                        if event.type == stream_pb2.FINAL:
+                            stats.final_events += 1
+                        else:
+                            stats.partial_events += 1
+
+                        send0 = time.time()
+                        yield event
+                        send_dt = max(0.0, time.time() - send0)
+                        if _M_SEND_EVENT_SECONDS:
+                            _M_SEND_EVENT_SECONDS.observe(send_dt)
+
                 for chunk in request_iterator:
                     session_id = chunk.session_id or "unknown"
                     tenant_id = getattr(chunk, "tenant_id", "") or None
                     lang = getattr(chunk, "lang", "") or None
-                    sessions.add((session_id, tenant_id))
+                    sample_rate = getattr(chunk, "sample_rate", 0) or self._engine.cfg.sr
+                    sessions[(session_id, tenant_id)] = (lang, sample_rate)
 
                     if stats.first_session_id == "-":
                         stats.first_session_id = session_id
@@ -314,26 +329,29 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                         chunk.pcm16_le,
                         lang=lang,
                         tenant_id=tenant_id,
-                        sample_rate=getattr(chunk, "sample_rate", 0) or self._engine.cfg.sr,
+                        sample_rate=sample_rate,
                         **overrides,
                     )
                     dt = max(0.0, time.time() - t0)
                     if _M_FEED_SECONDS:
                         _M_FEED_SECONDS.observe(dt)
 
-                    # Fan out events
-                    for r in results:
-                        ev = self._engine.to_asr_events(session_id, r)
-                        if ev.type == stream_pb2.FINAL:
-                            stats.final_events += 1
-                        else:
-                            stats.partial_events += 1
+                    yield from events_for(session_id, results)
 
-                        send0 = time.time()
-                        yield ev
-                        send_dt = max(0.0, time.time() - send0)
-                        if _M_SEND_EVENT_SECONDS:
-                            _M_SEND_EVENT_SECONDS.observe(send_dt)
+                # A normally exhausted request iterator is a graceful half-close.
+                # Flush provider-owned streaming state while the response side is
+                # still active so buffered audio can produce its terminal event.
+                if context.is_active():
+                    for (session_id, tenant_id), (lang, sample_rate) in sessions.items():
+                        results = self._engine.feed(
+                            session_id,
+                            b"",
+                            lang=lang,
+                            tenant_id=tenant_id,
+                            sample_rate=sample_rate,
+                            **overrides,
+                        )
+                        yield from events_for(session_id, results)
 
             except SpeechProviderError as e:
                 statuses = {

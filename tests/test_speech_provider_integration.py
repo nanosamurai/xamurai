@@ -134,7 +134,7 @@ def test_remote_native_profile_handshake_and_stream_round_trip():
         server.stop(grace=None).wait()
 
 
-def test_public_realtime_stream_routes_through_native_provider(monkeypatch):
+def test_public_realtime_stream_flushes_native_provider_on_request_eof(monkeypatch):
     provider_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     speech_provider_pb2_grpc.add_SpeechProviderServicer_to_server(_FakeNativeProvider(), provider_server)
     provider_port = provider_server.add_insecure_port("127.0.0.1:0")
@@ -165,15 +165,7 @@ def test_public_realtime_stream_routes_through_native_provider(monkeypatch):
                             pcm16_le=pcm,
                             lang="en",
                             tenant_id="tenant-a",
-                        ),
-                        stream_pb2.AudioChunk(
-                            session_id="native-session",
-                            seq=2,
-                            sample_rate=16000,
-                            pcm16_le=b"",
-                            lang="en",
-                            tenant_id="tenant-a",
-                        ),
+                        )
                     ]
                 ),
                 timeout=5,
