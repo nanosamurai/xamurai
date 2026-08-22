@@ -37,6 +37,12 @@ flush emits a FINAL candidate. rtservice converts those coordinates to the
 existing `AsrEvent` seconds only at the public boundary. It does not synthesize
 word timestamps, segment timestamps, or speaker labels.
 
+Natural EOF on the public `RealtimeASR.Stream` request flushes each active
+provider session before rtservice closes it. A canceled public stream instead
+cancels the internal RPC. Provider-side client cancellation is normal teardown:
+it releases the single-session permit without emitting a synthetic inference
+error, so the next session can start immediately.
+
 The remote client allows at most two queued frames and waits for exactly one
 acknowledgement/candidate per frame. `RT_PROVIDER_REQUEST_TIMEOUT_SECONDS` is
 clamped to 0.1-120 seconds. A timeout, provider disconnect, sequence mismatch,
@@ -74,5 +80,29 @@ Face and vLLM telemetry are disabled in the image and Compose configuration.
 and verifies the unchanged public stream through the internal native stream.
 `tests/test_qwen_provider_integration.py` exercises the concrete Qwen provider
 servicer with a fake backend, including capabilities, pinned provenance,
-cumulative candidates, and flush. Real GPU/model validation is performed from
-the nanosamurai Compose Qwen override so the BFF-facing path is also covered.
+cumulative candidates, flush, and cancellation recovery. The lightweight suite
+passed 46 tests with 11 integration tests deselected; the real Faster-Whisper
+gRPC suite passed four tests with one deselected.
+
+Real GPU/model validation used the nanosamurai Compose Qwen override on an RTX
+5090 Laptop GPU. A cold start including the pinned public model download took
+340.7 seconds. Reusing both the model volume and preserved provider container
+reached Compose readiness in 33.6 seconds. Two consecutive 12-second Czech
+fixture sessions traversed BFF -> rtservice -> this provider. Each emitted six
+partials and one final; the first partial arrived at 12.11 seconds and the final
+at 12.15 and 12.14 seconds respectively. rtservice completed the streams in
+13.856 and 13.884 seconds without provider/inference failures. The smoke runner
+reported event keys and timing only and did not print transcript content.
+
+Post-run device use was 16,687 MiB of 24,463 MiB total. Container memory was
+3.853 GiB for the provider, 277.3 MiB for rtservice, and 411.3 MiB for BFF. The
+provider image was 14,399,061,895 bytes and ran as UID 10002; the provider port
+remained unpublished.
+
+vLLM 0.14 emits tokenizer regex warnings during its independent tokenizer loads
+even though the qwen-asr wrapper constructs its processor with the upstream fix
+flag. It also makes two non-fatal safetensors metadata lookups against the
+pinned local snapshot path before loading the local shard successfully. The
+validation deliberately leaves these upstream diagnostics visible instead of
+patching unsupported runtime internals; re-evaluate them when either dependency
+is upgraded.
