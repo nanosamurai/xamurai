@@ -12,7 +12,9 @@ do not live in this service repository.
 ## Services
 
 - `rtservice` exposes the bidirectional `RealtimeASR` gRPC API and emits
-  replaceable partial and committed final realtime events.
+  Faster-Whisper replaceable partial and committed final realtime events.
+- `qwen_rtservice` exposes the same `RealtimeASR` API using Qwen3-ASR's native
+  vLLM streaming implementation.
 - `whisperx_worker` consumes `audio.raw` and emits window-based
   `transcripts.refined` events.
 - `recorder_worker` consumes `audio.raw`, stores session audio, and emits
@@ -28,9 +30,10 @@ API traffic is handled by SamuraiBFF.
 
 ## Processing pipeline
 
-1. SamuraiBFF streams PCM16 audio to `rtservice` and publishes `AudioChunk`
-   messages to `audio.raw`.
-2. `rtservice` streams low-latency `AsrEvent` updates back over gRPC.
+1. SamuraiBFF publishes each PCM16 `AudioChunk` once to `audio.raw` and fans it
+   out to each configured realtime service.
+2. Each realtime service streams track-labelled `AsrEvent` updates back over
+   the common gRPC contract.
 3. `whisperx_worker` buffers configurable windows and publishes
    `RefinedEvent` messages to `transcripts.refined`.
 4. `recorder_worker` finalizes the session recording and publishes
@@ -45,7 +48,7 @@ session and tenant identifiers needed for correlation and isolation.
 
 - `proto/` and `proto_gen/`: protobuf contract and generated Python bindings
 - `rtservice/`: realtime gRPC service
-- `qwen_provider/`: isolated Qwen3-ASR/vLLM provider for native streaming
+- `qwen_rtservice/`: isolated Qwen3-ASR/vLLM realtime service
 - `whisperx_worker/`: near-realtime refinement worker
 - `recorder_worker/`: session recording worker
 - `finalizer_worker/`: full-session finalization worker
@@ -79,7 +82,7 @@ python -m grpc_tools.protoc \
   -I proto \
   --python_out=proto_gen \
   --grpc_python_out=proto_gen \
-  proto/stream.proto proto/speech_provider.proto
+  proto/stream.proto
 ```
 
 Generated bindings must be committed together with any contract change.
@@ -97,7 +100,7 @@ pytest -q -m "not integration" \
   tests/test_rtservice_final_segmentation_unit.py \
   tests/test_rtservice_session_isolation_unit.py \
   tests/test_speech_provider_integration.py \
-  tests/test_qwen_provider_integration.py \
+  tests/test_qwen_rtservice_integration.py \
   tests/test_stream_controls_unit.py
 ```
 
@@ -130,7 +133,7 @@ docker build -t xamurai-rtservice:dev -f rtservice/Dockerfile .
 docker build -t xamurai-whisperx-worker:dev -f whisperx_worker/Dockerfile .
 docker build -t xamurai-recorder-worker:dev -f recorder_worker/Dockerfile .
 docker build -t xamurai-finalizer-worker:dev -f finalizer_worker/Dockerfile .
-docker build -t xamurai-qwen-provider:dev -f qwen_provider/Dockerfile .
+docker build -t xamurai-qwen-rtservice:dev -f qwen_rtservice/Dockerfile .
 ```
 
 The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
@@ -139,7 +142,7 @@ The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 - `ghcr.io/nanosamurai/xamurai-whisperx-worker`
 - `ghcr.io/nanosamurai/xamurai-recorder-worker`
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
-- `ghcr.io/nanosamurai/xamurai-qwen-provider`
+- `ghcr.io/nanosamurai/xamurai-qwen-rtservice`
 
 ## Configuration
 
@@ -153,14 +156,18 @@ Shared Kafka settings:
 Realtime service settings include:
 
 - `RT_GRPC_PORT` (default `50052`)
-- `RT_PROVIDER_PROFILE` (default `faster-whisper-medium-ctranslate2-r1`)
-- `RT_PROVIDER_ENDPOINT` and `RT_PROVIDER_REQUEST_TIMEOUT_SECONDS` for remote profiles
 - `HF_TOKEN`
 - `RT_WINDOW_SEC`, `RT_OVERLAP_SEC`, and `RT_EMIT_EVERY_SEC`
 - `RT_PARTIAL_ENABLE`, `RT_PARTIAL_MODE`, and overload guardrails
 - `RT_ASR_TEMPERATURES` and `RT_ASR_COMPRESSION_RATIO_THRESHOLD`
 - `RT_FINAL_DIAR_MERGE_GAP_SEC` and `RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC`
 - `ENROLL_BACKEND` plus local or S3 enrollment settings
+
+Qwen realtime service settings include:
+
+- `QWEN_RTSERVICE_PORT` (default `50052`)
+- `QWEN_GPU_MEMORY_UTILIZATION`, `QWEN_STREAM_CHUNK_SECONDS`, and
+  `QWEN_MAX_AUDIO_SECONDS`
 
 Worker settings include:
 

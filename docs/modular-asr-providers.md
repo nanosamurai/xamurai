@@ -1,66 +1,105 @@
-# Modular realtime ASR providers
+# Modular realtime ASR services
 
-`rtservice` remains the application-facing realtime gateway. SamuraiBFF still
-uses the existing bidirectional `RealtimeASR.Stream` RPC and receives the same
-`AsrEvent` PARTIAL/FINAL data model. Model runtimes sit behind the internal
-`nanosamurai.speech.v1.SpeechProvider` contract.
+Faster-Whisper and Qwen are peer services behind the same public
+`RealtimeASR` gRPC API. SamuraiBFF owns the configured track list and fans one
+accepted audio stream out to those peers. There is no
+`rtservice -> SpeechProvider gRPC -> Qwen` hop.
 
-## Fixed provider profiles
+```mermaid
+flowchart LR
+    subgraph bffImage["Docker image: samuraibff"]
+        subgraph bffService["Compose service: samuraibff"]
+            WS["WebSocket audio/events"]
+            Fanout["bounded per-track fan-out"]
+            KafkaOnce["publish audio.raw once"]
+        end
+    end
 
-Profiles are process-start allowlist entries, not request-time model
-configuration. A stream may select only a registered profile via
-`x-rt-provider-profile`; the normal deployment selects its default with
-`RT_PROVIDER_PROFILE`.
+    subgraph fasterImage["Docker image: xamurai-rtservice"]
+        subgraph fasterService["Compose service: rtservice"]
+            FasterAPI["RealtimeASR\nGetCapabilities + Stream"]
+            SpeechProvider["internal Python SpeechProvider"]
+            Faster["LocalFasterWhisperProvider"]
+        end
+    end
 
-| Profile | Runtime | Mode | Timing claims |
+    subgraph qwenImage["Docker image: xamurai-qwen-rtservice"]
+        subgraph qwenService["Compose service: qwen-rtservice"]
+            QwenAPI["RealtimeASR\nGetCapabilities + Stream"]
+            QwenBackend["Qwen3ASRModel.LLM\nin-process vLLM API"]
+        end
+    end
+
+    WS --> Fanout
+    WS --> KafkaOnce
+    Fanout -->|"track=faster-whisper"| FasterAPI
+    Fanout -->|"track=qwen"| QwenAPI
+    FasterAPI --> SpeechProvider --> Faster
+    QwenAPI --> QwenBackend
+```
+
+## Common service contract
+
+Every realtime service implements:
+
+- `GetCapabilities(RealtimeCapabilitiesRequest) -> RealtimeCapabilities`;
+- `Stream(stream AudioChunk) -> stream AsrEvent`.
+
+Capabilities describe mode, timestamp and language support, statefulness,
+sample rate, limits, runtime, and immutable model/implementation provenance.
+`AsrEvent.provider_profile_id` identifies the implementation profile. The BFF
+adds its operator-controlled `track` ID and `primary_track` compatibility flag
+to WebSocket events; a client cannot supply a model endpoint or model ID.
+Language identifiers at this public boundary use short codes (`cs`, `en`,
+`id`, and so on). The Qwen adapter translates these to the language names its
+official library accepts and translates detected names back to codes in both
+capabilities and events.
+
+Natural request EOF is the flush signal. A service drains accepted chunks,
+emits its terminal result when available, and completes its response stream.
+Cancellation is immediate teardown and does not synthesize a final result.
+
+## Internal implementation boundaries
+
+The Faster service retains the `SpeechProvider` Python Protocol because it
+separates rolling-window/session policy from Faster-Whisper preprocessing and
+decoding with little transport overhead. `LocalFasterWhisperProvider` is the
+only registered profile in that process. VAD, window overlap, partial/final
+state, diarization, and enrolled-speaker mapping remain in `rtservice`.
+
+The Qwen service is already isolated by its public service/container boundary,
+so it does not reimplement the removed remote `SpeechProvider` gRPC layer. Its
+small `QwenBackend` Protocol isolates the public stream handling from the
+official Qwen library for tests. This avoids daisy-chained gRPC services and
+lets either realtime implementation be deployed, restarted, and scaled as a
+peer.
+
+## Fixed profiles
+
+| BFF track | Provider profile | Runtime and mode | Timing claims |
 | --- | --- | --- | --- |
-| `faster-whisper-medium-ctranslate2-r1` | In-process Faster-Whisper 1.2 / CTranslate2 4.6, model revision `08e178d48790749d25932bbc082711ddcfdfbc4f` | Existing windowed realtime path with VAD, diarization, partials, finals, and enrollment mapping | Existing segment/window behavior |
-| `qwen3-asr-0.6b-vllm-r1` | Isolated Qwen3-ASR 0.6B provider using `qwen-asr==0.0.6` and `vllm==0.14.0`, model revision `c4468bdb552ddc559e464f6081e22dd4034f2e68` | Native stateful stream, one concurrent session in the validation profile | Cumulative sample range only; no word or segment timestamps |
+| `faster-whisper` | `faster-whisper-medium-ctranslate2-r1` | Faster-Whisper 1.2 / CTranslate2 4.6; windowed realtime with VAD, diarization, enrollment mapping, partials, and finals | Existing window/segment behavior and word timestamps |
+| `qwen` | `qwen3-asr-0.6b-vllm-r1` | `qwen-asr==0.0.6`; `vllm==0.14.0`; native stateful stream; one concurrent session in this validation profile | Cumulative sample range only; no word or segment timestamps |
 
-Both profiles record the model weight SHA-256 in provider provenance. The Qwen
-container verifies its pinned `model.safetensors` digest before loading vLLM.
-No RPC accepts an arbitrary model ID, revision, URL, or runtime argument.
+The Qwen profile pins `Qwen/Qwen3-ASR-0.6B` revision
+`c4468bdb552ddc559e464f6081e22dd4034f2e68` and verifies the
+`model.safetensors` digest
+`sha256:79d6cbd4c98c7bbffe9db2edac07f56cd6637d0d5944b27f6c2b8353840323ea`
+before initializing inference. No RPC accepts an arbitrary model ID, revision,
+URL, or runtime argument.
 
-## Internal contract
+## Qwen/vLLM lifecycle
 
-The internal gRPC service exposes:
+The Qwen container starts only `python -m qwen_rtservice.server`. That process
+constructs `Qwen3ASRModel.LLM(...)`; the `qwen-asr` adapter initializes and
+owns vLLM in-process. There is no separate `vllm serve` command or sidecar.
 
-- capability and provenance discovery;
-- a bounded window RPC for window-oriented providers;
-- a bidirectional native-streaming RPC with request, session, and contiguous
-  provider sequence identities;
-- readiness.
-
-All audio coordinates are integer sample indexes. Native Qwen hypotheses cover
-`[0, samples_received)` and replace the prior hypothesis for that range. A
-flush emits a FINAL candidate. rtservice converts those coordinates to the
-existing `AsrEvent` seconds only at the public boundary. It does not synthesize
-word timestamps, segment timestamps, or speaker labels.
-
-Natural EOF on the public `RealtimeASR.Stream` request flushes each active
-provider session before rtservice closes it. A canceled public stream instead
-cancels the internal RPC. Provider-side client cancellation is normal teardown:
-it releases the single-session permit without emitting a synthetic inference
-error, so the next session can start immediately.
-
-The remote client allows at most two queued frames and waits for exactly one
-acknowledgement/candidate per frame. `RT_PROVIDER_REQUEST_TIMEOUT_SECONDS` is
-clamped to 0.1-120 seconds. A timeout, provider disconnect, sequence mismatch,
-or inference error cancels that provider stream and ends only the corresponding
-public stream with an appropriate gRPC status. There is no silent fallback to a
-different model. W3C trace metadata is propagated to the internal RPC.
-
-## Qwen native streaming details
-
-The Qwen provider uses `Qwen3ASRModel.LLM(...)`, initializes one official
-streaming state per RPC, passes incoming PCM16 samples through
-`streaming_transcribe`, and calls `finish_streaming_transcribe` on flush. The
-official implementation buffers the configured chunk, re-feeds accumulated
-audio, and applies token-prefix rollback. “Native streaming” here means the
-model's supported vLLM streaming API, not a claim that every step has constant
-cost or reuses an acoustic KV cache.
-
-Configuration is deliberately small and bounded:
+Each RPC creates one official Qwen streaming state with
+`init_streaming_state`, feeds PCM16 samples through `streaming_transcribe`, and
+calls `finish_streaming_transcribe` at request EOF. The upstream adapter
+buffers the configured chunk, re-feeds accumulated audio, and applies
+token-prefix rollback. “Native streaming” describes this official API; it does
+not imply constant work per chunk or an acoustic KV cache.
 
 | Variable | Default | Allowed range |
 | --- | ---: | ---: |
@@ -69,40 +108,34 @@ Configuration is deliberately small and bounded:
 | `QWEN_MAX_NEW_TOKENS` | `256` | `16`-`1024` |
 | `QWEN_MAX_AUDIO_SECONDS` | `300` | `1`-`1800` |
 
-The provider requires CUDA and fails startup clearly when it is unavailable.
-It binds only inside its workload network in Compose; no provider port is
-published on the host. Audio and transcript contents are not logged. Hugging
-Face and vLLM telemetry are disabled in the image and Compose configuration.
+The service requires CUDA, runs as UID 10002, disables Hugging Face/vLLM
+telemetry, and does not log audio or transcript contents. In the Compose
+evaluation stack its gRPC port remains network-internal.
+
+## Failure isolation and BFF orchestration
+
+`SAMURAIBFF_GRPC_REALTIME_TRACKS` is an operator-controlled, maximum-four
+allowlist in the form `track-id=host:port,...`. Each track has its own bounded
+queue, gRPC stream, capability handshake, cancellation, and completion state.
+A full or failed track is canceled without closing its healthy peers or the
+browser session. The first configured track is the compatibility primary.
+
+The BFF publishes every accepted chunk to `audio.raw` once, independently of
+the number of realtime tracks. The existing Kafka refinement, recording, and
+finalization path therefore remains unchanged and is not duplicated per model.
 
 ## Validation
 
-`tests/test_speech_provider_integration.py` starts real in-process gRPC servers
-and verifies the unchanged public stream through the internal native stream.
-`tests/test_qwen_provider_integration.py` exercises the concrete Qwen provider
-servicer with a fake backend, including capabilities, pinned provenance,
-cumulative candidates, flush, and cancellation recovery. The lightweight suite
-passed 46 tests with 11 integration tests deselected; the real Faster-Whisper
-gRPC suite passed four tests with one deselected.
+The lightweight Xamurai suite covers both real localhost gRPC service
+boundaries with fake model backends, including capabilities, native
+partial/final delivery, contiguous sequencing, cancellation permit recovery,
+safe inference failure, and subsequent-session recovery. BFF integration tests
+send one WebSocket audio stream to two fake `RealtimeASR` peers and prove that
+all accepted chunks, EOF, and track-labelled terminal events reach both.
 
-Real GPU/model validation used the nanosamurai Compose Qwen override on an RTX
-5090 Laptop GPU. A cold start including the pinned public model download took
-340.7 seconds. Reusing both the model volume and preserved provider container
-reached Compose readiness in 33.6 seconds. Two consecutive 12-second Czech
-fixture sessions traversed BFF -> rtservice -> this provider. Each emitted six
-partials and one final; the first partial arrived at 12.11 seconds and the final
-at 12.15 and 12.14 seconds respectively. rtservice completed the streams in
-13.856 and 13.884 seconds without provider/inference failures. The smoke runner
-reported event keys and timing only and did not print transcript content.
-
-Post-run device use was 16,687 MiB of 24,463 MiB total. Container memory was
-3.853 GiB for the provider, 277.3 MiB for rtservice, and 411.3 MiB for BFF. The
-provider image was 14,399,061,895 bytes and ran as UID 10002; the provider port
-remained unpublished.
-
-vLLM 0.14 emits tokenizer regex warnings during its independent tokenizer loads
-even though the qwen-asr wrapper constructs its processor with the upstream fix
-flag. It also makes two non-fatal safetensors metadata lookups against the
-pinned local snapshot path before loading the local shard successfully. The
-validation deliberately leaves these upstream diagnostics visible instead of
-patching unsupported runtime internals; re-evaluate them when either dependency
-is upgraded.
+The earlier single-Qwen Compose prototype validated the pinned runtime on an
+RTX 5090 Laptop GPU before the peer-service refactor. Cold readiness was 340.7
+seconds and preserved-cache readiness 33.6 seconds; two consecutive 12-second
+fixture sessions each emitted six partials and one final. Those measurements
+remain model/runtime evidence, while the peer dual-track topology requires its
+own final Compose result before Phase 2a is closed.
