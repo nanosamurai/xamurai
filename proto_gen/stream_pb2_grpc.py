@@ -34,6 +34,11 @@ class RealtimeASRStub(object):
         Args:
             channel: A grpc.Channel.
         """
+        self.GetCapabilities = channel.unary_unary(
+                '/RealtimeASR/GetCapabilities',
+                request_serializer=stream__pb2.RealtimeCapabilitiesRequest.SerializeToString,
+                response_deserializer=stream__pb2.RealtimeCapabilities.FromString,
+                _registered_method=True)
         self.Stream = channel.stream_stream(
                 '/RealtimeASR/Stream',
                 request_serializer=stream__pb2.AudioChunk.SerializeToString,
@@ -44,6 +49,12 @@ class RealtimeASRStub(object):
 class RealtimeASRServicer(object):
     """Missing associated documentation comment in .proto file."""
 
+    def GetCapabilities(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def Stream(self, request_iterator, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -53,6 +64,11 @@ class RealtimeASRServicer(object):
 
 def add_RealtimeASRServicer_to_server(servicer, server):
     rpc_method_handlers = {
+            'GetCapabilities': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCapabilities,
+                    request_deserializer=stream__pb2.RealtimeCapabilitiesRequest.FromString,
+                    response_serializer=stream__pb2.RealtimeCapabilities.SerializeToString,
+            ),
             'Stream': grpc.stream_stream_rpc_method_handler(
                     servicer.Stream,
                     request_deserializer=stream__pb2.AudioChunk.FromString,
@@ -68,6 +84,33 @@ def add_RealtimeASRServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class RealtimeASR(object):
     """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def GetCapabilities(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/RealtimeASR/GetCapabilities',
+            stream__pb2.RealtimeCapabilitiesRequest.SerializeToString,
+            stream__pb2.RealtimeCapabilities.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
 
     @staticmethod
     def Stream(request_iterator,

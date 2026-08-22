@@ -219,6 +219,30 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
         self._engine = engine
         self._log = logging.getLogger(__name__)
 
+    def GetCapabilities(self, request, context):
+        """Return the fixed provider capabilities and pinned runtime provenance."""
+        provider = self._engine.default_provider()
+        capabilities = provider.capabilities
+        provenance = provider.provenance
+        return stream_pb2.RealtimeCapabilities(
+            provider_profile_id=provider.profile_id,
+            windowed_realtime=capabilities.windowed_realtime,
+            native_streaming=capabilities.native_streaming,
+            batch=capabilities.batch,
+            segment_timestamps=capabilities.segment_timestamps,
+            word_timestamps=capabilities.word_timestamps,
+            language_detection=capabilities.language_detection,
+            supported_languages=capabilities.supported_languages,
+            stateful=capabilities.stateful,
+            preferred_sample_rate=capabilities.preferred_sample_rate,
+            maximum_audio_seconds=capabilities.maximum_audio_seconds,
+            maximum_concurrent_sessions=capabilities.maximum_concurrent_sessions,
+            runtime=provenance.runtime,
+            model_revision=provenance.model_revision,
+            model_digest=provenance.model_digest,
+            implementation_revision=provenance.implementation_revision,
+        )
+
     def Stream(self, request_iterator, context):
         """
         NOTE: this MUST be a normal (sync) generator for grpc.server(),

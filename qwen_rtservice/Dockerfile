@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH=/app:/app/qwen_provider/src \
+    PYTHONPATH=/app:/app/qwen_rtservice/src \
     HF_HOME=/data/huggingface \
     HF_HUB_DISABLE_TELEMETRY=1 \
     DO_NOT_TRACK=1 \
@@ -15,9 +15,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # The upstream image inherits PyGObject through Ubuntu's software-properties
-# packages without pycairo. This provider uses none of them, so remove the
+# packages without pycairo. This service uses none of them, so remove the
 # packages through their owning package manager instead of adding graphics libs.
-# Keep the remaining runtime reproducible even if the upstream image's latest tag moves.
 RUN apt-get purge --yes \
       software-properties-common \
       python3-software-properties \
@@ -30,18 +29,18 @@ RUN apt-get purge --yes \
     && pip check
 
 COPY proto_gen /app/proto_gen
-COPY qwen_provider/src /app/qwen_provider/src
+COPY qwen_rtservice/src /app/qwen_rtservice/src
 
-RUN useradd --create-home --uid 10002 provider \
+RUN useradd --create-home --uid 10002 rtservice \
     && mkdir -p /data/huggingface \
     && chown -R 10002:10002 /app /data/huggingface
 
 USER 10002
 
-EXPOSE 50061
+EXPOSE 50052
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10m --retries=3 \
-  CMD ["python", "-m", "qwen_provider.healthcheck"]
+  CMD ["python", "-m", "qwen_rtservice.healthcheck"]
 
 ENTRYPOINT []
-CMD ["python", "-m", "qwen_provider.server"]
+CMD ["python", "-m", "qwen_rtservice.server"]

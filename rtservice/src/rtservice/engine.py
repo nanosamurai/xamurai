@@ -1592,7 +1592,16 @@ class RealtimeEngine:
         if self._provider_registry is not None:
             self._provider_registry.close()
 
+    def default_provider(self) -> SpeechProvider:
+        """Return the fixed, allowlisted provider exposed by this service."""
+        if self._provider_registry is None:
+            raise SpeechProviderError("unavailable", "realtime provider metadata is unavailable")
+        return self._provider_registry.get()
+
     def to_asr_events(self, session_id: str, r: AsrResult) -> stream_pb2.AsrEvent:
+        provider_profile_id = ""
+        if self._provider_registry is not None:
+            provider_profile_id = self._provider_registry.default_profile_id
         return stream_pb2.AsrEvent(
             session_id=session_id,
             start_s=r.start_s,
@@ -1601,6 +1610,7 @@ class RealtimeEngine:
             type=stream_pb2.FINAL if r.is_final else stream_pb2.PARTIAL,
             lang=(r.lang or self.default_lang or ""),
             speaker=(r.speaker or ""),
+            provider_profile_id=provider_profile_id,
         )
 
     def _maybe_evict_idle_sessions(self, now_s: float) -> None:

@@ -76,10 +76,10 @@ jobs:
             dockerfile: finalizer_worker/Dockerfile
             context: .
             ghcr_repo: xamurai-finalizer-worker
-          - image: qwen-provider
-            dockerfile: qwen_provider/Dockerfile
+          - image: qwen-rtservice
+            dockerfile: qwen_rtservice/Dockerfile
             context: .
-            ghcr_repo: xamurai-qwen-provider
+            ghcr_repo: xamurai-qwen-rtservice
 
     steps:
       - name: Checkout
