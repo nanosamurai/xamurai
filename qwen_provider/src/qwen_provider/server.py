@@ -226,6 +226,13 @@ class QwenProviderServicer(speech_provider_pb2_grpc.SpeechProviderServicer):
                 expected_sequence += 1
                 if frame.end_of_stream:
                     return
+        except grpc.RpcError as exc:
+            # A gateway cancellation ends the request iterator with RpcError.
+            # It is normal teardown: there is no active response stream on which
+            # to report a provider error, and the session slot is released below.
+            code = exc.code()
+            if context.is_active() and code != grpc.StatusCode.CANCELLED:
+                logger.warning("Qwen provider transport ended code=%s", getattr(code, "name", "unknown"))
         except Exception as exc:
             logger.error("Qwen provider stream failed error_type=%s", type(exc).__name__)
             if request_id is not None:

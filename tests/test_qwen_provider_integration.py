@@ -1,3 +1,5 @@
+import logging
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -48,6 +50,32 @@ def test_qwen_servicer_exposes_native_vllm_profile(monkeypatch):
         assert (final.text, final.terminal, final.end_sample) == ("native final", True, 1600)
         provider.close()
     finally:
+        server.stop(grace=None).wait()
+
+
+def test_qwen_client_cancellation_releases_session_without_error(monkeypatch, caplog):
+    monkeypatch.setenv("QWEN_PROVIDER_BIND_ADDR", "127.0.0.1")
+    server = create_server(_FakeQwenBackend(), port=0)
+    server.start()
+    provider = GrpcSpeechProvider(
+        endpoint=f"127.0.0.1:{server.bound_port}",
+        profile_id=QWEN3_ASR_06B_VLLM_PROFILE,
+        request_timeout_seconds=2,
+    )
+    pcm = np.ones(1600, dtype=np.int16).tobytes()
+    caplog.set_level(logging.ERROR)
+    try:
+        cancelled = provider.open_stream()
+        assert cancelled.push(pcm, sample_rate=16000, language="English").text == "native partial"
+        cancelled.cancel()
+        time.sleep(0.1)
+
+        recovered = provider.open_stream()
+        assert recovered.push(pcm, sample_rate=16000, language="English").text == "native partial"
+        assert recovered.push(b"", sample_rate=16000, language="English", end_of_stream=True).terminal
+        assert "Qwen provider stream failed" not in caplog.text
+    finally:
+        provider.close()
         server.stop(grace=None).wait()
 
 
