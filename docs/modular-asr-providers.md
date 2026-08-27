@@ -79,7 +79,7 @@ peer.
 | BFF track | Provider profile | Runtime and mode | Timing claims |
 | --- | --- | --- | --- |
 | `faster-whisper` | `faster-whisper-medium-ctranslate2-r1` | Faster-Whisper 1.2 / CTranslate2 4.6; windowed realtime with VAD, diarization, enrollment mapping, partials, and finals | Existing window/segment behavior and word timestamps |
-| `qwen` | `qwen3-asr-0.6b-vllm-r1` | `qwen-asr==0.0.6`; `vllm==0.14.0`; native stateful stream; one concurrent session in this validation profile | Cumulative sample range only; no word or segment timestamps |
+| `qwen` | `qwen3-asr-0.6b-vllm-r2` | `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session in this validation profile | Contiguous epoch ranges only; no word or segment timestamps |
 
 The Qwen profile pins `Qwen/Qwen3-ASR-0.6B` revision
 `c4468bdb552ddc559e464f6081e22dd4034f2e68` and verifies the
@@ -94,19 +94,43 @@ The Qwen container starts only `python -m qwen_rtservice.server`. That process
 constructs `Qwen3ASRModel.LLM(...)`; the `qwen-asr` adapter initializes and
 owns vLLM in-process. There is no separate `vllm serve` command or sidecar.
 
-Each RPC creates one official Qwen streaming state with
-`init_streaming_state`, feeds PCM16 samples through `streaming_transcribe`, and
-calls `finish_streaming_transcribe` at request EOF. The upstream adapter
-buffers the configured chunk, re-feeds accumulated audio, and applies
-token-prefix rollback. “Native streaming” describes this official API; it does
-not imply constant work per chunk or an acoustic KV cache.
+Each RPC remains one continuous public gRPC stream, but the service bounds the
+official Qwen state to an epoch (120 seconds by default). At an epoch boundary
+it calls `finish_streaming_transcribe`, emits a normal `FINAL` event for that
+contiguous range, commits the novel text, and opens a fresh
+`init_streaming_state` with a bounded tail of transcript context. The next
+`PARTIAL` starts at the same sample boundary, so no audio is replayed and the
+public track has neither a gap nor duplicated seam text. Request EOF flushes
+the current epoch and closes the public stream normally.
+
+The upstream adapter buffers the configured chunk, re-feeds audio accumulated
+within the current epoch, and applies token-prefix rollback. “Native streaming”
+describes this official API; it does not imply constant work per chunk or an
+acoustic KV cache. Restarted epochs were chosen for the initial implementation
+because the official API has no supported state-truncation operation. Rolling
+audio overlap can be evaluated later if real seam-quality measurements justify
+the duplicate-suppression complexity.
 
 | Variable | Default | Allowed range |
 | --- | ---: | ---: |
-| `QWEN_GPU_MEMORY_UTILIZATION` | `0.65` | `0.1`-`0.95` |
 | `QWEN_STREAM_CHUNK_SECONDS` | `2.0` | `0.5`-`10.0` |
-| `QWEN_MAX_NEW_TOKENS` | `256` | `16`-`1024` |
-| `QWEN_MAX_AUDIO_SECONDS` | `300` | `1`-`1800` |
+| `QWEN_STREAM_EPOCH_SECONDS` | `120.0` | `10.0`-`600.0` |
+| `QWEN_EPOCH_CONTEXT_CHARACTERS` | `1000` | `0`-`8000` |
+| `QWEN_MAX_NEW_TOKENS` | `1024` | `16`-`1024` |
+| `QWEN_MAX_MODEL_LEN` | `4096` | `2048`-`65536` |
+| `QWEN_KV_CACHE_MIB` | `512` | `512`-`16384` |
+
+`QWEN_MAX_MODEL_LEN` must cover the configured epoch's estimated audio tokens,
+the bounded context tail, output tokens, and safety margin. `QWEN_KV_CACHE_MIB`
+must cover that context using the pinned model's KV geometry. The service
+rejects incompatible settings at startup. This replaces vLLM's percentage-of-
+GPU allocation, which reserved roughly 10 GiB for the earlier 0.65 setting on
+the 24 GiB development GPU despite the 0.6B model size.
+
+The profile advertises `maximum_audio_seconds=0`, meaning the public stream has
+no provider-imposed duration cutoff. It still advertises the real one-session
+concurrency limit and lack of timestamps. Epoch duration is an internal compute
+bound, not a recording limit.
 
 The service requires CUDA, runs as UID 10002, disables Hugging Face/vLLM
 telemetry, and does not log audio or transcript contents. In the Compose
@@ -129,7 +153,9 @@ finalization path therefore remains unchanged and is not duplicated per model.
 The lightweight Xamurai suite covers both real localhost gRPC service
 boundaries with fake model backends, including capabilities, native
 partial/final delivery, contiguous sequencing, cancellation permit recovery,
-safe inference failure, and subsequent-session recovery. BFF integration tests
+safe inference failure, subsequent-session recovery, and a synthetic stream
+longer than 300 seconds that crosses more than 30 bounded epochs without
+duplicate or discontinuous public segments. BFF integration tests
 send one WebSocket audio stream to two fake `RealtimeASR` peers and prove that
 all accepted chunks, EOF, and track-labelled terminal events reach both.
 

@@ -166,8 +166,11 @@ Realtime service settings include:
 Qwen realtime service settings include:
 
 - `QWEN_RTSERVICE_PORT` (default `50052`)
-- `QWEN_GPU_MEMORY_UTILIZATION`, `QWEN_STREAM_CHUNK_SECONDS`, and
-  `QWEN_MAX_AUDIO_SECONDS`
+- `QWEN_STREAM_CHUNK_SECONDS` and `QWEN_STREAM_EPOCH_SECONDS`
+- `QWEN_EPOCH_CONTEXT_CHARACTERS`, `QWEN_MAX_NEW_TOKENS`, and
+  `QWEN_MAX_MODEL_LEN`
+- `QWEN_KV_CACHE_MIB` (an explicit vLLM KV-cache allocation rather than a
+  fraction of all available VRAM)
 
 Worker settings include:
 
