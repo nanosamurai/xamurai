@@ -27,6 +27,8 @@ flowchart LR
         subgraph qwenService["Compose service: qwen-rtservice"]
             QwenAPI["RealtimeASR\nGetCapabilities + Stream"]
             QwenBackend["Qwen3ASRModel.LLM\nin-process vLLM API"]
+            QwenAligner["Qwen3 ForcedAligner\nper completed epoch"]
+            QwenDiar["pyannote 3.1\nper completed epoch"]
         end
     end
 
@@ -36,6 +38,8 @@ flowchart LR
     Fanout -->|"track=qwen"| QwenAPI
     FasterAPI --> SpeechProvider --> Faster
     QwenAPI --> QwenBackend
+    QwenAPI --> QwenAligner
+    QwenAPI --> QwenDiar
 ```
 
 ## Common service contract
@@ -45,7 +49,7 @@ Every realtime service implements:
 - `GetCapabilities(RealtimeCapabilitiesRequest) -> RealtimeCapabilities`;
 - `Stream(stream AudioChunk) -> stream AsrEvent`.
 
-Capabilities describe mode, timestamp and language support, statefulness,
+Capabilities describe mode, timestamp, speaker-label and language support, statefulness,
 sample rate, limits, runtime, and immutable model/implementation provenance.
 `AsrEvent.provider_profile_id` identifies the implementation profile. The BFF
 adds its operator-controlled `track` ID and `primary_track` compatibility flag
@@ -79,7 +83,7 @@ peer.
 | BFF track | Provider profile | Runtime and mode | Timing claims |
 | --- | --- | --- | --- |
 | `faster-whisper` | `faster-whisper-medium-ctranslate2-r1` | Faster-Whisper 1.2 / CTranslate2 4.6; windowed realtime with VAD, diarization, enrollment mapping, partials, and finals | Existing window/segment behavior and word timestamps |
-| `qwen` | `qwen3-asr-0.6b-vllm-r2` | `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session in this validation profile | Contiguous epoch ranges only; no word or segment timestamps |
+| `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `qwen-asr==0.0.6`; `vllm==0.14.0`; `pyannote-audio==4.0.7`; bounded native-streaming epochs; one concurrent session | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
 
 The Qwen profile pins `Qwen/Qwen3-ASR-0.6B` revision
 `c4468bdb552ddc559e464f6081e22dd4034f2e68` and verifies the
@@ -88,6 +92,25 @@ The Qwen profile pins `Qwen/Qwen3-ASR-0.6B` revision
 before initializing inference. No RPC accepts an arbitrary model ID, revision,
 URL, or runtime argument.
 
+The same profile pins `Qwen/Qwen3-ForcedAligner-0.6B` revision
+`c7cbfc2048c462b0d63a45797104fc9db3ad62b7` and verifies its
+`model.safetensors` digest
+`sha256:47831d0e82f96b20e9034dba01a075ee06436654719f6a68289e49f1b65ce0e7`.
+It also fixes the gated `pyannote/speaker-diarization-3.1` pipeline at revision
+`84fd25912480287da0247647c3d2b4853cb3ee5d` and verifies its configuration
+digest. The pipeline's referenced weights are resolved separately at fixed
+revisions and verified before initialization:
+
+- `pyannote/segmentation-3.0` revision
+  `e66f3d3b9eb0873085418a7b813d3b369bf160bb`, SHA-256
+  `da85c29829d4002daedd676e012936488234d9255e65e86dfab9bec6b1729298`;
+- `pyannote/wespeaker-voxceleb-resnet34-LM` revision
+  `837717ddb9ff5507820346191109dc79c958d614`, SHA-256
+  `366edf44f4c80889a3eb7a9d7bdf02c4aede3127f7dd15e274dcdb826b143c56`.
+
+The service requires a least-privilege `HF_TOKEN` with access to those gated
+artifacts; it never logs the token, transcript text, or audio.
+
 ## Qwen/vLLM lifecycle
 
 The Qwen container starts only `python -m qwen_rtservice.server`. That process
@@ -95,13 +118,32 @@ constructs `Qwen3ASRModel.LLM(...)`; the `qwen-asr` adapter initializes and
 owns vLLM in-process. There is no separate `vllm serve` command or sidecar.
 
 Each RPC remains one continuous public gRPC stream, but the service bounds the
-official Qwen state to an epoch (120 seconds by default). At an epoch boundary
-it calls `finish_streaming_transcribe`, emits a normal `FINAL` event for that
-contiguous range, commits the novel text, and opens a fresh
+official Qwen state and PCM buffer to an epoch (60 seconds by default). At an
+epoch boundary it calls `finish_streaming_transcribe`, extracts only text not
+already committed as context, aligns that text against the bounded epoch PCM,
+runs pyannote diarization over the same PCM, assigns aligned words by temporal
+overlap, uses the nearest diarization turn for words landing in a speech/silence
+boundary gap, coalesces adjacent words with the same speaker, and emits
+absolute-time `FINAL` segments. It then opens a fresh
 `init_streaming_state` with a bounded tail of transcript context. The next
 `PARTIAL` starts at the same sample boundary, so no audio is replayed and the
 public track has neither a gap nor duplicated seam text. Request EOF flushes
-the current epoch and closes the public stream normally.
+and enriches the current epoch by the same path and closes the public stream
+normally.
+
+The forced aligner normalizes punctuation (for example, `real-time` may become
+`realtime`). The join therefore matches Unicode alphanumeric content while
+mapping every unit back to a slice of the committed Qwen transcript. Emitted
+text preserves Qwen's original punctuation and spacing; a normalization that
+cannot be mapped safely takes the coarse fallback.
+
+Only a fully successful alignment-and-diarization result emits speaker-labelled
+segments. An unsupported alignment language, alignment failure, missing
+pyannote turns, or other enrichment failure emits the original coarse
+speakerless final instead of dropping committed text. Anonymous speaker labels
+are deliberately epoch-scoped (`EPOCH_0001/SPEAKER_00`, and so on); cross-epoch
+identity and enrolled-speaker mapping remain future work and are not implied by
+the capability response.
 
 The upstream adapter buffers the configured chunk, re-feeds audio accumulated
 within the current epoch, and applies token-prefix rollback. “Native streaming”
@@ -114,8 +156,8 @@ the duplicate-suppression complexity.
 | Variable | Default | Allowed range |
 | --- | ---: | ---: |
 | `QWEN_STREAM_CHUNK_SECONDS` | `2.0` | `0.5`-`10.0` |
-| `QWEN_STREAM_EPOCH_SECONDS` | `120.0` | `10.0`-`600.0` |
-| `QWEN_EPOCH_CONTEXT_CHARACTERS` | `1000` | `0`-`8000` |
+| `QWEN_STREAM_EPOCH_SECONDS` | `60.0` | `10.0`-`300.0` |
+| `QWEN_EPOCH_CONTEXT_CHARACTERS` | `1000` | `500`-`8000` |
 | `QWEN_MAX_NEW_TOKENS` | `1024` | `16`-`1024` |
 | `QWEN_MAX_MODEL_LEN` | `4096` | `2048`-`65536` |
 | `QWEN_KV_CACHE_MIB` | `512` | `512`-`16384` |
@@ -129,8 +171,11 @@ the 24 GiB development GPU despite the 0.6B model size.
 
 The profile advertises `maximum_audio_seconds=0`, meaning the public stream has
 no provider-imposed duration cutoff. It still advertises the real one-session
-concurrency limit and lack of timestamps. Epoch duration is an internal compute
-bound, not a recording limit.
+concurrency limit. `speaker_labels` and `segment_timestamps` are true when the
+enricher is active, `word_timestamps` remains false, and
+`aligned_diarized_languages` contains only the public language codes reported
+by the pinned aligner. Epoch duration is an internal compute bound, not a
+recording limit.
 
 The service requires CUDA, runs as UID 10002, disables Hugging Face/vLLM
 telemetry, and does not log audio or transcript contents. In the Compose
@@ -153,7 +198,9 @@ finalization path therefore remains unchanged and is not duplicated per model.
 The lightweight Xamurai suite covers both real localhost gRPC service
 boundaries with fake model backends, including capabilities, native
 partial/final delivery, contiguous sequencing, cancellation permit recovery,
-safe inference failure, subsequent-session recovery, and a synthetic stream
+safe inference/enrichment failure with coarse fallback, overlap-based speaker
+assignment with nearest-turn handling at silence boundaries,
+subsequent-session recovery, and a synthetic stream
 longer than 300 seconds that crosses more than 30 bounded epochs without
 duplicate or discontinuous public segments. BFF integration tests
 send one WebSocket audio stream to two fake `RealtimeASR` peers and prove that
