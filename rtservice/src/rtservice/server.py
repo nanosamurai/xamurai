@@ -241,6 +241,8 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
             model_revision=provenance.model_revision,
             model_digest=provenance.model_digest,
             implementation_revision=provenance.implementation_revision,
+            speaker_labels=True,
+            aligned_diarized_languages=capabilities.supported_languages,
         )
 
     def Stream(self, request_iterator, context):

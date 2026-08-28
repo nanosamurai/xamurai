@@ -71,6 +71,8 @@ def test_faster_rtservice_broadcasts_its_fixed_capabilities():
         assert capabilities.windowed_realtime is True
         assert capabilities.native_streaming is False
         assert capabilities.word_timestamps is True
+        assert capabilities.speaker_labels is True
+        assert list(capabilities.aligned_diarized_languages) == []
         assert capabilities.model_revision == provider.model_revision
         assert capabilities.model_digest == provider.model_digest
     finally:
