@@ -117,6 +117,7 @@ jobs:
 
       - name: Export and validate SPDX SBOM
         env:
+          ATTESTATION_SBOM_PATH: ${{ runner.temp }}/${{ matrix.image }}.attestation.spdx.json
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           IMAGE_NAME: ${{ steps.tags.outputs.image_name }}
           SBOM_PATH: ${{ runner.temp }}/${{ matrix.image }}.spdx.json
@@ -128,6 +129,34 @@ jobs:
           jq -e \
             '.SPDXID == "SPDXRef-DOCUMENT" and ((.packages // []) | length > 0)' \
             "${SBOM_PATH}" > /dev/null
+
+          jq -c '
+            (.files // [] | map({key: .SPDXID, value: true}) | from_entries) as $file_ids
+            | del(.files)
+            | .packages |= map(.filesAnalyzed = false | del(.packageVerificationCode))
+            | .relationships = [
+                (.relationships // [])[]
+                | . as $relationship
+                | select($file_ids[$relationship.spdxElementId] != true)
+                | select($file_ids[$relationship.relatedSpdxElement] != true)
+              ]
+          ' "${SBOM_PATH}" > "${ATTESTATION_SBOM_PATH}"
+
+          jq -e '
+            .SPDXID == "SPDXRef-DOCUMENT"
+            and ((.packages // []) | length > 0)
+            and ((.files // []) | length == 0)
+            and ([.packages[].filesAnalyzed] | all(. == false))
+          ' "${ATTESTATION_SBOM_PATH}" > /dev/null
+
+          full_sbom_bytes="$(stat -c '%s' "${SBOM_PATH}")"
+          attestation_sbom_bytes="$(stat -c '%s' "${ATTESTATION_SBOM_PATH}")"
+          echo "Full SPDX SBOM: ${full_sbom_bytes} bytes"
+          echo "Package-focused attestation SBOM: ${attestation_sbom_bytes} bytes"
+          if [ "${attestation_sbom_bytes}" -gt 16777216 ]; then
+            echo "Package-focused SBOM exceeds the 16 MiB GitHub attestation limit: ${attestation_sbom_bytes} bytes" >&2
+            exit 1
+          fi
 
       - name: Upload SPDX SBOM
         uses: actions/upload-artifact@v4
@@ -141,7 +170,7 @@ jobs:
         uses: actions/attest@v4
         with:
           push-to-registry: true
-          sbom-path: ${{ runner.temp }}/${{ matrix.image }}.spdx.json
+          sbom-path: ${{ runner.temp }}/${{ matrix.image }}.attestation.spdx.json
           subject-digest: ${{ steps.build.outputs.digest }}
           subject-name: ${{ steps.tags.outputs.image_name }}
 
@@ -150,5 +179,6 @@ jobs:
           {
             echo "Pushed: ${{ steps.tags.outputs.image_uri }}"
             echo "Digest: ${{ steps.build.outputs.digest }}"
-            echo "SPDX SBOM: attached in GHCR and uploaded as a workflow artifact"
+            echo "Full SPDX SBOM: attached by BuildKit and uploaded as a workflow artifact"
+            echo "Signed SPDX SBOM: package-focused GitHub attestation attached in GHCR"
           } >> "$GITHUB_STEP_SUMMARY"

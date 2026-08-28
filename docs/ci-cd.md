@@ -1,6 +1,6 @@
 # Xamurai CI and image publication
 
-Xamurai owns validation and container-image publication for its four speech
+Xamurai owns validation and container-image publication for its five speech
 services. Full-stack orchestration, infrastructure provisioning, and
 environment-specific release configuration are intentionally outside this
 repository.
@@ -53,6 +53,7 @@ publish an immutable `sha-<git-sha>` tag:
 - `ghcr.io/nanosamurai/xamurai-whisperx-worker`
 - `ghcr.io/nanosamurai/xamurai-recorder-worker`
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
+- `ghcr.io/nanosamurai/xamurai-qwen-rtservice`
 
 The publication job grants `contents: read`, `packages: write`, and the GitHub
 attestation permissions. Authentication uses the workflow-scoped
@@ -60,18 +61,25 @@ attestation permissions. Authentication uses the workflow-scoped
 
 `packages: write` is limited to the image publication job. Validation jobs are
 read-only; only the post-merge integration gates receive `HF_TOKEN`. A failed,
-cancelled, or misconfigured gate skips every image build and push. The four
+cancelled, or misconfigured gate skips every image build and push. The five
 image matrix entries remain independent after the shared gate succeeds, so one
 Dockerfile failure does not cancel the other service builds.
 
 ### Image SBOMs
 
-Each published image includes an SPDX JSON software bill of materials as a
-GHCR-attached OCI attestation. The workflow validates the SBOM after the push
-and also uploads it as a workflow artifact named
-`sbom-<service>-<git-sha>`. Public repositories additionally publish a signed
-GitHub artifact attestation; that signing step is skipped while the repository
-is private.
+Each published image includes a full file-level SPDX JSON software bill of
+materials as a GHCR-attached OCI attestation. The workflow validates the full
+SBOM after the push and also uploads it as a workflow artifact named
+`sbom-<service>-<git-sha>`.
+
+Public repositories additionally publish a signed GitHub artifact attestation.
+GitHub limits its uncompressed predicate to 16 MiB, so the signed predicate is
+a compact package-focused SPDX document derived from the full SBOM. It retains
+all package records and non-file relationships while omitting file records and
+their relationships and marking packages as not file-analyzed. The workflow
+checks the resulting size before invoking the attestation action. The full
+file-level SBOM remains the canonical downloadable artifact and BuildKit OCI
+attestation. GitHub signing is skipped while the repository is private.
 
 Retrieve the canonical SBOM attached to an image with:
 
