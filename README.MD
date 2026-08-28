@@ -12,7 +12,9 @@ do not live in this service repository.
 ## Services
 
 - `rtservice` exposes the bidirectional `RealtimeASR` gRPC API and emits
-  replaceable partial and committed final realtime events.
+  Faster-Whisper replaceable partial and committed final realtime events.
+- `qwen_rtservice` exposes the same `RealtimeASR` API using Qwen3-ASR's native
+  vLLM streaming implementation.
 - `whisperx_worker` consumes `audio.raw` and emits window-based
   `transcripts.refined` events.
 - `recorder_worker` consumes `audio.raw`, stores session audio, and emits
@@ -28,9 +30,10 @@ API traffic is handled by SamuraiBFF.
 
 ## Processing pipeline
 
-1. SamuraiBFF streams PCM16 audio to `rtservice` and publishes `AudioChunk`
-   messages to `audio.raw`.
-2. `rtservice` streams low-latency `AsrEvent` updates back over gRPC.
+1. SamuraiBFF publishes each PCM16 `AudioChunk` once to `audio.raw` and fans it
+   out to each configured realtime service.
+2. Each realtime service streams track-labelled `AsrEvent` updates back over
+   the common gRPC contract.
 3. `whisperx_worker` buffers configurable windows and publishes
    `RefinedEvent` messages to `transcripts.refined`.
 4. `recorder_worker` finalizes the session recording and publishes
@@ -45,6 +48,7 @@ session and tenant identifiers needed for correlation and isolation.
 
 - `proto/` and `proto_gen/`: protobuf contract and generated Python bindings
 - `rtservice/`: realtime gRPC service
+- `qwen_rtservice/`: isolated Qwen3-ASR/vLLM realtime service
 - `whisperx_worker/`: near-realtime refinement worker
 - `recorder_worker/`: session recording worker
 - `finalizer_worker/`: full-session finalization worker
@@ -95,6 +99,8 @@ pytest -q -m "not integration" \
   tests/test_rtservice_decode_config_unit.py \
   tests/test_rtservice_final_segmentation_unit.py \
   tests/test_rtservice_session_isolation_unit.py \
+  tests/test_speech_provider_integration.py \
+  tests/test_qwen_rtservice_integration.py \
   tests/test_stream_controls_unit.py
 ```
 
@@ -127,6 +133,7 @@ docker build -t xamurai-rtservice:dev -f rtservice/Dockerfile .
 docker build -t xamurai-whisperx-worker:dev -f whisperx_worker/Dockerfile .
 docker build -t xamurai-recorder-worker:dev -f recorder_worker/Dockerfile .
 docker build -t xamurai-finalizer-worker:dev -f finalizer_worker/Dockerfile .
+docker build -t xamurai-qwen-rtservice:dev -f qwen_rtservice/Dockerfile .
 ```
 
 The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
@@ -135,6 +142,7 @@ The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 - `ghcr.io/nanosamurai/xamurai-whisperx-worker`
 - `ghcr.io/nanosamurai/xamurai-recorder-worker`
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
+- `ghcr.io/nanosamurai/xamurai-qwen-rtservice`
 
 ## Configuration
 
@@ -155,6 +163,15 @@ Realtime service settings include:
 - `RT_FINAL_DIAR_MERGE_GAP_SEC` and `RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC`
 - `ENROLL_BACKEND` plus local or S3 enrollment settings
 
+Qwen realtime service settings include:
+
+- `QWEN_RTSERVICE_PORT` (default `50052`)
+- `QWEN_STREAM_CHUNK_SECONDS` and `QWEN_STREAM_EPOCH_SECONDS`
+- `QWEN_EPOCH_CONTEXT_CHARACTERS`, `QWEN_MAX_NEW_TOKENS`, and
+  `QWEN_MAX_MODEL_LEN`
+- `QWEN_KV_CACHE_MIB` (an explicit vLLM KV-cache allocation rather than a
+  fraction of all available VRAM)
+
 Worker settings include:
 
 - `WHISPERX_SLICE_SECONDS`, `WHISPERX_IDLE_SECONDS`, and diarization guardrails
@@ -164,6 +181,8 @@ Worker settings include:
 
 Per-stream output selection and compute controls are documented in
 [`docs/stream-output-selection.md`](docs/stream-output-selection.md).
+Provider profiles and the native Qwen path are documented in
+[`docs/modular-asr-providers.md`](docs/modular-asr-providers.md).
 
 ## Security
 
@@ -186,6 +205,7 @@ Report vulnerabilities privately as described in
 - [`docs/stream-output-selection.md`](docs/stream-output-selection.md)
 - [`docs/whisperx-worker-diarization.md`](docs/whisperx-worker-diarization.md)
 - [`docs/rtservice-performance.md`](docs/rtservice-performance.md)
+- [`docs/modular-asr-providers.md`](docs/modular-asr-providers.md)
 - [`docs/enrolled-speakers-multi-tenant.md`](docs/enrolled-speakers-multi-tenant.md)
 - [`docs/word-level-timing.md`](docs/word-level-timing.md)
 - [`docs/ci-cd.md`](docs/ci-cd.md)

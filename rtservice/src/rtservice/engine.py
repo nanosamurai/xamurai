@@ -13,6 +13,14 @@ import numpy as np
 import soundfile as sf
 
 from proto_gen import stream_pb2
+from rtservice.providers import (
+    ProviderRegistry,
+    SpeechProvider,
+    SpeechProviderError,
+    StreamingSession,
+    WindowRequest,
+    registry_from_env,
+)
 
 # -------------------- PyTorch checkpoint loading compatibility --------------------
 #
@@ -93,8 +101,6 @@ def _bool_env(name: str, *, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "y")
 
 
-DEFAULT_ASR_TEMPERATURES = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
-DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD = 2.4
 DEFAULT_FINAL_DIAR_MERGE_GAP_SEC = 0.75
 DEFAULT_FINAL_DIAR_MIN_TRANSCRIBE_SEC = 0.7
 
@@ -118,42 +124,7 @@ def _nonnegative_float_env(
     return value
 
 
-def _parse_asr_temperatures(raw: Optional[str]) -> Tuple[float, ...]:
-    """Parse a non-decreasing faster-whisper temperature fallback schedule.
-
-    ``raw`` is a comma-separated string. ``None`` selects the production
-    default. Invalid, non-finite, negative, greater-than-one, empty, or
-    decreasing schedules raise ``ValueError`` during process startup.
-    """
-
-    if raw is None:
-        return DEFAULT_ASR_TEMPERATURES
-
-    parts = [part.strip() for part in raw.split(",")]
-    if not parts or any(not part for part in parts):
-        raise ValueError("RT_ASR_TEMPERATURES must be a non-empty comma-separated list")
-
-    try:
-        temperatures = tuple(float(part) for part in parts)
-    except ValueError as exc:
-        raise ValueError("RT_ASR_TEMPERATURES must contain only numbers") from exc
-
-    if any(not math.isfinite(value) or value < 0.0 or value > 1.0 for value in temperatures):
-        raise ValueError("RT_ASR_TEMPERATURES values must be finite and between 0.0 and 1.0")
-    if any(current < previous for previous, current in zip(temperatures, temperatures[1:])):
-        raise ValueError("RT_ASR_TEMPERATURES values must be non-decreasing")
-
-    return temperatures
-
-
-RT_ASR_SERIALIZE = _bool_env("RT_ASR_SERIALIZE", default=False)
 RT_DIAR_SERIALIZE = _bool_env("RT_DIAR_SERIALIZE", default=False)
-RT_ASR_TEMPERATURES = _parse_asr_temperatures(os.getenv("RT_ASR_TEMPERATURES"))
-RT_ASR_COMPRESSION_RATIO_THRESHOLD = _nonnegative_float_env(
-    "RT_ASR_COMPRESSION_RATIO_THRESHOLD",
-    DEFAULT_ASR_COMPRESSION_RATIO_THRESHOLD,
-    allow_zero=False,
-)
 RT_FINAL_DIAR_MERGE_GAP_SEC = _nonnegative_float_env(
     "RT_FINAL_DIAR_MERGE_GAP_SEC",
     DEFAULT_FINAL_DIAR_MERGE_GAP_SEC,
@@ -360,6 +331,8 @@ class SessionState:
     # Signature of the realtime config used for this session. If a client changes
     # per-session overrides mid-stream, we reset the session state.
     cfg_key: Optional[Tuple[object, ...]]
+    native_stream: Optional[StreamingSession]
+    native_last_text: str
 
     @staticmethod
     def new(now_s: float) -> "SessionState":
@@ -378,6 +351,8 @@ class SessionState:
             wall_base_s=now_s,
             last_feed_wall_s=now_s,
             cfg_key=None,
+            native_stream=None,
+            native_last_text="",
         )
 
 
@@ -827,29 +802,19 @@ def _round_time(t: float, resolution: float) -> float:
 
 
 class RealtimeModelBundle:
-    """Holds heavy ML models + enrollment resolver.
+    """Holds diarization, VAD, and enrollment models.
 
     The goal is:
     - models load once per process
     - per-session state stays separate
 
-    Heavy imports (torch/pyannote/faster_whisper) are intentionally inside
+    Heavy imports (torch/pyannote) are intentionally inside
     this class so importing `rtservice.engine` stays lightweight for unit tests.
     """
 
     def __init__(self, *, cfg: RealtimeConfig) -> None:
         self._cfg = cfg
 
-        # Optional concurrency guards.
-        #
-        # Motivation:
-        # - Under load we've seen native SIGSEGV crashes (exit code 139).
-        # - A pragmatic mitigation is to serialize entry into native GPU-heavy
-        #   stacks (ctranslate2/faster-whisper, torch/pyannote).
-        #
-        # These are OFF by default and should be enabled only for investigation
-        # or if we confirm the underlying libraries are not thread-safe.
-        self._asr_lock = threading.Lock()
         self._diar_lock = threading.Lock()
         self._vad_lock = threading.Lock()
 
@@ -858,7 +823,6 @@ class RealtimeModelBundle:
             raise RuntimeError("Set HF_TOKEN environment variable for pyannote.")
 
         import torch
-        from faster_whisper import WhisperModel
         from pyannote.audio import Pipeline, Model
         from pyannote.audio import Inference as EmbeddingInference
 
@@ -876,14 +840,6 @@ class RealtimeModelBundle:
                 getattr(torch, "__version__", "unknown"),
                 getattr(getattr(torch, "version", None), "cuda", None),
             )
-
-        asr_model = os.getenv("RT_ASR_MODEL", "medium").strip() or "medium"
-        logger.info("Initializing Faster-Whisper '%s' on %s", asr_model, device)
-        self._asr = WhisperModel(
-            asr_model,
-            device=device,
-            compute_type="float16" if torch.cuda.is_available() else "int8_float32",
-        )
 
         diar_model_id = os.getenv(
             "RT_DIAR_MODEL",
@@ -969,17 +925,7 @@ class RealtimeModelBundle:
             USE_SPEAKER_ENROLLMENT,
         )
 
-        logger.info(
-            "rtservice concurrency guards: RT_ASR_SERIALIZE=%s RT_DIAR_SERIALIZE=%s",
-            RT_ASR_SERIALIZE,
-            RT_DIAR_SERIALIZE,
-        )
-
-        logger.info(
-            "rtservice ASR decode config: temperatures=%s compression_ratio_threshold=%.3f",
-            ",".join(f"{temperature:g}" for temperature in RT_ASR_TEMPERATURES),
-            RT_ASR_COMPRESSION_RATIO_THRESHOLD,
-        )
+        logger.info("rtservice concurrency guard: RT_DIAR_SERIALIZE=%s", RT_DIAR_SERIALIZE)
 
         logger.info(
             "rtservice FINAL diarization config: merge_gap_sec=%.3f min_transcribe_sec=%.3f",
@@ -1002,10 +948,9 @@ class RealtimeModelBundle:
             import importlib.metadata as _md
 
             logger.info(
-                "rtservice versions: torch=%s pyannote-audio=%s faster-whisper=%s",
+                "rtservice auxiliary-model versions: torch=%s pyannote-audio=%s",
                 getattr(torch, "__version__", "unknown"),
                 _md.version("pyannote-audio"),
-                _md.version("faster-whisper"),
             )
         except Exception:
             logger.debug("rtservice versions: torch=%s", getattr(torch, "__version__", "unknown"))
@@ -1027,7 +972,7 @@ class RealtimeModelBundle:
                 os.getenv("ENROLL_S3_FORCE_PATH_STYLE", os.getenv("S3_FORCE_PATH_STYLE", "true")),
             )
 
-    # ---------------- VAD / diarization / ASR ----------------
+    # ---------------- VAD / diarization ----------------
 
     def gate_window(self, window: np.ndarray) -> bool:
         # RMS pre-gate
@@ -1118,69 +1063,6 @@ class RealtimeModelBundle:
         for turn, _, spk in diar.itertracks(yield_label=True):
             segs.append({"start": float(turn.start), "end": float(turn.end), "speaker": str(spk)})
         return segs
-
-    def _asr_transcribe(
-        self,
-        wave: np.ndarray,
-        lang: Optional[str],
-        *,
-        beam_size: int,
-        word_timestamps: bool,
-    ) -> str:
-        """Run faster-whisper on an in-memory waveform.
-
-        We intentionally avoid writing temporary WAV files for performance
-        (lower latency, less jitter, less disk contention under concurrency).
-        """
-
-        if wave.size < int(self._cfg.finalize_min_dur_sec * self._cfg.sr):
-            return ""
-
-        # Ensure contiguous float32 mono.
-        wave = np.asarray(wave, dtype=np.float32).reshape(-1)
-
-        def _run_decode() -> list[str]:
-            segs, _info = self._asr.transcribe(
-                wave,
-                language=(lang or None),
-                task="transcribe",
-                beam_size=int(beam_size),
-                temperature=RT_ASR_TEMPERATURES,
-                compression_ratio_threshold=RT_ASR_COMPRESSION_RATIO_THRESHOLD,
-                condition_on_previous_text=False,
-                vad_filter=False,
-                word_timestamps=bool(word_timestamps),
-            )
-
-            words: list[str] = []
-            for s in segs:
-                # When word_timestamps=True, faster-whisper returns per-word tokens.
-                if getattr(s, "words", None):
-                    for w in s.words:
-                        ww = getattr(w, "word", "")
-                        if ww and ww.strip():
-                            words.append(ww)
-                else:
-                    t = getattr(s, "text", "")
-                    if t and t.strip():
-                        words.append(t.strip())
-            return words
-
-        if RT_ASR_SERIALIZE:
-            with self._asr_lock:
-                words = _run_decode()
-        else:
-            words = _run_decode()
-
-        return " ".join(words).strip()
-
-    def asr_text(self, wave: np.ndarray, lang: Optional[str]) -> str:
-        # FINAL decode path (higher quality).
-        return self._asr_transcribe(wave, lang, beam_size=5, word_timestamps=True)
-
-    def asr_text_partial(self, wave: np.ndarray, lang: Optional[str]) -> str:
-        # PARTIAL decode path (cheaper): no word timestamps, lower beam.
-        return self._asr_transcribe(wave, lang, beam_size=1, word_timestamps=False)
 
     # ---------------- Enrollment mapping ----------------
 
@@ -1378,7 +1260,7 @@ class RealtimeEngine:
     """Realtime diarization+ASR engine.
 
     Key properties:
-    - heavy models are loaded once (in RealtimeModelBundle)
+    - heavy models are loaded once by their provider or auxiliary model bundle
     - session state is per (tenant_id, session_id)
     - safe under concurrent sessions
     """
@@ -1389,6 +1271,7 @@ class RealtimeEngine:
         cfg: Optional[RealtimeConfig] = None,
         model_bundle: Optional[RealtimeModelBundle] = None,
         processor: Optional[RealtimeSessionProcessor] = None,
+        provider_registry: Optional[ProviderRegistry] = None,
     ) -> None:
         self.cfg = cfg or RealtimeConfig()
         self.default_lang = DEFAULT_LANG
@@ -1403,24 +1286,20 @@ class RealtimeEngine:
         # In unit tests we often inject a lightweight processor; in that case we
         # keep behavior fixed and ignore per-session config overrides.
         self._fixed_processor: Optional[RealtimeSessionProcessor] = processor
+        self._provider_registry = provider_registry
 
         if self._fixed_processor is None:
-            if self._model_bundle is None:
+            if self._provider_registry is None:
+                self._provider_registry = registry_from_env()
+            default_provider = self._provider_registry.get()
+            if not default_provider.capabilities.native_streaming and self._model_bundle is None:
                 self._model_bundle = RealtimeModelBundle(cfg=self.cfg)
 
             self._processors_lock = threading.Lock()
             self._processors_by_key: Dict[Tuple[object, ...], RealtimeSessionProcessor] = {}
-            # Ensure default processor is created.
-            _p = RealtimeSessionProcessor(
-                cfg=self.cfg,
-                partial_gate_fn=self._model_bundle.gate_speech,
-                window_gate_fn=self._model_bundle.gate_window,
-                diarize_fn=self._model_bundle.diarize_window,
-                asr_fn=self._model_bundle.asr_text,
-                asr_partial_fn=getattr(self._model_bundle, "asr_text_partial", None),
-                map_speaker_fn=self._model_bundle.map_speaker_label,
-            )
-            self._processors_by_key[self._cfg_key(self.cfg)] = _p
+            if not default_provider.capabilities.native_streaming:
+                key = (default_provider.profile_id, *self._cfg_key(self.cfg))
+                self._get_or_create_processor(self.cfg, key, default_provider)
 
         # Log the effective default PARTIAL configuration at startup. This is
         # critical for debugging "why did I get hallucinated partials" issues
@@ -1440,11 +1319,12 @@ class RealtimeEngine:
         )
 
         logger.info(
-            "RealtimeEngine ready: SR=%d WINDOW=%.2fs HOP=%.2fs default_lang=%s",
+            "RealtimeEngine ready: SR=%d WINDOW=%.2fs HOP=%.2fs default_lang=%s provider=%s",
             self.cfg.sr,
             self.cfg.window_sec,
             self.cfg.hop_sec,
             self.default_lang,
+            self._provider_registry.default_profile_id if self._provider_registry else "injected-processor",
         )
 
     def feed(
@@ -1458,6 +1338,8 @@ class RealtimeEngine:
         rt_overlap_sec: Optional[float] = None,
         rt_emit_every_sec: Optional[float] = None,
         rt_partial_enable: Optional[bool] = None,
+        provider_profile_id: Optional[str] = None,
+        sample_rate: Optional[int] = None,
     ) -> List[AsrResult]:
         """Feed PCM16 audio bytes for a session.
 
@@ -1469,6 +1351,9 @@ class RealtimeEngine:
         effective_lang = lang or self.default_lang
         tid = str(tenant_id or "default")
         sid = str(session_id or "unknown")
+        source_sample_rate = int(sample_rate or self.cfg.sr)
+        if source_sample_rate != self.cfg.sr:
+            raise SpeechProviderError("invalid_request", "rtservice accepts PCM16 mono at 16000 Hz")
 
         now = time.time()
         self._maybe_evict_idle_sessions(now)
@@ -1483,7 +1368,10 @@ class RealtimeEngine:
         # Resolve processor/config (default or per-session overrides).
         proc = self._fixed_processor
         cfg_key = None
+        provider = None
         if proc is None:
+            assert self._provider_registry is not None
+            provider = self._provider_registry.get(provider_profile_id)
             cfg = self._effective_cfg(
                 base=self.cfg,
                 rt_window_sec=rt_window_sec,
@@ -1491,8 +1379,9 @@ class RealtimeEngine:
                 rt_emit_every_sec=rt_emit_every_sec,
                 rt_partial_enable=rt_partial_enable,
             )
-            cfg_key = self._cfg_key(cfg)
-            proc = self._get_or_create_processor(cfg, cfg_key)
+            cfg_key = (provider.profile_id, *self._cfg_key(cfg))
+            if not provider.capabilities.native_streaming:
+                proc = self._get_or_create_processor(cfg, cfg_key, provider)
 
         # Per-session lock for correctness under concurrent sessions.
         with state.lock:
@@ -1500,18 +1389,25 @@ class RealtimeEngine:
 
             # If per-session overrides changed mid-stream, reset session state.
             if cfg_key is not None and state.cfg_key is not None and state.cfg_key != cfg_key:
-                logger.warning(
-                    "rtservice: session config changed mid-stream; resetting session state tenant=%s session=%s",
-                    tid,
-                    sid,
+                if state.native_stream is not None:
+                    state.native_stream.cancel()
+                raise SpeechProviderError(
+                    "invalid_request",
+                    "provider profile or realtime configuration changed within a session",
                 )
-                st2 = SessionState.new(now)
-                st2.cfg_key = cfg_key
-                self._sessions[key] = st2
-                state = st2
             elif cfg_key is not None and state.cfg_key is None:
                 state.cfg_key = cfg_key
 
+            if provider is not None and provider.capabilities.native_streaming:
+                return self._feed_native_provider(
+                    state,
+                    provider,
+                    pcm16,
+                    sample_rate=source_sample_rate,
+                    lang=effective_lang,
+                )
+
+            assert proc is not None
             return proc.process(
                 tenant_id=tid,
                 session_id=sid,
@@ -1595,6 +1491,7 @@ class RealtimeEngine:
         self,
         cfg: RealtimeConfig,
         cfg_key: Tuple[object, ...],
+        provider: SpeechProvider,
     ) -> RealtimeSessionProcessor:
         with self._processors_lock:
             p = self._processors_by_key.get(cfg_key)
@@ -1607,8 +1504,8 @@ class RealtimeEngine:
                 partial_gate_fn=self._model_bundle.gate_speech,
                 window_gate_fn=self._model_bundle.gate_window,
                 diarize_fn=self._model_bundle.diarize_window,
-                asr_fn=self._model_bundle.asr_text,
-                asr_partial_fn=getattr(self._model_bundle, "asr_text_partial", None),
+                asr_fn=lambda wave, lang: self._transcribe_window(provider, cfg, wave, lang, partial=False),
+                asr_partial_fn=lambda wave, lang: self._transcribe_window(provider, cfg, wave, lang, partial=True),
                 map_speaker_fn=self._model_bundle.map_speaker_label,
             )
             self._processors_by_key[cfg_key] = p
@@ -1620,7 +1517,91 @@ class RealtimeEngine:
             )
             return p
 
+    @staticmethod
+    def _transcribe_window(
+        provider: SpeechProvider,
+        cfg: RealtimeConfig,
+        wave: np.ndarray,
+        lang: Optional[str],
+        *,
+        partial: bool,
+    ) -> str:
+        pcm16 = (np.clip(wave, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+        candidate = provider.transcribe_window(
+            WindowRequest(
+                pcm16_le=pcm16,
+                sample_rate=cfg.sr,
+                language=lang,
+                start_sample=0,
+                end_sample=wave.size,
+                partial=partial,
+            )
+        )
+        return candidate.text
+
+    @staticmethod
+    def _feed_native_provider(
+        state: SessionState,
+        provider: SpeechProvider,
+        pcm16: bytes,
+        *,
+        sample_rate: int,
+        lang: Optional[str],
+    ) -> List[AsrResult]:
+        if state.native_stream is None:
+            state.native_stream = provider.open_stream()
+        is_flush = not pcm16
+        candidate = state.native_stream.push(
+            pcm16,
+            sample_rate=sample_rate,
+            language=lang,
+            end_of_stream=is_flush,
+        )
+        if is_flush:
+            state.native_stream = None
+
+        text = candidate.text.strip()
+        if not text or (not candidate.terminal and text == state.native_last_text):
+            return []
+        state.native_last_text = text
+        return [
+            AsrResult(
+                start_s=candidate.start_sample / sample_rate,
+                end_s=candidate.end_sample / sample_rate,
+                text=text,
+                is_final=candidate.terminal,
+                lang=candidate.language or lang,
+                speaker=None,
+            )
+        ]
+
+    def close_session(self, session_id: str, *, tenant_id: Optional[str] = None) -> None:
+        key = (str(tenant_id or "default"), str(session_id or "unknown"))
+        with self._sessions_lock:
+            state = self._sessions.pop(key, None)
+        if state is not None and state.native_stream is not None:
+            state.native_stream.cancel()
+
+    def close(self) -> None:
+        with self._sessions_lock:
+            states = list(self._sessions.values())
+            self._sessions.clear()
+        for state in states:
+            if state.native_stream is not None:
+                state.native_stream.cancel()
+        if self._provider_registry is not None:
+            self._provider_registry.close()
+
+    def default_provider(self) -> SpeechProvider:
+        """Return the fixed, allowlisted provider exposed by this service."""
+        if self._provider_registry is None:
+            raise SpeechProviderError("unavailable", "realtime provider metadata is unavailable")
+        return self._provider_registry.get()
+
     def to_asr_events(self, session_id: str, r: AsrResult) -> stream_pb2.AsrEvent:
+        provider_profile_id = ""
+        if self._provider_registry is not None:
+            provider_profile_id = self._provider_registry.default_profile_id
         return stream_pb2.AsrEvent(
             session_id=session_id,
             start_s=r.start_s,
@@ -1629,6 +1610,7 @@ class RealtimeEngine:
             type=stream_pb2.FINAL if r.is_final else stream_pb2.PARTIAL,
             lang=(r.lang or self.default_lang or ""),
             speaker=(r.speaker or ""),
+            provider_profile_id=provider_profile_id,
         )
 
     def _maybe_evict_idle_sessions(self, now_s: float) -> None:
@@ -1641,7 +1623,9 @@ class RealtimeEngine:
         with self._sessions_lock:
             to_delete = [k for k, st in self._sessions.items() if st.last_activity_s < idle_before]
             for k in to_delete:
-                self._sessions.pop(k, None)
+                state = self._sessions.pop(k, None)
+                if state is not None and state.native_stream is not None:
+                    state.native_stream.cancel()
 
         if to_delete:
             logger.info("Evicted %d idle realtime sessions", len(to_delete))

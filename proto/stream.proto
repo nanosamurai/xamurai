@@ -34,6 +34,7 @@ message AsrEvent {
   AsrType type       = 5;
   string  lang       = 6; // optional (e.g., "cs")
   string speaker    = 7;
+  string provider_profile_id = 8;
 }
 
 message DiarEvent {
@@ -124,7 +125,29 @@ message FinalEvent {
   repeated WordAlignment words = 7;
 }
 
+message RealtimeCapabilitiesRequest {}
+
+message RealtimeCapabilities {
+  string provider_profile_id = 1;
+  bool windowed_realtime = 2;
+  bool native_streaming = 3;
+  bool batch = 4;
+  bool segment_timestamps = 5;
+  bool word_timestamps = 6;
+  bool language_detection = 7;
+  repeated string supported_languages = 8;
+  bool stateful = 9;
+  uint32 preferred_sample_rate = 10;
+  double maximum_audio_seconds = 11;
+  uint32 maximum_concurrent_sessions = 12;
+  string runtime = 13;
+  string model_revision = 14;
+  string model_digest = 15;
+  string implementation_revision = 16;
+}
+
 service RealtimeASR {
+  rpc GetCapabilities (RealtimeCapabilitiesRequest) returns (RealtimeCapabilities);
   rpc Stream (stream AudioChunk) returns (stream AsrEvent);
 }
 

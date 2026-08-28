@@ -42,9 +42,11 @@ That’s ~**7× compute amplification** for the PARTIALs alone. If the GPU throu
 
 ## Implementation notes (what rtservice does)
 
-### No temporary WAV files
+### Faster-Whisper window profile
 
-rtservice runs faster-whisper on an **in-memory waveform** (numpy float32) to reduce latency and jitter.
+The default provider runs Faster-Whisper on an **in-memory waveform** to reduce
+latency and jitter. rtservice owns windowing/VAD/diarization while the provider
+owns the pinned model and decode configuration.
 
 ### PARTIAL decode is cheaper than FINAL decode
 
@@ -54,6 +56,15 @@ rtservice uses two decode settings:
 - **PARTIAL**: cheaper (lower beam, no word timestamps)
 
 This is intentional: PARTIALs should be fast and replaceable; FINALs are the converged results.
+
+### Qwen native-streaming profile
+
+The optional Qwen profile bypasses rtservice windowing and holds one native
+Qwen/vLLM streaming state in an isolated provider container. Its default model
+chunk is 2 seconds. It emits cumulative, replacement-safe text and a flush
+FINAL, without timestamp or speaker claims. The upstream streaming algorithm
+re-feeds accumulated audio with prefix rollback, so long sessions still need
+measurement and a bounded maximum duration; it is not constant-cost streaming.
 
 ### Repetition fallback
 

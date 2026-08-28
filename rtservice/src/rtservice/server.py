@@ -14,6 +14,7 @@ import grpc
 from proto_gen import stream_pb2
 from proto_gen import stream_pb2_grpc
 from rtservice.engine import RealtimeEngine
+from rtservice.providers import SpeechProviderError
 
 from drsynth_common.logging_setup import setup_logging, set_session_id_for_logging
 from drsynth_common.otel_setup import setup_otel, extract_trace_context_from_headers
@@ -218,6 +219,30 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
         self._engine = engine
         self._log = logging.getLogger(__name__)
 
+    def GetCapabilities(self, request, context):
+        """Return the fixed provider capabilities and pinned runtime provenance."""
+        provider = self._engine.default_provider()
+        capabilities = provider.capabilities
+        provenance = provider.provenance
+        return stream_pb2.RealtimeCapabilities(
+            provider_profile_id=provider.profile_id,
+            windowed_realtime=capabilities.windowed_realtime,
+            native_streaming=capabilities.native_streaming,
+            batch=capabilities.batch,
+            segment_timestamps=capabilities.segment_timestamps,
+            word_timestamps=capabilities.word_timestamps,
+            language_detection=capabilities.language_detection,
+            supported_languages=capabilities.supported_languages,
+            stateful=capabilities.stateful,
+            preferred_sample_rate=capabilities.preferred_sample_rate,
+            maximum_audio_seconds=capabilities.maximum_audio_seconds,
+            maximum_concurrent_sessions=capabilities.maximum_concurrent_sessions,
+            runtime=provenance.runtime,
+            model_revision=provenance.model_revision,
+            model_digest=provenance.model_digest,
+            implementation_revision=provenance.implementation_revision,
+        )
+
     def Stream(self, request_iterator, context):
         """
         NOTE: this MUST be a normal (sync) generator for grpc.server(),
@@ -225,9 +250,13 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
         """
         md = _metadata_to_dict(context)
         overrides = _metadata_to_overrides(context)
+        provider_profile_id = md.get("x-rt-provider-profile") or None
+        if provider_profile_id is not None:
+            overrides["provider_profile_id"] = provider_profile_id
 
         stats = _StreamStats()
         started_s = time.time()
+        sessions: dict[tuple[str, Optional[str]], tuple[Optional[str], int]] = {}
 
         if _M_STREAMS_TOTAL:
             _M_STREAMS_TOTAL.inc()
@@ -265,10 +294,26 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                 if overrides:
                     self._log.info("RealtimeASR stream overrides enabled: %s", sorted(overrides.keys()))
 
+                def events_for(session_id, results):
+                    for result in results:
+                        event = self._engine.to_asr_events(session_id, result)
+                        if event.type == stream_pb2.FINAL:
+                            stats.final_events += 1
+                        else:
+                            stats.partial_events += 1
+
+                        send0 = time.time()
+                        yield event
+                        send_dt = max(0.0, time.time() - send0)
+                        if _M_SEND_EVENT_SECONDS:
+                            _M_SEND_EVENT_SECONDS.observe(send_dt)
+
                 for chunk in request_iterator:
                     session_id = chunk.session_id or "unknown"
                     tenant_id = getattr(chunk, "tenant_id", "") or None
                     lang = getattr(chunk, "lang", "") or None
+                    sample_rate = getattr(chunk, "sample_rate", 0) or self._engine.cfg.sr
+                    sessions[(session_id, tenant_id)] = (lang, sample_rate)
 
                     if stats.first_session_id == "-":
                         stats.first_session_id = session_id
@@ -308,26 +353,48 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                         chunk.pcm16_le,
                         lang=lang,
                         tenant_id=tenant_id,
+                        sample_rate=sample_rate,
                         **overrides,
                     )
                     dt = max(0.0, time.time() - t0)
                     if _M_FEED_SECONDS:
                         _M_FEED_SECONDS.observe(dt)
 
-                    # Fan out events
-                    for r in results:
-                        ev = self._engine.to_asr_events(session_id, r)
-                        if ev.type == stream_pb2.FINAL:
-                            stats.final_events += 1
-                        else:
-                            stats.partial_events += 1
+                    yield from events_for(session_id, results)
 
-                        send0 = time.time()
-                        yield ev
-                        send_dt = max(0.0, time.time() - send0)
-                        if _M_SEND_EVENT_SECONDS:
-                            _M_SEND_EVENT_SECONDS.observe(send_dt)
+                # A normally exhausted request iterator is a graceful half-close.
+                # Flush provider-owned streaming state while the response side is
+                # still active so buffered audio can produce its terminal event.
+                if context.is_active():
+                    for (session_id, tenant_id), (lang, sample_rate) in sessions.items():
+                        results = self._engine.feed(
+                            session_id,
+                            b"",
+                            lang=lang,
+                            tenant_id=tenant_id,
+                            sample_rate=sample_rate,
+                            **overrides,
+                        )
+                        yield from events_for(session_id, results)
 
+            except SpeechProviderError as e:
+                statuses = {
+                    "invalid_request": grpc.StatusCode.INVALID_ARGUMENT,
+                    "unsupported_capability": grpc.StatusCode.UNIMPLEMENTED,
+                    "overloaded": grpc.StatusCode.RESOURCE_EXHAUSTED,
+                    "timeout": grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "unavailable": grpc.StatusCode.UNAVAILABLE,
+                }
+                status = statuses.get(e.code, grpc.StatusCode.INTERNAL)
+                if _M_STREAM_ERRORS_TOTAL:
+                    _M_STREAM_ERRORS_TOTAL.labels(code=status.name).inc()
+                self._log.warning(
+                    "speech provider ended realtime stream session=%s code=%s retryable=%s",
+                    stats.first_session_id,
+                    e.code,
+                    e.retryable,
+                )
+                context.abort(status, e.safe_message)
             except Exception as e:
                 code = "unknown"
                 try:
@@ -353,6 +420,8 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                         pass
                 raise
             finally:
+                for session_id, tenant_id in sessions:
+                    self._engine.close_session(session_id, tenant_id=tenant_id)
                 dur = max(0.0, time.time() - started_s)
                 self._log.info(
                     "rtservice stream ended session=%s dur=%.3fs chunks=%d audio_bytes=%d partial=%d final=%d",
@@ -399,7 +468,9 @@ def create_realtime_asr_server(
         server,
     )
 
-    server.add_insecure_port(f"[::]:{port}")
+    bind_addr = os.getenv("RT_GRPC_BIND_ADDR", "[::]").strip() or "[::]"
+    bound_port = server.add_insecure_port(f"{bind_addr}:{port}")
+    server.bound_port = bound_port  # type: ignore[attr-defined]
     logger.info("RealtimeASR gRPC server created on port: %s", port)
     return server
 
