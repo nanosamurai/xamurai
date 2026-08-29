@@ -158,7 +158,8 @@ Realtime service settings include:
 
 - `RT_GRPC_PORT` (default `50052`)
 - `HF_TOKEN`
-- `RT_WINDOW_SEC`, `RT_OVERLAP_SEC`, and `RT_EMIT_EVERY_SEC`
+- `RT_WINDOW_SEC` (committed FINAL interval), `RT_OVERLAP_SEC` (left/right
+  decoding context), and `RT_EMIT_EVERY_SEC`
 - `RT_PARTIAL_ENABLE`, `RT_PARTIAL_MODE`, and overload guardrails
 - `RT_ASR_TEMPERATURES` and `RT_ASR_COMPRESSION_RATIO_THRESHOLD`
 - `RT_FINAL_DIAR_MERGE_GAP_SEC` and `RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC`

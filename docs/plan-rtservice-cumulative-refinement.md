@@ -11,7 +11,8 @@ Goal: make the realtime stream feel “live”, while still converging to a high
 ## Current state (repo: xamurai)
 
 - `rtservice` exposes gRPC `RealtimeASR.Stream(stream AudioChunk) -> stream AsrEvent`.
-- `rtservice.engine.RealtimeEngine` currently emits **FINAL** events only.
+- `rtservice.engine.RealtimeEngine` emits replaceable **PARTIAL** events and
+  word-owned **FINAL** events.
 - Windowing defaults:
   - `window_sec = 5.0`
   - `overlap_sec = 0.5`
@@ -22,7 +23,9 @@ Goal: make the realtime stream feel “live”, while still converging to a high
 For a given session:
 - Start emitting **PARTIAL** updates after `emit_every_sec` (1.5s by default) from session start.
 - Continue to emit updated PARTIALs as more audio arrives.
-- Once `window_sec` is complete (e.g. 5.0s), emit a **FINAL** event for that window/time span.
+- Once `window_sec` plus the configured right context is available, emit a
+  **FINAL** event for that committed time span. EOF supplies the terminal
+  boundary when future context cannot arrive.
 - Slide the window and repeat.
 
 **Important:** the UI/BFF must treat PARTIALs as *replaceable* and FINALs as *locking*.
@@ -72,8 +75,8 @@ service process. The public Community Edition stack provides a local example.
 |---|---:|---|---|
 | `RT_PARTIAL_ENABLE` | `true` | Enable/disable PARTIAL emission entirely. | Use this as the “kill switch” during rollout. |
 | `RT_EMIT_EVERY_SEC` | `1.5` | How often to *attempt* emitting a PARTIAL (cadence). | Smaller values amplify compute; should be clamped in BFF for untrusted clients. |
-| `RT_WINDOW_SEC` | `5.0` | Window length for FINAL processing. | Together with overlap determines hop size. |
-| `RT_OVERLAP_SEC` | `0.5` | Overlap between windows. | Hop = `window - overlap`. |
+| `RT_WINDOW_SEC` | `5.0` | Duration owned by one FINAL commit interval. | Commit intervals are contiguous and non-overlapping. |
+| `RT_OVERLAP_SEC` | `0.5` | Decoder context retained before and awaited after each commit interval. | A steady-state FINAL decode sees `window + 2 * overlap`; word midpoints decide ownership. |
 | `RT_PARTIAL_MIN_BUFFER_SEC` | `0.7` | Minimum buffered audio before emitting any PARTIAL. | Avoids extremely-early hallucinations. |
 | `RT_PARTIAL_MIN_TRANSCRIBE_SEC` | `1.5` | Minimum audio length we will actually run ASR on for PARTIAL. | Critical hallucination guard. In `tail` mode applies to the lookback chunk; in `cumulative` mode applies to the current window prefix. |
 | `RT_PARTIAL_STABILITY_REPEATS` | `1` | Require the same hypothesis to repeat N times before emitting. | Set >1 for extra stability at cost of latency. |
@@ -132,9 +135,12 @@ Practical UI/BFF logic (works today):
 2) Clear the live PARTIAL line when you observe progress into the next window:
    - if the next PARTIAL has a larger `start_s` than the previous (window advanced), drop the old one.
 
-3) De-duplicate FINALs by keying on `(session_id, start_s, end_s, speaker)` (plus `text` if you want extra safety).
+3) Append FINALs in event order. Context is decoded more than once internally,
+   but absolute word-midpoint ownership prevents repeated seam text.
 
-Known limitation: FINALs are diarization segments (multiple per window) while PARTIALs are window-prefix hypotheses.
+Known limitation: FINALs are coalesced adjacent same-speaker word groups
+(potentially multiple per commit interval) while PARTIALs are interval-prefix
+hypotheses.
 So a PARTIAL is not a strict “preview of exactly one FINAL segment”.
 
 Follow-up (recommended): add `window_index` (and optionally `segment_id` + `revision`) into the proto,
@@ -162,7 +168,13 @@ so UI can link PARTIALs to a specific committed FINAL deterministically.
 4. Emit PARTIAL AsrResults when conditions met (buffer >= emit_every_sec)
    - cap partial pass to the current window buffer.
 
-5. Keep existing FINAL emission on full window.
+5. Delay FINAL emission for right context, retain word timestamps internally,
+   own each word by a half-open absolute-sample midpoint interval, then join
+   owned words to pyannote turns and coalesce adjacent equal speakers.
+
+6. Keep session audio in a bounded PCM16 byte buffer. After each commit retain
+   only the left context and uncommitted audio; no session-lifetime dedupe set is
+   required. EOF commits every remaining interval and clears the buffer.
 
 ### Tests
 
