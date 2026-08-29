@@ -30,6 +30,7 @@ Thumbs.db
 
 # Tests (not needed in runtime images)
 .pytest_cache/
+.pytest_tmp*/
 
 # Large samples (keep enrolled_speakers/*.wav for rtservice speaker enrollment)
 utilities/*.wav
