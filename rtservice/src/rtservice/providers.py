@@ -53,6 +53,15 @@ class WindowRequest:
     partial: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderWord:
+    """One provider word on the session's absolute sample timeline."""
+
+    text: str
+    start_sample: int
+    end_sample: int
+
+
 @dataclass(frozen=True)
 class ProviderCandidate:
     text: str
@@ -61,6 +70,7 @@ class ProviderCandidate:
     end_sample: int
     terminal: bool
     provider_sequence: int
+    words: tuple[ProviderWord, ...] = ()
 
 
 class StreamingSession(Protocol):
@@ -169,7 +179,7 @@ class LocalFasterWhisperProvider:
         runtime="faster-whisper==1.2.0;ctranslate2==4.6.0",
         model_revision=model_revision,
         model_digest=model_digest,
-        implementation_revision="xamurai-window-provider-v1",
+        implementation_revision="xamurai-window-provider-v2",
     )
 
     def __init__(self, *, model=None) -> None:
@@ -212,7 +222,7 @@ class LocalFasterWhisperProvider:
         wave = np.frombuffer(request.pcm16_le, dtype="<i2").astype(np.float32) / 32768.0
         model = self._load()
 
-        def decode() -> str:
+        def decode() -> tuple[str, tuple[ProviderWord, ...]]:
             segments, _ = model.transcribe(
                 wave,
                 language=request.language or None,
@@ -225,20 +235,43 @@ class LocalFasterWhisperProvider:
                 word_timestamps=not request.partial,
             )
             words: list[str] = []
+            timed_words: list[ProviderWord] = []
             for segment in segments:
                 if getattr(segment, "words", None):
-                    words.extend(
-                        word.word for word in segment.words if getattr(word, "word", "").strip()
-                    )
+                    for word in segment.words:
+                        text = str(getattr(word, "word", ""))
+                        if not text.strip():
+                            continue
+                        words.append(text)
+
+                        try:
+                            start_sec = float(word.start)
+                            end_sec = float(word.end)
+                        except (AttributeError, TypeError, ValueError):
+                            continue
+                        if not math.isfinite(start_sec) or not math.isfinite(end_sec):
+                            continue
+
+                        start_offset = max(0, min(samples, int(round(start_sec * request.sample_rate))))
+                        end_offset = max(0, min(samples, int(round(end_sec * request.sample_rate))))
+                        if end_offset <= start_offset:
+                            continue
+                        timed_words.append(
+                            ProviderWord(
+                                text=text,
+                                start_sample=request.start_sample + start_offset,
+                                end_sample=request.start_sample + end_offset,
+                            )
+                        )
                 elif getattr(segment, "text", "").strip():
                     words.append(segment.text.strip())
-            return " ".join(words).strip()
+            return " ".join(words).strip(), tuple(timed_words)
 
         if self._serialize:
             with self._model_lock:
-                text = decode()
+                text, timed_words = decode()
         else:
-            text = decode()
+            text, timed_words = decode()
         return ProviderCandidate(
             text=text,
             language=request.language,
@@ -246,6 +279,7 @@ class LocalFasterWhisperProvider:
             end_sample=request.end_sample,
             terminal=not request.partial,
             provider_sequence=0,
+            words=timed_words,
         )
 
     def open_stream(self) -> StreamingSession:
