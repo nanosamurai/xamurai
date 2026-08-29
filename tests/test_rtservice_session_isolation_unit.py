@@ -6,7 +6,27 @@ from rtservice.engine import (
     RealtimeEngine,
     RealtimeSessionProcessor,
 )
-from rtservice.providers import LocalFasterWhisperProvider, ProviderRegistry
+from rtservice.providers import (
+    LocalFasterWhisperProvider,
+    ProviderCandidate,
+    ProviderRegistry,
+    ProviderWord,
+)
+
+
+def _candidate(text, wave, lang, start_sample, partial):
+    words = ()
+    if text and not partial and wave.size:
+        words = (ProviderWord(text, start_sample, start_sample + wave.size),)
+    return ProviderCandidate(
+        text=text,
+        language=lang,
+        start_sample=start_sample,
+        end_sample=start_sample + wave.size,
+        terminal=not partial,
+        provider_sequence=0,
+        words=words,
+    )
 
 
 def test_rtservice_engine_isolates_sessions_without_audio_mix():
@@ -31,8 +51,8 @@ def test_rtservice_engine_isolates_sessions_without_audio_mix():
     def diarize_fn(_w):
         return [{"start": 0.0, "end": 0.5, "speaker": "SPEAKER_00"}]
 
-    def asr_fn(_chunk, _lang):
-        return "hello"
+    def asr_fn(chunk, lang, start_sample, partial):
+        return _candidate("hello", chunk, lang, start_sample, partial)
 
     def map_speaker_fn(_tenant_id, diar_label, _chunk):
         return diar_label
@@ -165,8 +185,8 @@ def test_rtservice_partial_min_transcribe_sec_suppresses_too_short_audio():
     def diarize_fn(_w):
         return []
 
-    def asr_fn(_chunk, _lang):
-        return "hello"
+    def asr_fn(chunk, lang, start_sample, partial):
+        return _candidate("hello", chunk, lang, start_sample, partial)
 
     def map_speaker_fn(_tenant_id, diar_label, _chunk):
         return diar_label
@@ -214,9 +234,9 @@ def test_rtservice_partials_are_cumulative_within_window_by_default():
     def diarize_fn(_w):
         return []
 
-    def asr_fn(chunk, _lang):
+    def asr_fn(chunk, lang, start_sample, partial):
         # Encode length into text so we can see changes.
-        return f"len={chunk.size}"
+        return _candidate(f"len={chunk.size}", chunk, lang, start_sample, partial)
 
     def map_speaker_fn(_tenant_id, diar_label, _chunk):
         return diar_label
@@ -256,8 +276,8 @@ def test_rtservice_engine_isolates_tenants_same_session_id():
     def diarize_fn(_w):
         return [{"start": 0.0, "end": 0.5, "speaker": "SPEAKER_00"}]
 
-    def asr_fn(_chunk, _lang):
-        return "ok"
+    def asr_fn(chunk, lang, start_sample, partial):
+        return _candidate("ok", chunk, lang, start_sample, partial)
 
     def map_speaker_fn(_tenant_id, diar_label, _chunk):
         return diar_label

@@ -7,13 +7,19 @@ import time
 from collections import defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import soundfile as sf
 
 from proto_gen import stream_pb2
+from drsynth_common.diarization_assign import (
+    DiarizationSegment,
+    TimeSegment,
+    assign_speaker_by_overlap,
+)
 from rtservice.providers import (
+    ProviderCandidate,
     ProviderRegistry,
     SpeechProvider,
     SpeechProviderError,
@@ -199,8 +205,9 @@ PARTIAL_MAX_BEHIND_SEC = float(os.getenv("RT_PARTIAL_MAX_BEHIND_SEC", "2.0"))
 # lag baseline so we don't permanently suppress PARTIALs after a pause.
 PARTIAL_IDLE_RESET_SEC = float(os.getenv("RT_PARTIAL_IDLE_RESET_SEC", "3.0"))
 
-# Kept for reference (most code should use RealtimeConfig.hop_sec)
-HOP_SEC = WINDOW_SEC - OVERLAP_SEC
+# Kept for compatibility with imports. Contextual windowing commits one
+# RT_WINDOW_SEC interval at a time; RT_OVERLAP_SEC is context on each side.
+HOP_SEC = WINDOW_SEC
 
 DEFAULT_LANG = os.getenv("FW_LANG_DEFAULT", None)  # per-session override still possible
 
@@ -272,7 +279,9 @@ class RealtimeConfig:
 
     @property
     def hop_sec(self) -> float:
-        return float(self.window_sec - self.overlap_sec)
+        """Committed duration per final epoch (legacy property name)."""
+
+        return float(self.window_sec)
 
     @property
     def window_samples(self) -> int:
@@ -281,6 +290,10 @@ class RealtimeConfig:
     @property
     def hop_samples(self) -> int:
         return int(round(self.hop_sec * self.sr))
+
+    @property
+    def context_samples(self) -> int:
+        return int(round(self.overlap_sec * self.sr))
 
     @property
     def emit_every_samples(self) -> int:
@@ -307,12 +320,11 @@ class RealtimeConfig:
 
 @dataclass
 class SessionState:
-    """Per-(tenant,session) realtime rolling window state."""
+    """Bounded per-(tenant,session) realtime rolling window state."""
 
-    buf: np.ndarray
-    base_offset_sec: float
-    window_index: int
-    emitted_keys: Set[Tuple[float, float, str]]
+    pcm16_buffer: bytearray
+    buffer_start_sample: int
+    next_commit_sample: int
     last_activity_s: float
     lock: threading.Lock
     # Cumulative refinement tracking (monotonic per session).
@@ -337,10 +349,9 @@ class SessionState:
     @staticmethod
     def new(now_s: float) -> "SessionState":
         return SessionState(
-            buf=np.zeros(0, dtype=np.float32),
-            base_offset_sec=0.0,
-            window_index=0,
-            emitted_keys=set(),
+            pcm16_buffer=bytearray(),
+            buffer_start_sample=0,
+            next_commit_sample=0,
             last_activity_s=now_s,
             lock=threading.Lock(),
             total_samples_ingested=0,
@@ -427,7 +438,7 @@ def _normalize_and_merge_diarization_turns(
 # - window_gate_fn: typically RMS-only (avoid dropping content due to VAD misses)
 GateFn = Callable[[np.ndarray], bool]
 DiarizeFn = Callable[[np.ndarray], List[DiarSeg]]
-AsrFn = Callable[[np.ndarray, Optional[str]], str]
+AsrFn = Callable[[np.ndarray, Optional[str], int, bool], ProviderCandidate]
 MapSpeakerFn = Callable[[str, str, np.ndarray], str]  # (tenant_id, diar_label, wave_chunk) -> label
 
 
@@ -440,7 +451,6 @@ class RealtimeSessionProcessor:
         window_gate_fn: Optional[GateFn] = None,
         diarize_fn: DiarizeFn,
         asr_fn: AsrFn,
-        asr_partial_fn: Optional[AsrFn] = None,
         map_speaker_fn: MapSpeakerFn,
     ) -> None:
         self._cfg = cfg
@@ -448,7 +458,6 @@ class RealtimeSessionProcessor:
         self._window_gate_fn = window_gate_fn or partial_gate_fn
         self._diarize_fn = diarize_fn
         self._asr_fn = asr_fn
-        self._asr_partial_fn = asr_partial_fn or asr_fn
         self._map_speaker_fn = map_speaker_fn
 
     def process(
@@ -464,9 +473,11 @@ class RealtimeSessionProcessor:
         cfg = self._cfg
         effective_lang = lang
 
-        is_flush = (pcm16 is None) or (len(pcm16) == 0)
+        payload = pcm16 or b""
+        is_flush = len(payload) == 0
 
-        x = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
+        if len(payload) % 2:
+            raise SpeechProviderError("invalid_request", "PCM16 payload length must be even")
         out: List[AsrResult] = []
 
         # Lag tracking: if we see a long idle gap between chunks, treat it as a
@@ -479,8 +490,8 @@ class RealtimeSessionProcessor:
         state.last_feed_wall_s = float(now_s)
 
         # ingest
-        state.buf = np.concatenate([state.buf, x])
-        state.total_samples_ingested += int(x.size)
+        state.pcm16_buffer.extend(payload)
+        state.total_samples_ingested += len(payload) // 2
 
         # Emit low-latency partial updates as audio accumulates, before we have a full window.
         # This uses ASR-only (no diarization) in phase 1 to keep it cheaper.
@@ -497,133 +508,26 @@ class RealtimeSessionProcessor:
                 )
             )
 
-        # process
-        while state.buf.size >= cfg.window_samples:
-            window = state.buf[: cfg.window_samples]
-            window_offset = state.base_offset_sec
-            my_idx = state.window_index
-
-            emitted_any_final_for_window = False
-
-            # We keep two separate gates:
-            # - window gate: avoid dropping windows entirely (RMS-only in prod)
-            # - partial/speech gate: uses VAD to decide whether diarization is worth running
-            if self._window_gate_fn(window):
-                # For FINALs we should not suppress diarization based on VAD.
-                # VAD misses cause speaker labels to disappear which is worse than
-                # a bit of extra compute.
-                try:
-                    diar_segs = self._diarize_fn(window)
-                except Exception:
-                    logger.warning(
-                        "rtservice: diarization failed tenant=%s session=%s window_offset=%.3f idx=%d",
-                        tenant_id,
-                        session_id,
-                        float(window_offset),
-                        int(my_idx),
-                        exc_info=True,
-                    )
-                    diar_segs = []
-
-                diar_segs = _normalize_and_merge_diarization_turns(
-                    diar_segs,
-                    window_duration_sec=float(window.size) / float(cfg.sr),
-                    merge_gap_sec=cfg.final_diar_merge_gap_sec,
+        # A normal commit waits for right context. The same context is decoded in
+        # adjacent epochs, but midpoint ownership emits each word exactly once.
+        buffer_end = self._buffer_end_sample(state)
+        while buffer_end >= state.next_commit_sample + cfg.window_samples + cfg.context_samples:
+            commit_start = state.next_commit_sample
+            commit_end = commit_start + cfg.window_samples
+            out.extend(
+                self._emit_commit(
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                    state=state,
+                    lang=effective_lang,
+                    commit_start=commit_start,
+                    commit_end=commit_end,
+                    analysis_end=commit_end + cfg.context_samples,
                 )
-                final_min_transcribe_sec = max(
-                    float(cfg.finalize_min_dur_sec),
-                    float(cfg.final_diar_min_transcribe_sec),
-                )
+            )
+            self._advance_commit(state, commit_end)
+            buffer_end = self._buffer_end_sample(state)
 
-                for d in diar_segs:
-                    seg_start = float(d.get("start") or 0.0)
-                    seg_end = float(d.get("end") or 0.0)
-                    diar_label = str(d.get("speaker") or "")
-
-                    dur = seg_end - seg_start
-                    if dur < final_min_transcribe_sec:
-                        continue
-
-                    s_abs = window_offset + seg_start
-                    e_abs = window_offset + seg_end
-                    center_abs = 0.5 * (s_abs + e_abs)
-
-                    owner_idx = int(center_abs / cfg.hop_sec + 1e-6)
-                    if owner_idx != my_idx:
-                        continue
-
-                    key = (
-                        _round_time(s_abs, cfg.key_resolution_sec),
-                        _round_time(e_abs, cfg.key_resolution_sec),
-                        diar_label,
-                    )
-                    if key in state.emitted_keys:
-                        continue
-
-                    s_idx = int(seg_start * cfg.sr)
-                    e_idx = int(seg_end * cfg.sr)
-                    s_idx = max(0, min(window.size, s_idx))
-                    e_idx = max(0, min(window.size, e_idx))
-                    if e_idx - s_idx < int(cfg.finalize_min_dur_sec * cfg.sr):
-                        continue
-
-                    wave_chunk = window[s_idx:e_idx]
-                    label = self._map_speaker_fn(tenant_id, diar_label, wave_chunk)
-                    text = self._asr_fn(wave_chunk, effective_lang)
-
-                    if text:
-                        state.emitted_keys.add(key)
-                        out.append(
-                            AsrResult(
-                                start_s=s_abs,
-                                end_s=e_abs,
-                                text=text,
-                                is_final=True,
-                                lang=effective_lang,
-                                speaker=label,
-                            )
-                        )
-                        emitted_any_final_for_window = True
-
-                # Fallback: if diarization returns no usable FINAL segments (either because
-                # diarization yielded nothing, or because all segments were filtered out by
-                # duration/ownership/deduping), still emit a single FINAL for the full
-                # window. This avoids the confusing behavior where clients see PARTIALs
-                # but never get a FINAL for that window.
-                if not emitted_any_final_for_window:
-                    logger.info(
-                        "rtservice: FINAL fallback (no diar segments) tenant=%s session=%s window_offset=%.3f idx=%d",
-                        tenant_id,
-                        session_id,
-                        float(window_offset),
-                        int(my_idx),
-                    )
-                    text = self._asr_fn(window, effective_lang)
-                    text = (text or "").strip()
-                    if text:
-                        out.append(
-                            AsrResult(
-                                start_s=float(window_offset),
-                                end_s=float(window_offset + cfg.window_sec),
-                                text=text,
-                                is_final=True,
-                                lang=effective_lang,
-                                speaker=None,
-                            )
-                        )
-
-            # slide
-            state.buf = state.buf[cfg.hop_samples :]
-            state.base_offset_sec += cfg.hop_samples / cfg.sr
-            state.window_index += 1
-
-            # Partial emission should start fresh per window.
-            state.last_partial_text = ""
-            state.pending_partial_text = ""
-            state.pending_partial_repeats = 0
-
-            # After sliding, we may again be in an "incomplete window" state;
-            # allow partial emission for the new window as it accumulates.
             if cfg.partial_enable and not is_flush and not self._should_skip_partials_due_to_lag(state, now_s):
                 out.extend(
                     self._maybe_emit_partial(
@@ -634,40 +538,244 @@ class RealtimeSessionProcessor:
                     )
                 )
 
-        # End-of-stream flush: when the client sends an empty chunk (or we get an empty
-        # buffer), finalize the remaining tail (shorter than window_sec) as a FINAL.
-        # This ensures we don't drop the last ~overlap chunk of the stream.
-        if is_flush and state.buf.size >= int(cfg.finalize_min_dur_sec * cfg.sr):
+        # At EOF no future right context exists. Commit each remaining full epoch,
+        # then the final short tail, and release the retained left context.
+        if is_flush:
+            buffer_end = self._buffer_end_sample(state)
             try:
-                if self._window_gate_fn(state.buf):
-                    buf = state.buf
-                    # Cap to window_samples in case callers flush while having >1 window.
-                    if buf.size > cfg.window_samples:
-                        buf = buf[: cfg.window_samples]
-                    text = self._asr_fn(buf, effective_lang)
-                    text = (text or "").strip()
-                    if text:
-                        s_abs = float(state.base_offset_sec)
-                        e_abs = float(state.base_offset_sec + (buf.size / cfg.sr))
-                        out.append(
-                            AsrResult(
-                                start_s=s_abs,
-                                end_s=e_abs,
-                                text=text,
-                                is_final=True,
-                                lang=effective_lang,
-                                speaker=None,
-                            )
+                while buffer_end - state.next_commit_sample >= int(cfg.finalize_min_dur_sec * cfg.sr):
+                    commit_start = state.next_commit_sample
+                    commit_end = min(commit_start + cfg.window_samples, buffer_end)
+                    out.extend(
+                        self._emit_commit(
+                            tenant_id=tenant_id,
+                            session_id=session_id,
+                            state=state,
+                            lang=effective_lang,
+                            commit_start=commit_start,
+                            commit_end=commit_end,
+                            analysis_end=min(buffer_end, commit_end + cfg.context_samples),
                         )
+                    )
+                    self._advance_commit(state, commit_end)
             except Exception:
                 logger.warning("rtservice: tail flush failed", exc_info=True)
 
-            # Prevent emitting the tail repeatedly if multiple flush chunks arrive.
-            state.buf = np.zeros(0, dtype=np.float32)
+            state.pcm16_buffer = bytearray()
+            state.buffer_start_sample = buffer_end
+            state.next_commit_sample = buffer_end
             state.pending_partial_text = ""
             state.pending_partial_repeats = 0
 
         return out
+
+    @staticmethod
+    def _buffer_end_sample(state: SessionState) -> int:
+        return state.buffer_start_sample + (len(state.pcm16_buffer) // 2)
+
+    @staticmethod
+    def _slice_wave(state: SessionState, start_sample: int, end_sample: int) -> np.ndarray:
+        if start_sample < state.buffer_start_sample or end_sample > RealtimeSessionProcessor._buffer_end_sample(state):
+            raise RuntimeError("requested audio is outside the retained session buffer")
+        start_byte = (start_sample - state.buffer_start_sample) * 2
+        end_byte = (end_sample - state.buffer_start_sample) * 2
+        pcm16 = bytes(state.pcm16_buffer[start_byte:end_byte])
+        return np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
+
+    def _advance_commit(self, state: SessionState, commit_end: int) -> None:
+        state.next_commit_sample = commit_end
+        keep_from = max(0, commit_end - self._cfg.context_samples)
+        discard_samples = max(0, keep_from - state.buffer_start_sample)
+        if discard_samples:
+            state.pcm16_buffer = state.pcm16_buffer[discard_samples * 2 :]
+            state.buffer_start_sample += discard_samples
+
+        state.last_partial_text = ""
+        state.pending_partial_text = ""
+        state.pending_partial_repeats = 0
+
+    def _emit_commit(
+        self,
+        *,
+        tenant_id: str,
+        session_id: str,
+        state: SessionState,
+        lang: Optional[str],
+        commit_start: int,
+        commit_end: int,
+        analysis_end: int,
+    ) -> List[AsrResult]:
+        cfg = self._cfg
+        analysis_start = max(0, commit_start - cfg.context_samples)
+        analysis = self._slice_wave(state, analysis_start, analysis_end)
+        if not self._window_gate_fn(analysis):
+            return []
+
+        try:
+            diarization = self._diarize_fn(analysis)
+        except Exception:
+            logger.warning(
+                "rtservice: diarization failed tenant=%s session=%s commit_start=%.3f",
+                tenant_id,
+                session_id,
+                commit_start / cfg.sr,
+                exc_info=True,
+            )
+            diarization = []
+        diarization = _normalize_and_merge_diarization_turns(
+            diarization,
+            window_duration_sec=analysis.size / cfg.sr,
+            merge_gap_sec=cfg.final_diar_merge_gap_sec,
+        )
+
+        candidate = self._asr_fn(analysis, lang, analysis_start, False)
+        owned_words = self._owned_words(candidate, commit_start, commit_end, analysis_start, analysis_end)
+        has_usable_timing = any(
+            str(word.text).strip()
+            and min(analysis_end, int(word.end_sample)) > max(analysis_start, int(word.start_sample))
+            for word in candidate.words
+        )
+
+        # Providers advertising word timestamps should populate them. If one does
+        # not, decode only the owned interval so contextual words cannot leak into
+        # two adjacent FINALs.
+        if not has_usable_timing:
+            if not (candidate.text or "").strip():
+                return []
+            commit_wave = self._slice_wave(state, commit_start, commit_end)
+            fallback = candidate
+            if analysis_start != commit_start or analysis_end != commit_end:
+                fallback = self._asr_fn(commit_wave, lang, commit_start, False)
+            candidate = fallback
+            owned_words = self._owned_words(
+                fallback,
+                commit_start,
+                commit_end,
+                commit_start,
+                commit_end,
+            )
+            fallback_has_usable_timing = any(
+                str(word.text).strip()
+                and min(commit_end, int(word.end_sample)) > max(commit_start, int(word.start_sample))
+                for word in fallback.words
+            )
+            if not fallback_has_usable_timing:
+                text = (fallback.text or "").strip()
+                if not text:
+                    return []
+                return [
+                    AsrResult(
+                        start_s=commit_start / cfg.sr,
+                        end_s=commit_end / cfg.sr,
+                        text=text,
+                        is_final=True,
+                        lang=fallback.language or lang,
+                        speaker=None,
+                    )
+                ]
+
+        if not owned_words:
+            return []
+
+        absolute_diarization = [
+            DiarizationSegment(
+                start_s=(analysis_start / cfg.sr) + float(turn["start"]),
+                end_s=(analysis_start / cfg.sr) + float(turn["end"]),
+                speaker=str(turn["speaker"]),
+            )
+            for turn in diarization
+        ]
+        word_segments = [
+            TimeSegment(start_s=start / cfg.sr, end_s=end / cfg.sr)
+            for _, start, end in owned_words
+        ]
+        raw_speakers = assign_speaker_by_overlap(
+            segments=word_segments,
+            diarization=absolute_diarization,
+            default_speaker="",
+            min_coverage=0.1,
+        )
+        if absolute_diarization:
+            for index, raw_speaker in enumerate(raw_speakers):
+                if raw_speaker:
+                    continue
+                word_midpoint = (word_segments[index].start_s + word_segments[index].end_s) / 2
+                raw_speakers[index] = min(
+                    absolute_diarization,
+                    key=lambda turn: min(
+                        abs(word_midpoint - turn.start_s),
+                        abs(word_midpoint - turn.end_s),
+                    ),
+                ).speaker
+
+        mapped_speakers: Dict[str, str] = {}
+        for raw_speaker in set(raw_speakers):
+            if not raw_speaker:
+                continue
+            speaker_audio = []
+            for turn in diarization:
+                if str(turn["speaker"]) != raw_speaker:
+                    continue
+                start = max(0, int(round(float(turn["start"]) * cfg.sr)))
+                end = min(analysis.size, int(round(float(turn["end"]) * cfg.sr)))
+                if end > start:
+                    speaker_audio.append(analysis[start:end])
+            joined_audio = np.concatenate(speaker_audio) if speaker_audio else np.zeros(0, dtype=np.float32)
+            min_map_samples = int(
+                max(cfg.finalize_min_dur_sec, cfg.final_diar_min_transcribe_sec) * cfg.sr
+            )
+            mapped_speakers[raw_speaker] = (
+                self._map_speaker_fn(tenant_id, raw_speaker, joined_audio)
+                if joined_audio.size >= min_map_samples
+                else raw_speaker
+            )
+
+        results: List[AsrResult] = []
+        result_lang = candidate.language or lang
+        for (word_text, start, end), raw_speaker in zip(owned_words, raw_speakers):
+            speaker = mapped_speakers.get(raw_speaker) if raw_speaker else None
+            if results and results[-1].speaker == speaker:
+                previous = results[-1]
+                separator = ""
+                if previous.text and word_text and not word_text[0].isspace() and word_text[0].isalnum():
+                    separator = " "
+                previous.text = f"{previous.text}{separator}{word_text}"
+                previous.end_s = max(previous.end_s, end / cfg.sr)
+                continue
+            results.append(
+                AsrResult(
+                    start_s=start / cfg.sr,
+                    end_s=end / cfg.sr,
+                    text=word_text,
+                    is_final=True,
+                    lang=result_lang,
+                    speaker=speaker,
+                )
+            )
+
+        for result in results:
+            result.text = result.text.strip()
+        return [result for result in results if result.text]
+
+    @staticmethod
+    def _owned_words(
+        candidate: ProviderCandidate,
+        commit_start: int,
+        commit_end: int,
+        analysis_start: int,
+        analysis_end: int,
+    ) -> List[Tuple[str, int, int]]:
+        owned: List[Tuple[str, int, int]] = []
+        for word in sorted(candidate.words, key=lambda item: (item.start_sample, item.end_sample)):
+            text = str(word.text)
+            start = max(analysis_start, int(word.start_sample))
+            end = min(analysis_end, int(word.end_sample))
+            if not text.strip() or end <= start:
+                continue
+            midpoint_twice = start + end
+            if (2 * commit_start) <= midpoint_twice < (2 * commit_end):
+                owned.append((text, start, end))
+        return owned
 
     def _maybe_emit_partial(
         self,
@@ -680,16 +788,18 @@ class RealtimeSessionProcessor:
         cfg = self._cfg
 
         # Need a bit of audio before we can emit anything meaningful.
-        if state.buf.size < int(cfg.finalize_min_dur_sec * cfg.sr):
+        buffer_end = self._buffer_end_sample(state)
+        available_samples = buffer_end - state.next_commit_sample
+        if available_samples < int(cfg.finalize_min_dur_sec * cfg.sr):
             return []
 
         # Avoid very-early hallucinated partials.
-        if state.buf.size < cfg.partial_min_buffer_samples:
+        if available_samples < cfg.partial_min_buffer_samples:
             return []
 
         # If we already have a full window available, we'll emit finals via the
         # normal path. Avoid producing redundant PARTIALs here.
-        if state.buf.size >= cfg.window_samples:
+        if available_samples >= cfg.window_samples + cfg.context_samples:
             return []
 
         # Rate-limit partials by an ingestion-based monotonic clock.
@@ -699,24 +809,20 @@ class RealtimeSessionProcessor:
 
         # ASR-only partial.
         # NOTE: we do not include diarization/speaker mapping in partials.
-        buf = state.buf
-        if buf.size > cfg.window_samples:
-            buf = buf[: cfg.window_samples]
+        partial_start = state.next_commit_sample
+        partial_end = buffer_end
 
         # Mode controls what audio we transcribe for PARTIAL.
         mode = (cfg.partial_mode or "cumulative").strip().lower()
         if mode == "tail":
             lookback_n = int(cfg.partial_lookback_samples)
-            if buf.size > lookback_n:
-                buf_for_partial = buf[-lookback_n:]
-                s_abs = float(state.base_offset_sec + (buf.size - lookback_n) / cfg.sr)
-            else:
-                buf_for_partial = buf
-                s_abs = float(state.base_offset_sec)
+            partial_start = max(partial_start, partial_end - lookback_n)
+            s_abs = partial_start / cfg.sr
         else:
             # cumulative (default): stable start (window start), growing end.
-            buf_for_partial = buf
-            s_abs = float(state.base_offset_sec)
+            s_abs = partial_start / cfg.sr
+
+        buf_for_partial = self._slice_wave(state, partial_start, partial_end)
 
         # Avoid running ASR on extremely short audio.
         if buf_for_partial.size < cfg.partial_min_transcribe_samples:
@@ -733,10 +839,10 @@ class RealtimeSessionProcessor:
             # Never let partial gating break the stream.
             pass
 
-        text = self._asr_partial_fn(buf_for_partial, lang)
+        candidate = self._asr_fn(buf_for_partial, lang, partial_start, True)
         state.last_partial_emit_at_samples = state.total_samples_ingested
 
-        text = (text or "").strip()
+        text = (candidate.text or "").strip()
         if not text:
             return []
 
@@ -759,7 +865,7 @@ class RealtimeSessionProcessor:
 
         state.last_partial_text = text
 
-        e_abs = float(state.base_offset_sec + (buf.size / cfg.sr))
+        e_abs = partial_end / cfg.sr
 
         return [
             AsrResult(
@@ -790,10 +896,6 @@ class RealtimeSessionProcessor:
         audio_elapsed = float(state.total_samples_ingested) / float(cfg.sr)
         behind_s = wall_elapsed - audio_elapsed
         return behind_s > max_behind
-
-
-def _round_time(t: float, resolution: float) -> float:
-    return round(t / resolution) * resolution
 
 
 # ---------------------------------------------------------------------------
@@ -917,10 +1019,10 @@ class RealtimeModelBundle:
 
         # Startup diagnostics (make it obvious what is enabled and how enrollment is configured)
         logger.info(
-            "RealtimeModelBundle ready: SR=%d WINDOW=%.2fs HOP=%.2fs USE_VAD=%s ENROLL=%s",
+            "RealtimeModelBundle ready: SR=%d COMMIT=%.2fs CONTEXT=%.2fs USE_VAD=%s ENROLL=%s",
             cfg.sr,
             cfg.window_sec,
-            cfg.hop_sec,
+            cfg.overlap_sec,
             USE_SILERO_VAD,
             USE_SPEAKER_ENROLLMENT,
         )
@@ -1305,7 +1407,7 @@ class RealtimeEngine:
         # critical for debugging "why did I get hallucinated partials" issues
         # (often caused by stale images / unexpected env overrides).
         logger.info(
-            "rtservice partial defaults: mode=%s enable=%s emit_every=%.3fs window=%.3fs overlap=%.3fs "
+            "rtservice partial defaults: mode=%s enable=%s emit_every=%.3fs commit=%.3fs context=%.3fs "
             "min_buffer=%.3fs lookback=%.3fs min_transcribe=%.3fs stability_repeats=%d",
             str(self.cfg.partial_mode),
             bool(self.cfg.partial_enable),
@@ -1319,10 +1421,10 @@ class RealtimeEngine:
         )
 
         logger.info(
-            "RealtimeEngine ready: SR=%d WINDOW=%.2fs HOP=%.2fs default_lang=%s provider=%s",
+            "RealtimeEngine ready: SR=%d COMMIT=%.2fs CONTEXT=%.2fs default_lang=%s provider=%s",
             self.cfg.sr,
             self.cfg.window_sec,
-            self.cfg.hop_sec,
+            self.cfg.overlap_sec,
             self.default_lang,
             self._provider_registry.default_profile_id if self._provider_registry else "injected-processor",
         )
@@ -1498,19 +1600,32 @@ class RealtimeEngine:
             if p is not None:
                 return p
 
+            maximum_audio_seconds = float(provider.capabilities.maximum_audio_seconds)
+            if cfg.window_sec + (2 * cfg.overlap_sec) > maximum_audio_seconds:
+                raise SpeechProviderError(
+                    "invalid_request",
+                    "realtime commit interval plus context exceeds the provider audio limit",
+                )
+
             assert self._model_bundle is not None
             p = RealtimeSessionProcessor(
                 cfg=cfg,
                 partial_gate_fn=self._model_bundle.gate_speech,
                 window_gate_fn=self._model_bundle.gate_window,
                 diarize_fn=self._model_bundle.diarize_window,
-                asr_fn=lambda wave, lang: self._transcribe_window(provider, cfg, wave, lang, partial=False),
-                asr_partial_fn=lambda wave, lang: self._transcribe_window(provider, cfg, wave, lang, partial=True),
+                asr_fn=lambda wave, lang, start_sample, partial: self._transcribe_window(
+                    provider,
+                    cfg,
+                    wave,
+                    lang,
+                    start_sample=start_sample,
+                    partial=partial,
+                ),
                 map_speaker_fn=self._model_bundle.map_speaker_label,
             )
             self._processors_by_key[cfg_key] = p
             logger.info(
-                "rtservice: created new processor for per-session cfg window=%.3fs overlap=%.3fs emit=%.3fs",
+                "rtservice: created new processor for per-session cfg commit=%.3fs context=%.3fs emit=%.3fs",
                 cfg.window_sec,
                 cfg.overlap_sec,
                 cfg.emit_every_sec,
@@ -1524,20 +1639,21 @@ class RealtimeEngine:
         wave: np.ndarray,
         lang: Optional[str],
         *,
+        start_sample: int,
         partial: bool,
-    ) -> str:
+    ) -> ProviderCandidate:
         pcm16 = (np.clip(wave, -1.0, 1.0) * 32767).astype("<i2").tobytes()
         candidate = provider.transcribe_window(
             WindowRequest(
                 pcm16_le=pcm16,
                 sample_rate=cfg.sr,
                 language=lang,
-                start_sample=0,
-                end_sample=wave.size,
+                start_sample=start_sample,
+                end_sample=start_sample + wave.size,
                 partial=partial,
             )
         )
-        return candidate.text
+        return candidate
 
     @staticmethod
     def _feed_native_provider(
