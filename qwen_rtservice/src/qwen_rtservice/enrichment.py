@@ -236,6 +236,8 @@ class QwenEpochEnricher:
                 continue
             start_s = max(0.0, min(duration_s, raw_start_s))
             end_s = max(start_s, min(duration_s, raw_end_s))
+            if end_s <= start_s:
+                continue
             if start_s < previous_start:
                 raise EnrichmentFailure("alignment", "NonMonotonicResult")
             words.append(AlignedWord(start_s=start_s, end_s=end_s, text=unit))

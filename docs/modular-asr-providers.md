@@ -137,6 +137,12 @@ mapping every unit back to a slice of the committed Qwen transcript. Emitted
 text preserves Qwen's original punctuation and spacing; a normalization that
 cannot be mapped safely takes the coarse fallback.
 
+The aligner can also return a transcript unit whose start and end timestamps
+are equal. Such units cannot participate in temporal speaker assignment, so
+the adapter ignores their empty time range while retaining their committed
+text in the neighboring positive-duration transcript slice. If no usable
+aligned range remains, the epoch takes the normal coarse speakerless fallback.
+
 Only a fully successful alignment-and-diarization result emits speaker-labelled
 segments. An unsupported alignment language, alignment failure, missing
 pyannote turns, or other enrichment failure emits the original coarse

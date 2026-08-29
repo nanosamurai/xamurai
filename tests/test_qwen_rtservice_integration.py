@@ -393,6 +393,35 @@ def test_qwen_epoch_enricher_assigns_nearest_speaker_across_silence():
     )
 
 
+def test_qwen_epoch_enricher_ignores_zero_duration_alignment_units():
+    class Aligner:
+        alignment_languages = ("English",)
+
+        def align(self, pcm16, text, language):
+            return (
+                SimpleNamespace(text="Hello", start_time=0.0, end_time=0.4),
+                SimpleNamespace(text="stalled", start_time=0.4, end_time=0.4),
+                SimpleNamespace(text="world", start_time=0.4, end_time=0.8),
+            )
+
+    class Diarizer:
+        runtime = "pyannote-audio==test"
+
+        def diarize(self, pcm16):
+            return (DiarizationSegment(0.0, 1.0, "SPEAKER_00"),)
+
+    segments = QwenEpochEnricher(Aligner(), Diarizer()).enrich(
+        np.ones(16000, dtype=np.int16),
+        "Hello stalled world",
+        "English",
+        epoch_number=1,
+    )
+
+    assert segments == (
+        EnrichedSegment(0.0, 0.8, "Hello stalled world", "EPOCH_0001/SPEAKER_00"),
+    )
+
+
 def test_qwen_rtservice_rolls_epochs_without_public_cutoff_or_duplicate_text(monkeypatch):
     monkeypatch.setenv("QWEN_RTSERVICE_BIND_ADDR", "127.0.0.1")
     monkeypatch.setenv("QWEN_STREAM_EPOCH_SECONDS", "10")
