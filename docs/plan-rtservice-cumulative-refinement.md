@@ -39,6 +39,9 @@ The intended PARTIAL behavior is **cumulative-within-window**:
   - `start_s` stays constant (the current window start)
   - `end_s` grows as more audio arrives
   - `text` is the best current hypothesis for the span `[start_s..end_s]`
+- PARTIAL attempts stop once the complete committed interval is buffered. The
+  processor then waits for right context and runs the FINAL pass instead of
+  decoding a redundant full-window PARTIAL that can block audio ingestion.
 - When the `FINAL` arrives for that window, it becomes the source of truth and any earlier PARTIALs for that time span can be discarded.
 
 This is the UI-friendly pattern:
@@ -74,7 +77,7 @@ service process. The public Community Edition stack provides a local example.
 | Env var | Default | Meaning | Notes / gotchas |
 |---|---:|---|---|
 | `RT_PARTIAL_ENABLE` | `true` | Enable/disable PARTIAL emission entirely. | Use this as the “kill switch” during rollout. |
-| `RT_EMIT_EVERY_SEC` | `1.5` | How often to *attempt* emitting a PARTIAL (cadence). | Smaller values amplify compute; should be clamped in BFF for untrusted clients. |
+| `RT_EMIT_EVERY_SEC` | `1.5` | How often to *attempt* emitting a PARTIAL (cadence). | VAD, unchanged hypotheses, overload protection, the full-interval cutoff, and inference time can reduce the observable event rate. Smaller values amplify compute and should be clamped in BFF for untrusted clients. |
 | `RT_WINDOW_SEC` | `5.0` | Duration owned by one FINAL commit interval. | Commit intervals are contiguous and non-overlapping. |
 | `RT_OVERLAP_SEC` | `0.5` | Decoder context retained before and awaited after each commit interval. | A steady-state FINAL decode sees `window + 2 * overlap`; word midpoints decide ownership. |
 | `RT_PARTIAL_MIN_BUFFER_SEC` | `0.7` | Minimum buffered audio before emitting any PARTIAL. | Avoids extremely-early hallucinations. |

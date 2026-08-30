@@ -64,6 +64,14 @@ rtservice uses two decode settings:
 
 This is intentional: PARTIALs should be fast and replaceable; FINALs are the converged results.
 
+`RT_EMIT_EVERY_SEC` is an attempt cadence rather than a delivery guarantee:
+VAD, unchanged text, and the lag guard can suppress an event. Cumulative
+PARTIAL decoding also stops when the complete commit interval is buffered. The
+processor reserves the following context-only gap for the FINAL pass; it does
+not launch a redundant full-window PARTIAL while waiting for right context.
+This keeps an expensive boundary decode from blocking stream ingestion and the
+contextual FINAL that owns the same audio.
+
 ### Qwen native-streaming profile
 
 The optional Qwen profile bypasses rtservice windowing and holds one native
