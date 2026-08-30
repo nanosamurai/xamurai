@@ -797,9 +797,11 @@ class RealtimeSessionProcessor:
         if available_samples < cfg.partial_min_buffer_samples:
             return []
 
-        # If we already have a full window available, we'll emit finals via the
-        # normal path. Avoid producing redundant PARTIALs here.
-        if available_samples >= cfg.window_samples + cfg.context_samples:
+        # Once the committed interval is full, wait for its right context and
+        # run the FINAL pass. A cumulative PARTIAL over the full interval is
+        # both redundant and expensive enough to block ingestion while that
+        # context arrives.
+        if available_samples >= cfg.window_samples:
             return []
 
         # Rate-limit partials by an ingestion-based monotonic clock.

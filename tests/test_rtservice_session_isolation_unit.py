@@ -265,6 +265,54 @@ def test_rtservice_partials_are_cumulative_within_window_by_default():
     assert p2[-1].end_s > p1[-1].end_s
 
 
+def test_rtservice_skips_full_interval_partial_while_waiting_for_right_context():
+    """A full cumulative PARTIAL must not block the contextual FINAL pass."""
+
+    cfg = RealtimeConfig(
+        sr=1000,
+        window_sec=10.0,
+        overlap_sec=1.0,
+        partial_enable=True,
+        partial_mode="cumulative",
+        emit_every_sec=2.0,
+        partial_stability_repeats=1,
+        partial_min_buffer_sec=0.0,
+        partial_min_transcribe_sec=1.5,
+        finalize_min_dur_sec=0.1,
+        key_resolution_sec=0.1,
+    )
+    asr_calls = []
+
+    def gate_fn(_wave):
+        return True
+
+    def asr_fn(wave, lang, start_sample, partial):
+        asr_calls.append((wave.size, partial))
+        return _candidate("partial" if partial else "final", wave, lang, start_sample, partial)
+
+    processor = RealtimeSessionProcessor(
+        cfg=cfg,
+        partial_gate_fn=gate_fn,
+        window_gate_fn=gate_fn,
+        diarize_fn=lambda _wave: [],
+        asr_fn=asr_fn,
+        map_speaker_fn=lambda _tenant_id, diar_label, _wave: diar_label,
+    )
+    engine = RealtimeEngine(cfg=cfg, processor=processor)
+
+    first_eight_seconds = np.ones(8 * cfg.sr, dtype=np.int16).tobytes()
+    next_two_seconds = np.ones(2 * cfg.sr, dtype=np.int16).tobytes()
+    right_context = np.ones(cfg.sr, dtype=np.int16).tobytes()
+
+    assert [result.text for result in engine.feed("s", first_eight_seconds, tenant_id="t1")] == ["partial"]
+    assert engine.feed("s", next_two_seconds, tenant_id="t1") == []
+    assert asr_calls == [(8000, True)]
+
+    final_results = engine.feed("s", right_context, tenant_id="t1")
+    assert [result.text for result in final_results] == ["final"]
+    assert asr_calls == [(8000, True), (11000, False)]
+
+
 def test_rtservice_engine_isolates_tenants_same_session_id():
     """Same session_id in different tenants must not share buffers."""
 
