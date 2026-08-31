@@ -336,9 +336,11 @@ class SessionState:
 
     # Realtime lag baseline tracking.
     # wall_base_s: wall clock timestamp (time.time()) corresponding to "audio time 0".
-    # last_feed_wall_s: last time we processed a chunk for this session.
+    # last_feed_completed_wall_s: wall clock time when the previous feed finished.
+    # Measuring idle time from completion keeps slow inference from looking like
+    # a client-side pause and incorrectly clearing accumulated realtime lag.
     wall_base_s: float
-    last_feed_wall_s: float
+    last_feed_completed_wall_s: float
 
     # Signature of the realtime config used for this session. If a client changes
     # per-session overrides mid-stream, we reset the session state.
@@ -360,7 +362,7 @@ class SessionState:
             pending_partial_text="",
             pending_partial_repeats=0,
             wall_base_s=now_s,
-            last_feed_wall_s=now_s,
+            last_feed_completed_wall_s=now_s,
             cfg_key=None,
             native_stream=None,
             native_last_text="",
@@ -482,12 +484,10 @@ class RealtimeSessionProcessor:
 
         # Lag tracking: if we see a long idle gap between chunks, treat it as a
         # pause and re-align the wall_base so we don't suppress partials forever.
-        gap_s = float(now_s - state.last_feed_wall_s)
+        gap_s = float(now_s - state.last_feed_completed_wall_s)
         if gap_s > float(cfg.partial_idle_reset_sec):
             audio_s = float(state.total_samples_ingested) / float(cfg.sr)
             state.wall_base_s = float(now_s - audio_s)
-
-        state.last_feed_wall_s = float(now_s)
 
         # ingest
         state.pcm16_buffer.extend(payload)
@@ -1512,14 +1512,18 @@ class RealtimeEngine:
                 )
 
             assert proc is not None
-            return proc.process(
-                tenant_id=tid,
-                session_id=sid,
-                state=state,
-                pcm16=pcm16,
-                lang=effective_lang,
-                now_s=now,
-            )
+            process_started_s = time.time()
+            try:
+                return proc.process(
+                    tenant_id=tid,
+                    session_id=sid,
+                    state=state,
+                    pcm16=pcm16,
+                    lang=effective_lang,
+                    now_s=process_started_s,
+                )
+            finally:
+                state.last_feed_completed_wall_s = time.time()
 
     @staticmethod
     def _cfg_key(cfg: RealtimeConfig) -> Tuple[object, ...]:

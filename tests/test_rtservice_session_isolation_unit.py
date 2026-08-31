@@ -1,6 +1,7 @@
 import numpy as np
 from types import SimpleNamespace
 
+from rtservice import engine as engine_module
 from rtservice.engine import (
     RealtimeConfig,
     RealtimeEngine,
@@ -27,6 +28,32 @@ def _candidate(text, wave, lang, start_sample, partial):
         provider_sequence=0,
         words=words,
     )
+
+
+def _lag_guard_engine(asr_fn):
+    cfg = RealtimeConfig(
+        sr=1000,
+        window_sec=1.0,
+        overlap_sec=0.0,
+        partial_enable=True,
+        emit_every_sec=0.1,
+        partial_stability_repeats=1,
+        partial_min_buffer_sec=0.0,
+        partial_min_transcribe_sec=0.0,
+        partial_max_behind_sec=2.0,
+        partial_idle_reset_sec=3.0,
+        finalize_min_dur_sec=0.1,
+        key_resolution_sec=0.1,
+    )
+    processor = RealtimeSessionProcessor(
+        cfg=cfg,
+        partial_gate_fn=lambda _wave: True,
+        window_gate_fn=lambda _wave: True,
+        diarize_fn=lambda _wave: [],
+        asr_fn=asr_fn,
+        map_speaker_fn=lambda _tenant_id, diar_label, _wave: diar_label,
+    )
+    return cfg, RealtimeEngine(cfg=cfg, processor=processor)
 
 
 def test_rtservice_engine_isolates_sessions_without_audio_mix():
@@ -311,6 +338,46 @@ def test_rtservice_skips_full_interval_partial_while_waiting_for_right_context()
     final_results = engine.feed("s", right_context, tenant_id="t1")
     assert [result.text for result in final_results] == ["final"]
     assert asr_calls == [(8000, True), (11000, False)]
+
+
+def test_rtservice_slow_decode_does_not_reset_lag_as_client_idle(monkeypatch):
+    """Internal inference time must keep PARTIAL overload suppression active."""
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(engine_module.time, "time", lambda: clock.now)
+    asr_calls = []
+
+    def asr_fn(wave, lang, start_sample, partial):
+        asr_calls.append(partial)
+        if not partial:
+            clock.now += 8.0
+        return _candidate("partial" if partial else "final", wave, lang, start_sample, partial)
+
+    cfg, engine = _lag_guard_engine(asr_fn)
+
+    full_window = np.ones(cfg.sr, dtype=np.int16).tobytes()
+    assert [result.text for result in engine.feed("s", full_window, tenant_id="t1")] == ["final"]
+
+    next_audio = np.ones(int(0.2 * cfg.sr), dtype=np.int16).tobytes()
+    assert engine.feed("s", next_audio, tenant_id="t1") == []
+    assert asr_calls == [False]
+
+
+def test_rtservice_genuine_client_idle_still_resets_lag(monkeypatch):
+    """Time after a completed feed remains a valid client-pause signal."""
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(engine_module.time, "time", lambda: clock.now)
+
+    def asr_fn(wave, lang, start_sample, partial):
+        return _candidate(f"samples={wave.size}", wave, lang, start_sample, partial)
+
+    cfg, engine = _lag_guard_engine(asr_fn)
+    audio = np.ones(int(0.2 * cfg.sr), dtype=np.int16).tobytes()
+
+    assert [result.text for result in engine.feed("s", audio, tenant_id="t1")] == ["samples=200"]
+    clock.now += 4.0
+    assert [result.text for result in engine.feed("s", audio, tenant_id="t1")] == ["samples=400"]
 
 
 def test_rtservice_engine_isolates_tenants_same_session_id():
