@@ -22,7 +22,12 @@ class _FakeWhisperModel:
     def transcribe(self, _wave, **kwargs):
         self.calls.append(kwargs)
         if kwargs["word_timestamps"]:
-            segment = SimpleNamespace(words=[SimpleNamespace(word="hello"), SimpleNamespace(word=" world")])
+            segment = SimpleNamespace(
+                words=[
+                    SimpleNamespace(word="hello", start=0.1, end=0.4),
+                    SimpleNamespace(word=" world", start=0.4, end=0.8),
+                ]
+            )
         else:
             segment = SimpleNamespace(words=None, text="partial text")
         return iter([segment]), SimpleNamespace()
@@ -35,11 +40,15 @@ def test_local_profile_preserves_final_and_partial_decode_settings(monkeypatch):
     provider = LocalFasterWhisperProvider(model=model)
     pcm = (np.ones(16000, dtype=np.int16)).tobytes()
 
-    final = provider.transcribe_window(WindowRequest(pcm, 16000, "en", 0, 16000, False))
+    final = provider.transcribe_window(WindowRequest(pcm, 16000, "en", 32000, 48000, False))
     partial = provider.transcribe_window(WindowRequest(pcm, 16000, "en", 0, 16000, True))
 
     assert provider.profile_id == FASTER_WHISPER_MEDIUM_PROFILE
     assert final.text == "hello  world"
+    assert [(word.text, word.start_sample, word.end_sample) for word in final.words] == [
+        ("hello", 33600, 38400),
+        (" world", 38400, 44800),
+    ]
     assert final.terminal is True
     assert partial.text == "partial text"
     assert partial.terminal is False

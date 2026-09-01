@@ -57,7 +57,10 @@ class _FakeWhisperModel:
         self.calls.append(kwargs)
         if kwargs["word_timestamps"]:
             segment = SimpleNamespace(
-                words=[SimpleNamespace(word="hello"), SimpleNamespace(word=" world")],
+                words=[
+                    SimpleNamespace(word="hello", start=0.1, end=0.4),
+                    SimpleNamespace(word=" world", start=0.4, end=0.8),
+                ],
                 text="",
             )
         else:
@@ -80,6 +83,10 @@ def test_final_and_partial_decode_use_native_repetition_fallback(monkeypatch):
     final = provider.transcribe_window(WindowRequest(pcm, 16000, "en", 0, 16000, False))
     partial = provider.transcribe_window(WindowRequest(pcm, 16000, "en", 0, 16000, True))
     assert final.text
+    assert [(word.text, word.start_sample, word.end_sample) for word in final.words] == [
+        ("hello", 1600, 6400),
+        (" world", 6400, 12800),
+    ]
     assert partial.text == "partial text"
 
     final_call, partial_call = fake_model.calls

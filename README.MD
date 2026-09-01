@@ -12,7 +12,8 @@ do not live in this service repository.
 ## Services
 
 - `rtservice` exposes the bidirectional `RealtimeASR` gRPC API and emits
-  Faster-Whisper replaceable partial and committed final realtime events.
+  Faster-Whisper replaceable partials and pyannote-diarized committed finals,
+  with optional enrolled-speaker mapping.
 - `qwen_rtservice` exposes the same `RealtimeASR` API using Qwen3-ASR's native
   vLLM streaming implementation, then forced-aligns and pyannote-diarizes each
   bounded final epoch when the detected language is supported.
@@ -28,6 +29,73 @@ do not live in this service repository.
 
 Persistence is handled by the separate SamuraiPersistor service. Browser and
 API traffic is handled by SamuraiBFF.
+
+## Realtime provider architecture
+
+SamuraiBFF can fan the same accepted audio stream out to one or more configured
+`RealtimeASR` peers. Each service owns its model lifecycle and bounded session
+state, and returns independent track-labelled events through the same public
+contract. A slow or failed peer does not become an extra network hop for the
+others.
+
+```mermaid
+flowchart LR
+    subgraph bffImage["Docker image: samuraibff"]
+        subgraph bffService["Compose service: samuraibff"]
+            WS["WebSocket audio session"]
+            Fanout["bounded per-track fan-out"]
+            KafkaOnce["publish audio.raw once"]
+        end
+    end
+
+    subgraph fasterImage["Docker image: xamurai-rtservice"]
+        subgraph fasterService["Compose service: rtservice"]
+            FasterAPI["RealtimeASR\nGetCapabilities + Stream"]
+            SpeechProvider["internal Python SpeechProvider"]
+            Faster["Systran/faster-whisper-medium"]
+            FasterDiar["pyannote/speaker-diarization-3.1\noptional enrolled-speaker embedding"]
+            FasterJoin["word timestamps + speaker-turn join"]
+        end
+    end
+
+    subgraph qwenImage["Docker image: xamurai-qwen-rtservice"]
+        subgraph qwenService["Compose service: qwen-rtservice"]
+            QwenAPI["RealtimeASR\nGetCapabilities + Stream"]
+            QwenBackend["Qwen3-ASR-0.6B\nnative vLLM streaming"]
+            QwenAligner["Qwen3-ForcedAligner-0.6B\nper completed epoch"]
+            QwenDiar["pyannote/speaker-diarization-3.1\nper completed epoch"]
+            QwenJoin["aligned word + speaker-turn join"]
+        end
+    end
+
+    WS --> Fanout
+    WS --> KafkaOnce
+    Fanout -->|"track=faster-whisper"| FasterAPI
+    Fanout -->|"track=qwen"| QwenAPI
+    FasterAPI --> SpeechProvider --> Faster --> FasterJoin
+    FasterAPI -->|"FINAL audio"| FasterDiar --> FasterJoin
+    QwenAPI --> QwenBackend --> QwenAligner --> QwenJoin
+    QwenAPI -->|"epoch PCM"| QwenDiar --> QwenJoin
+```
+
+The focused [modular realtime ASR guide](docs/modular-asr-providers.md) defines
+the common contract, fixed provider profiles, timing semantics, failure
+fallbacks, and resource bounds.
+
+## Model pipelines
+
+| Service | Stage and interface | ASR and alignment models | Speaker and speech models | Output behavior |
+| --- | --- | --- | --- | --- |
+| `rtservice` | Realtime gRPC | Fixed `Systran/faster-whisper-medium` profile through Faster-Whisper/CTranslate2 | `pyannote/speaker-diarization-3.1`; optional `pyannote/embedding` enrollment mapping and Silero VAD | Replaceable partials; contextual, timestamp-owned, speaker-labelled finals |
+| `qwen_rtservice` | Realtime gRPC | Fixed `Qwen/Qwen3-ASR-0.6B` plus `Qwen/Qwen3-ForcedAligner-0.6B` | Fixed `pyannote/speaker-diarization-3.1` pipeline | Native-streaming partials; aligned and diarized epoch finals for supported alignment languages, with a coarse speakerless fallback |
+| `whisperx_worker` | Kafka refinement | WhisperX `medium` by default (`WHISPERX_MODEL` is operator-configurable) plus its language-specific alignment model | `pyannote/speaker-diarization-3.1` by default; optional `pyannote/embedding` enrollment mapping | Speaker-aware refined windows while the session is in progress |
+| `finalizer_worker` | Kafka completed-recording pipeline | Reuses the WhisperX ASR and language-alignment pipeline | Reuses the pyannote diarization and optional enrollment pipeline | Canonical full-session transcript with word timing where alignment succeeds |
+| `recorder_worker` | Kafka and object storage | None | None | Model-free session WAV assembly and completion notification |
+
+Realtime clients select configured track IDs, not arbitrary model names,
+revisions, URLs, or runtime arguments. Operators add another implementation by
+deploying a service that satisfies `RealtimeASR` and registering its internal
+endpoint with SamuraiBFF.
 
 ## Processing pipeline
 
@@ -158,7 +226,8 @@ Realtime service settings include:
 
 - `RT_GRPC_PORT` (default `50052`)
 - `HF_TOKEN`
-- `RT_WINDOW_SEC`, `RT_OVERLAP_SEC`, and `RT_EMIT_EVERY_SEC`
+- `RT_WINDOW_SEC` (committed FINAL interval), `RT_OVERLAP_SEC` (left/right
+  decoding context), and `RT_EMIT_EVERY_SEC`
 - `RT_PARTIAL_ENABLE`, `RT_PARTIAL_MODE`, and overload guardrails
 - `RT_ASR_TEMPERATURES` and `RT_ASR_COMPRESSION_RATIO_THRESHOLD`
 - `RT_FINAL_DIAR_MERGE_GAP_SEC` and `RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC`

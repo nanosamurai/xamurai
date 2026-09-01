@@ -48,6 +48,13 @@ The default provider runs Faster-Whisper on an **in-memory waveform** to reduce
 latency and jitter. rtservice owns windowing/VAD/diarization while the provider
 owns the pinned model and decode configuration.
 
+`RT_WINDOW_SEC` is the non-overlapping committed duration and
+`RT_OVERLAP_SEC` is left/right decoder context. A commit waits for its right
+context, decodes the contextual waveform once, and owns only words whose
+absolute-sample midpoint falls in that commit. EOF commits the pending interval
+without unavailable future context. Increasing context can improve seam words,
+but increases FINAL latency, PCM memory, ASR work, and diarization work.
+
 ### PARTIAL decode is cheaper than FINAL decode
 
 rtservice uses two decode settings:
@@ -56,6 +63,14 @@ rtservice uses two decode settings:
 - **PARTIAL**: cheaper (lower beam, no word timestamps)
 
 This is intentional: PARTIALs should be fast and replaceable; FINALs are the converged results.
+
+`RT_EMIT_EVERY_SEC` is an attempt cadence rather than a delivery guarantee:
+VAD, unchanged text, and the lag guard can suppress an event. Cumulative
+PARTIAL decoding also stops when the complete commit interval is buffered. The
+processor reserves the following context-only gap for the FINAL pass; it does
+not launch a redundant full-window PARTIAL while waiting for right context.
+This keeps an expensive boundary decode from blocking stream ingestion and the
+contextual FINAL that owns the same audio.
 
 ### Qwen native-streaming profile
 
@@ -79,19 +94,20 @@ additional inference cost. A pathological or otherwise failed decode can require
 multiple attempts and temporarily increase latency. rtservice does not rewrite,
 trim, or otherwise post-process repeated transcript text.
 
-### FINAL diarization turn stabilization
+### FINAL word ownership and diarization
 
-Before FINAL ASR, rtservice normalizes and orders the diarization turns for the
-current window. Consecutive turns with the same raw diarization speaker are
-merged when their gap is at most `RT_FINAL_DIAR_MERGE_GAP_SEC`. Duration
-filtering, overlapping-window ownership, speaker enrollment mapping, and ASR
-then operate on the merged span. The waveform includes the short gaps between
-the merged turns so faster-whisper receives useful speech context.
+FINAL ASR runs once over the contextual waveform and retains Faster-Whisper's
+word timestamps internally. Word-midpoint ownership removes duplicates at
+adjacent seams without a growing timestamp/text dedupe set. The engine
+normalizes and merges nearby same-speaker pyannote turns, assigns each owned
+word with the shared overlap model, uses the nearest turn for a speech/silence
+boundary gap, and coalesces adjacent words with the same mapped speaker.
 
-Merged turns shorter than `RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC` are not sent to
-ASR or speaker embedding. Different-speaker turns are never merged. If no
-eligible diarization turn produces FINAL text, the existing full-window FINAL
-fallback still runs. End-of-stream tail finalization is unchanged.
+`RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC` now protects enrolled-speaker embedding:
+short raw-speaker audio keeps its anonymous pyannote label but is not embedded.
+Missing/failed diarization still yields speakerless FINAL text. A provider that
+unexpectedly omits word timestamps is decoded again on the exact owned interval
+so contextual text cannot leak across two FINALs.
 
 ## Related environment variables
 
@@ -104,14 +120,16 @@ Additional perf/overload knobs:
 | `RT_ASR_TEMPERATURES` | `0.0,0.2,0.4,0.6,0.8,1.0` | Non-decreasing faster-whisper fallback schedule used by FINAL and PARTIAL decoding. |
 | `RT_ASR_COMPRESSION_RATIO_THRESHOLD` | `2.4` | Faster-whisper threshold above which a decode is treated as too repetitive and retried. |
 | `RT_FINAL_DIAR_MERGE_GAP_SEC` | `0.75` | Maximum gap between consecutive same-speaker diarization turns merged before FINAL ASR. Set to `0` to disable positive-gap merging. |
-| `RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC` | `0.7` | Minimum merged diarization duration sent to FINAL ASR and speaker mapping. Set to `0` to disable this additional guard; the internal FINAL safety floor still applies. |
+| `RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC` | `0.7` | Minimum accumulated raw-speaker audio sent to enrolled-speaker mapping. Shorter turns retain their anonymous pyannote label. |
 | `RT_PARTIAL_MAX_BEHIND_SEC` | `2.0` | If wall clock minus audio time exceeds this, skip PARTIALs (FINALs still run). |
 | `RT_PARTIAL_IDLE_RESET_SEC` | `3.0` | If no audio arrives for this many seconds, treat it as a pause and reset lag baseline. |
 
 ## What this does *not* solve (future work)
 
-- Per-chunk `np.concatenate` buffer growth is still O(n) copying; a ring-buffer would reduce CPU overhead under high chunk rates.
 - GPU scheduling/fairness across many concurrent sessions is still “best effort” in a single process.
+- The synchronous gRPC worker still holds a session lock during model inference;
+  it supplies natural backpressure but does not provide a tenant-fair inference
+  queue. Partials are dropped under lag before FINALs.
 - True multi-GPU scaling needs multiple rtservice instances and session
   stickiness at the load-balancing layer.
 
