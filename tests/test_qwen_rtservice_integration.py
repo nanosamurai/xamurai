@@ -15,11 +15,14 @@ from qwen_rtservice.server import (
     _load_runtime_config,
     create_server,
 )
+from qwen_rtservice.enrichment import EnrichedSegment, QwenEpochEnricher
+from drsynth_common.diarization_assign import DiarizationSegment
 
 
 class _FakeQwenBackend:
     runtime = "qwen-asr==test;vllm==test"
     supported_languages = ("English", "Czech")
+    alignment_languages = ("English",)
 
     def __init__(self):
         self.opened_languages = []
@@ -42,13 +45,13 @@ class _FakeQwenBackend:
         return state
 
 
-def _chunk(*, session_id="qwen-session", sequence=1):
+def _chunk(*, session_id="qwen-session", sequence=1, lang="cs", samples=1600):
     return stream_pb2.AudioChunk(
         session_id=session_id,
         seq=sequence,
         sample_rate=16000,
-        pcm16_le=np.ones(1600, dtype=np.int16).tobytes(),
-        lang="cs",
+        pcm16_le=np.ones(samples, dtype=np.int16).tobytes(),
+        lang=lang,
     )
 
 
@@ -68,6 +71,8 @@ def test_qwen_rtservice_exposes_capabilities_and_native_stream(monkeypatch):
         assert capabilities.windowed_realtime is False
         assert capabilities.word_timestamps is False
         assert capabilities.segment_timestamps is False
+        assert capabilities.speaker_labels is False
+        assert list(capabilities.aligned_diarized_languages) == []
         assert capabilities.maximum_audio_seconds == 0
         assert capabilities.maximum_concurrent_sessions == 1
         assert capabilities.model_revision == MODEL_REVISION
@@ -175,7 +180,9 @@ def test_qwen_rtservice_rejects_unsupported_language_code(monkeypatch):
         with pytest.raises(grpc.RpcError) as failure:
             list(stub.Stream(iter([chunk]), timeout=2))
         assert failure.value.code() == grpc.StatusCode.INVALID_ARGUMENT
-        assert failure.value.details() == "Qwen realtime service does not support the requested language code"
+        assert failure.value.details() == (
+            "Qwen realtime service does not support the requested language code"
+        )
     finally:
         channel.close()
         server.stop(grace=None).wait()
@@ -186,7 +193,7 @@ def test_qwen_rtservice_rejects_unsupported_language_code(monkeypatch):
     [
         (
             {"QWEN_STREAM_EPOCH_SECONDS": "600", "QWEN_MAX_MODEL_LEN": "2048"},
-            "QWEN_MAX_MODEL_LEN is too small",
+            "QWEN_STREAM_EPOCH_SECONDS must be between 10.0 and 300.0",
         ),
         (
             {
@@ -198,7 +205,9 @@ def test_qwen_rtservice_rejects_unsupported_language_code(monkeypatch):
         ),
     ],
 )
-def test_qwen_runtime_rejects_incompatible_context_and_cache_limits(monkeypatch, environment, message):
+def test_qwen_runtime_rejects_incompatible_context_and_cache_limits(
+    monkeypatch, environment, message
+):
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=message):
@@ -222,11 +231,203 @@ class _EpochQwenBackend(_FakeQwenBackend):
         return state
 
 
+class _FakeEnricher:
+    supported_languages = ("English",)
+
+    def __init__(self, *, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def enrich(self, pcm16, text, language, *, epoch_number):
+        self.calls.append((pcm16.copy(), text, language, epoch_number))
+        if self.fail:
+            raise RuntimeError("sensitive enrichment detail")
+        duration_s = pcm16.size / 16000
+        return (
+            EnrichedSegment(
+                0.01,
+                duration_s / 2,
+                "native ",
+                f"EPOCH_{epoch_number:04d}/SPEAKER_00",
+            ),
+            EnrichedSegment(
+                duration_s / 2,
+                duration_s,
+                "final",
+                f"EPOCH_{epoch_number:04d}/SPEAKER_01",
+            ),
+        )
+
+
+class _EpochEnricher:
+    supported_languages = ("English",)
+
+    def __init__(self):
+        self.calls = []
+
+    def enrich(self, pcm16, text, language, *, epoch_number):
+        self.calls.append((pcm16.size, text, language, epoch_number))
+        return (
+            EnrichedSegment(
+                0.0,
+                pcm16.size / 16000,
+                text,
+                f"EPOCH_{epoch_number:04d}/SPEAKER_00",
+            ),
+        )
+
+
+def test_qwen_supported_language_final_is_aligned_and_diarized(monkeypatch):
+    monkeypatch.setenv("QWEN_RTSERVICE_BIND_ADDR", "127.0.0.1")
+    enricher = _FakeEnricher()
+    server = create_server(_FakeQwenBackend(), enricher=enricher, port=0)
+    server.start()
+    channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
+    try:
+        stub = stream_pb2_grpc.RealtimeASRStub(channel)
+        capabilities = stub.GetCapabilities(stream_pb2.RealtimeCapabilitiesRequest(), timeout=2)
+        events = list(stub.Stream(iter([_chunk(lang="en")]), timeout=2))
+        finals = [event for event in events if event.type == stream_pb2.FINAL]
+
+        assert capabilities.segment_timestamps is True
+        assert capabilities.word_timestamps is False
+        assert capabilities.speaker_labels is True
+        assert list(capabilities.aligned_diarized_languages) == ["en"]
+        assert [(event.text, event.speaker) for event in finals] == [
+            ("native", "EPOCH_0001/SPEAKER_00"),
+            ("final", "EPOCH_0001/SPEAKER_01"),
+        ]
+        assert [(event.start_s, event.end_s) for event in finals] == [(0.01, 0.05), (0.05, 0.1)]
+        assert len(enricher.calls) == 1
+        assert enricher.calls[0][0].size == 1600
+        assert enricher.calls[0][1:] == ("native final", "English", 1)
+    finally:
+        channel.close()
+        server.stop(grace=None).wait()
+
+
+@pytest.mark.parametrize("lang", ["cs", "en"])
+def test_qwen_enrichment_limit_or_failure_preserves_speakerless_final(monkeypatch, lang):
+    monkeypatch.setenv("QWEN_RTSERVICE_BIND_ADDR", "127.0.0.1")
+    enricher = _FakeEnricher(fail=lang == "en")
+    server = create_server(_FakeQwenBackend(), enricher=enricher, port=0)
+    server.start()
+    channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
+    try:
+        events = list(
+            stream_pb2_grpc.RealtimeASRStub(channel).Stream(
+                iter([_chunk(lang=lang)]),
+                timeout=2,
+            )
+        )
+        final = events[-1]
+        assert final.type == stream_pb2.FINAL
+        assert final.text == "native final"
+        assert final.speaker == ""
+        assert len(enricher.calls) == (1 if lang == "en" else 0)
+    finally:
+        channel.close()
+        server.stop(grace=None).wait()
+
+
+def test_qwen_epoch_enricher_restores_text_and_assigns_overlap_speakers():
+    class Aligner:
+        alignment_languages = ("English",)
+
+        def align(self, pcm16, text, language):
+            assert text == "Hello, real-time world!"
+            assert language == "English"
+            return (
+                SimpleNamespace(text="Hello", start_time=0.0, end_time=0.6),
+                SimpleNamespace(text="realtime", start_time=0.6, end_time=1.2),
+                SimpleNamespace(text="world", start_time=1.2, end_time=1.6),
+            )
+
+    class Diarizer:
+        runtime = "pyannote-audio==test"
+
+        def diarize(self, pcm16):
+            return (
+                DiarizationSegment(0.0, 1.1, "SPEAKER_00"),
+                DiarizationSegment(1.1, 2.0, "SPEAKER_01"),
+            )
+
+    segments = QwenEpochEnricher(Aligner(), Diarizer()).enrich(
+        np.ones(32000, dtype=np.int16),
+        "Hello, real-time world!",
+        "English",
+        epoch_number=2,
+    )
+
+    assert segments == (
+        EnrichedSegment(0.0, 1.2, "Hello, real-time", "EPOCH_0002/SPEAKER_00"),
+        EnrichedSegment(1.2, 1.6, "world!", "EPOCH_0002/SPEAKER_01"),
+    )
+
+
+def test_qwen_epoch_enricher_assigns_nearest_speaker_across_silence():
+    class Aligner:
+        alignment_languages = ("English",)
+
+        def align(self, pcm16, text, language):
+            return (
+                SimpleNamespace(text="Hello", start_time=0.0, end_time=0.4),
+                SimpleNamespace(text="world", start_time=0.4, end_time=0.8),
+            )
+
+    class Diarizer:
+        runtime = "pyannote-audio==test"
+
+        def diarize(self, pcm16):
+            return (DiarizationSegment(0.0, 0.3, "SPEAKER_00"),)
+
+    segments = QwenEpochEnricher(Aligner(), Diarizer()).enrich(
+        np.ones(16000, dtype=np.int16),
+        "Hello world",
+        "English",
+        epoch_number=1,
+    )
+
+    assert segments == (
+        EnrichedSegment(0.0, 0.8, "Hello world", "EPOCH_0001/SPEAKER_00"),
+    )
+
+
+def test_qwen_epoch_enricher_ignores_zero_duration_alignment_units():
+    class Aligner:
+        alignment_languages = ("English",)
+
+        def align(self, pcm16, text, language):
+            return (
+                SimpleNamespace(text="Hello", start_time=0.0, end_time=0.4),
+                SimpleNamespace(text="stalled", start_time=0.4, end_time=0.4),
+                SimpleNamespace(text="world", start_time=0.4, end_time=0.8),
+            )
+
+    class Diarizer:
+        runtime = "pyannote-audio==test"
+
+        def diarize(self, pcm16):
+            return (DiarizationSegment(0.0, 1.0, "SPEAKER_00"),)
+
+    segments = QwenEpochEnricher(Aligner(), Diarizer()).enrich(
+        np.ones(16000, dtype=np.int16),
+        "Hello stalled world",
+        "English",
+        epoch_number=1,
+    )
+
+    assert segments == (
+        EnrichedSegment(0.0, 0.8, "Hello stalled world", "EPOCH_0001/SPEAKER_00"),
+    )
+
+
 def test_qwen_rtservice_rolls_epochs_without_public_cutoff_or_duplicate_text(monkeypatch):
     monkeypatch.setenv("QWEN_RTSERVICE_BIND_ADDR", "127.0.0.1")
     monkeypatch.setenv("QWEN_STREAM_EPOCH_SECONDS", "10")
     backend = _EpochQwenBackend()
-    server = create_server(backend, port=0)
+    enricher = _EpochEnricher()
+    server = create_server(backend, enricher=enricher, port=0)
     server.start()
     channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
 
@@ -258,6 +459,11 @@ def test_qwen_rtservice_rolls_epochs_without_public_cutoff_or_duplicate_text(mon
         )
         assert backend.maximum_state_samples <= 10 * 16000
         assert backend.opened_contexts[:3] == ["", "word-1", "word-1 word-2"]
+        assert all(call[0] <= 10 * 16000 for call in enricher.calls)
+        assert [call[1] for call in enricher.calls] == [
+            f"word-{epoch}" for epoch in range(1, len(final_events) + 1)
+        ]
+        assert all(event.speaker.startswith("EPOCH_") for event in final_events)
     finally:
         channel.close()
         server.stop(grace=None).wait()

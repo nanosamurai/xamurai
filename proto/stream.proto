@@ -144,6 +144,8 @@ message RealtimeCapabilities {
   string model_revision = 14;
   string model_digest = 15;
   string implementation_revision = 16;
+  bool speaker_labels = 17;
+  repeated string aligned_diarized_languages = 18;
 }
 
 service RealtimeASR {

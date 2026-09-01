@@ -14,7 +14,8 @@ do not live in this service repository.
 - `rtservice` exposes the bidirectional `RealtimeASR` gRPC API and emits
   Faster-Whisper replaceable partial and committed final realtime events.
 - `qwen_rtservice` exposes the same `RealtimeASR` API using Qwen3-ASR's native
-  vLLM streaming implementation.
+  vLLM streaming implementation, then forced-aligns and pyannote-diarizes each
+  bounded final epoch when the detected language is supported.
 - `whisperx_worker` consumes `audio.raw` and emits window-based
   `transcripts.refined` events.
 - `recorder_worker` consumes `audio.raw`, stores session audio, and emits
@@ -166,6 +167,7 @@ Realtime service settings include:
 Qwen realtime service settings include:
 
 - `QWEN_RTSERVICE_PORT` (default `50052`)
+- `HF_TOKEN` (required, least-privilege access to the fixed gated pyannote model)
 - `QWEN_STREAM_CHUNK_SECONDS` and `QWEN_STREAM_EPOCH_SECONDS`
 - `QWEN_EPOCH_CONTEXT_CHARACTERS`, `QWEN_MAX_NEW_TOKENS`, and
   `QWEN_MAX_MODEL_LEN`
