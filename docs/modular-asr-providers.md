@@ -4,12 +4,15 @@ Faster-Whisper and Qwen are peer services behind the same public
 `RealtimeASR` gRPC API. SamuraiBFF owns the configured track list and fans one
 accepted audio stream out to those peers. There is no
 `rtservice -> SpeechProvider gRPC -> Qwen` hop.
+The repository [README](../README.md#model-pipelines) summarizes every Xamurai
+service's model pipeline; this guide defines the realtime contract and the two
+current fixed provider profiles in detail.
 
 ```mermaid
 flowchart LR
     subgraph bffImage["Docker image: samuraibff"]
         subgraph bffService["Compose service: samuraibff"]
-            WS["WebSocket audio/events"]
+            WS["WebSocket audio session"]
             Fanout["bounded per-track fan-out"]
             KafkaOnce["publish audio.raw once"]
         end
@@ -19,16 +22,19 @@ flowchart LR
         subgraph fasterService["Compose service: rtservice"]
             FasterAPI["RealtimeASR\nGetCapabilities + Stream"]
             SpeechProvider["internal Python SpeechProvider"]
-            Faster["LocalFasterWhisperProvider"]
+            Faster["Systran/faster-whisper-medium"]
+            FasterDiar["pyannote/speaker-diarization-3.1\noptional enrolled-speaker embedding"]
+            FasterJoin["word timestamps + speaker-turn join"]
         end
     end
 
     subgraph qwenImage["Docker image: xamurai-qwen-rtservice"]
         subgraph qwenService["Compose service: qwen-rtservice"]
             QwenAPI["RealtimeASR\nGetCapabilities + Stream"]
-            QwenBackend["Qwen3ASRModel.LLM\nin-process vLLM API"]
-            QwenAligner["Qwen3 ForcedAligner\nper completed epoch"]
-            QwenDiar["pyannote 3.1\nper completed epoch"]
+            QwenBackend["Qwen3-ASR-0.6B\nnative vLLM streaming"]
+            QwenAligner["Qwen3-ForcedAligner-0.6B\nper completed epoch"]
+            QwenDiar["pyannote/speaker-diarization-3.1\nper completed epoch"]
+            QwenJoin["aligned word + speaker-turn join"]
         end
     end
 
@@ -36,10 +42,10 @@ flowchart LR
     WS --> KafkaOnce
     Fanout -->|"track=faster-whisper"| FasterAPI
     Fanout -->|"track=qwen"| QwenAPI
-    FasterAPI --> SpeechProvider --> Faster
-    QwenAPI --> QwenBackend
-    QwenAPI --> QwenAligner
-    QwenAPI --> QwenDiar
+    FasterAPI --> SpeechProvider --> Faster --> FasterJoin
+    FasterAPI -->|"FINAL audio"| FasterDiar --> FasterJoin
+    QwenAPI --> QwenBackend --> QwenAligner --> QwenJoin
+    QwenAPI -->|"epoch PCM"| QwenDiar --> QwenJoin
 ```
 
 ## Common service contract
@@ -83,8 +89,8 @@ peer.
 
 | BFF track | Provider profile | Runtime and mode | Timing claims |
 | --- | --- | --- | --- |
-| `faster-whisper` | `faster-whisper-medium-ctranslate2-r1` | Faster-Whisper 1.2 / CTranslate2 4.6; contextual windowed realtime with VAD, diarization, enrollment mapping, partials, and finals | Internal absolute word timestamps with deterministic seam ownership; public coalesced speaker segments |
-| `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `qwen-asr==0.0.6`; `vllm==0.14.0`; `pyannote-audio==4.0.7`; bounded native-streaming epochs; one concurrent session | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
+| `faster-whisper` | `faster-whisper-medium-ctranslate2-r1` | `Systran/faster-whisper-medium`; Faster-Whisper 1.2 / CTranslate2 4.6; `pyannote/speaker-diarization-3.1`; contextual windowed realtime with optional Silero VAD and enrollment mapping | Internal absolute word timestamps with deterministic seam ownership; public coalesced speaker segments |
+| `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `Qwen/Qwen3-ASR-0.6B`; `Qwen/Qwen3-ForcedAligner-0.6B`; `pyannote/speaker-diarization-3.1`; `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
 
 The Qwen profile pins `Qwen/Qwen3-ASR-0.6B` revision
 `c4468bdb552ddc559e464f6081e22dd4034f2e68` and verifies the
