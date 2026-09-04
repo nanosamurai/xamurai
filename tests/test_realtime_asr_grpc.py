@@ -104,6 +104,16 @@ def gen_chunks(
     logger.debug("[test] sent final chunk seq=%d", seq + 1)
 
 
+def admitted_events(stub, session_id, chunks):
+    """Assert the pre-audio handshake and return transcript events."""
+    responses = stub.Stream(chunks, metadata=(("x-session-id", session_id),))
+    accepted = next(responses)
+    assert accepted.type == stream_pb2.SESSION_ACCEPTED
+    assert accepted.session_id == session_id
+    assert accepted.serving_instance_id
+    return responses
+
+
 # ---------------------------------------------------------------------------
 # Fixtures: start/stop server for tests
 # ---------------------------------------------------------------------------
@@ -161,7 +171,9 @@ def test_realtime_asr_stream_basic(grpc_channel):
             print("[debug] gen_chunks raised:", repr(e))
             raise
 
-    events: List[stream_pb2.AsrEvent] = list(stub.Stream(wrapped_gen()))
+    events: List[stream_pb2.AsrEvent] = list(
+        admitted_events(stub, "test-grpc-basic", wrapped_gen())
+    )
 
     for ev in events:
         logger.debug(
@@ -192,7 +204,7 @@ def test_realtime_asr_stream(grpc_channel):
     chunks_iter = gen_chunks("test-grpc-stream", audio, lang="cs")
 
     events: List[stream_pb2.AsrEvent] = []
-    for ev in stub.Stream(chunks_iter):
+    for ev in admitted_events(stub, "test-grpc-stream", chunks_iter):
         logger.debug(
             "[test-stream] got AsrEvent session=%s [%.2f, %.2f] speaker=%s text=%r",
             ev.session_id,
@@ -227,7 +239,13 @@ def test_realtime_asr_stream_emits_partial_and_final(grpc_channel):
     # Default rtservice window is 5s, so 6s is enough to finalize at least one window.
     audio = audio[: int(6.0 * SR)]
 
-    events: List[stream_pb2.AsrEvent] = list(stub.Stream(gen_chunks("test-grpc-partial", audio, lang="cs")))
+    events: List[stream_pb2.AsrEvent] = list(
+        admitted_events(
+            stub,
+            "test-grpc-partial",
+            gen_chunks("test-grpc-partial", audio, lang="cs"),
+        )
+    )
     assert events, "Expected some AsrEvents"
 
     partial_idx = [i for i, e in enumerate(events) if e.type == stream_pb2.PARTIAL and e.text.strip()]
@@ -252,7 +270,13 @@ def test_realtime_asr_stream_emits_multiple_finals_for_full_wav(grpc_channel):
     wav_path = Path(__file__).parent / "data" / "test_cs.wav"
     audio = load_audio_mono_16k(wav_path)
 
-    events: List[stream_pb2.AsrEvent] = list(stub.Stream(gen_chunks("test-grpc-multi-final", audio, lang="cs")))
+    events: List[stream_pb2.AsrEvent] = list(
+        admitted_events(
+            stub,
+            "test-grpc-multi-final",
+            gen_chunks("test-grpc-multi-final", audio, lang="cs"),
+        )
+    )
     finals = [e for e in events if e.type == stream_pb2.FINAL and e.text.strip()]
     # With 5s windows and overlap, we should get several FINALs.
     assert len(finals) >= 3, f"Expected >=3 FINAL AsrEvents for full WAV, got {len(finals)}"
@@ -329,7 +353,13 @@ def test_realtime_asr_stream_s3_enrollment(localstack_s3, tmp_path):
             stub = stream_pb2_grpc.RealtimeASRStub(channel)
 
             audio = load_audio_mono_16k(test_wav_path)
-            events: List[stream_pb2.AsrEvent] = list(stub.Stream(gen_chunks("test-grpc-s3", audio, tenant_id=tenant)))
+            events: List[stream_pb2.AsrEvent] = list(
+                admitted_events(
+                    stub,
+                    "test-grpc-s3",
+                    gen_chunks("test-grpc-s3", audio, tenant_id=tenant),
+                )
+            )
 
         assert events, "Expected some AsrEvents"
         speakers = {e.speaker for e in events if e.speaker}

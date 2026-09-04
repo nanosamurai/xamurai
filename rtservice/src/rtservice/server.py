@@ -15,6 +15,7 @@ from proto_gen import stream_pb2
 from proto_gen import stream_pb2_grpc
 from rtservice.engine import RealtimeEngine
 from rtservice.providers import SpeechProviderError
+from xamurai_serving import SessionSlots, max_sessions_from_env, serving_instance_id
 
 from drsynth_common.logging_setup import setup_logging, set_session_id_for_logging
 from drsynth_common.otel_setup import setup_otel, extract_trace_context_from_headers
@@ -218,6 +219,8 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
     def __init__(self, engine: RealtimeEngine) -> None:
         self._engine = engine
         self._log = logging.getLogger(__name__)
+        self._slots = SessionSlots(max_sessions_from_env())
+        self._instance_id = serving_instance_id()
 
     def GetCapabilities(self, request, context):
         """Return the fixed provider capabilities and pinned runtime provenance."""
@@ -236,7 +239,7 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
             stateful=capabilities.stateful,
             preferred_sample_rate=capabilities.preferred_sample_rate,
             maximum_audio_seconds=capabilities.maximum_audio_seconds,
-            maximum_concurrent_sessions=capabilities.maximum_concurrent_sessions,
+            maximum_concurrent_sessions=self._slots.maximum,
             runtime=provenance.runtime,
             model_revision=provenance.model_revision,
             model_digest=provenance.model_digest,
@@ -262,9 +265,6 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
 
         if _M_STREAMS_TOTAL:
             _M_STREAMS_TOTAL.inc()
-        if _M_ACTIVE_STREAMS:
-            _M_ACTIVE_STREAMS.inc()
-
         peer = ""
         try:
             peer = context.peer()  # type: ignore[attr-defined]
@@ -292,7 +292,22 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                     span_cm = None
                     span = None
 
+            opening_session_id = md.get("x-session-id", "").strip()
+            if not opening_session_id:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "SESSION_ID_REQUIRED")
+            if not self._slots.acquire():
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "REPLICA_FULL")
+            if _M_ACTIVE_STREAMS:
+                _M_ACTIVE_STREAMS.inc()
+
             try:
+                provider = self._engine.default_provider()
+                yield stream_pb2.AsrEvent(
+                    session_id=opening_session_id,
+                    type=stream_pb2.SESSION_ACCEPTED,
+                    provider_profile_id=provider.profile_id,
+                    serving_instance_id=self._instance_id,
+                )
                 if overrides:
                     self._log.info("RealtimeASR stream overrides enabled: %s", sorted(overrides.keys()))
 
@@ -311,7 +326,12 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                             _M_SEND_EVENT_SECONDS.observe(send_dt)
 
                 for chunk in request_iterator:
-                    session_id = chunk.session_id or "unknown"
+                    if chunk.session_id != opening_session_id:
+                        context.abort(
+                            grpc.StatusCode.INVALID_ARGUMENT,
+                            "SESSION_ID_MISMATCH",
+                        )
+                    session_id = opening_session_id
                     tenant_id = getattr(chunk, "tenant_id", "") or None
                     lang = getattr(chunk, "lang", "") or None
                     sample_rate = getattr(chunk, "sample_rate", 0) or self._engine.cfg.sr
@@ -440,6 +460,7 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
                         _M_ACTIVE_STREAMS.dec()
                     except Exception:
                         pass
+                self._slots.release()
                 if span_cm is not None:
                     try:
                         span_cm.__exit__(None, None, None)

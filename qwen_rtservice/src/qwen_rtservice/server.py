@@ -5,7 +5,6 @@ import importlib.metadata
 import logging
 import math
 import os
-import threading
 from concurrent import futures
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +20,7 @@ from qwen_rtservice.enrichment import (
     PyannoteDiarizer,
     QwenEpochEnricher,
 )
+from xamurai_serving import SessionSlots, max_sessions_from_env, serving_instance_id
 
 
 logger = logging.getLogger(__name__)
@@ -299,7 +299,8 @@ class QwenRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
         self._enricher = enricher
         self._epoch_samples = max(1, int(float(epoch_seconds) * SAMPLE_RATE))
         self._context_characters = max(0, int(context_characters))
-        self._slot = threading.BoundedSemaphore(1)
+        self._slots = SessionSlots(max_sessions_from_env())
+        self._instance_id = serving_instance_id()
 
     def GetCapabilities(self, request, context):
         """Describe the fixed Qwen profile without accepting model selection."""
@@ -319,7 +320,7 @@ class QwenRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             stateful=True,
             preferred_sample_rate=SAMPLE_RATE,
             maximum_audio_seconds=0,
-            maximum_concurrent_sessions=1,
+            maximum_concurrent_sessions=self._slots.maximum,
             runtime=self._backend.runtime,
             model_revision=MODEL_REVISION,
             model_digest=MODEL_DIGEST,
@@ -334,11 +335,15 @@ class QwenRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
 
     def Stream(self, request_iterator, context):
         """Transcribe one public audio stream and flush a final result at EOF."""
-        if not self._slot.acquire(blocking=False):
-            context.abort(
-                grpc.StatusCode.RESOURCE_EXHAUSTED,
-                "Qwen realtime service has reached its session limit",
-            )
+        metadata = {
+            str(key).lower(): str(value)
+            for key, value in (context.invocation_metadata() or ())
+        }
+        opening_session_id = metadata.get("x-session-id", "").strip()
+        if not opening_session_id:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "SESSION_ID_REQUIRED")
+        if not self._slots.acquire():
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "REPLICA_FULL")
 
         state = None
         total_samples = 0
@@ -353,7 +358,15 @@ class QwenRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
         expected_sequence = None
         language = None
         try:
+            yield stream_pb2.AsrEvent(
+                session_id=opening_session_id,
+                type=stream_pb2.SESSION_ACCEPTED,
+                provider_profile_id=PROFILE_ID,
+                serving_instance_id=self._instance_id,
+            )
             for chunk in request_iterator:
+                if chunk.session_id != opening_session_id:
+                    raise _InvalidRequest("SESSION_ID_MISMATCH")
                 error = self._validate_chunk(
                     chunk,
                     session_id=session_id,
@@ -471,7 +484,7 @@ class QwenRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                 logger.error("Qwen realtime stream failed error_type=%s", type(exc).__name__)
                 context.abort(grpc.StatusCode.INTERNAL, "Qwen realtime inference failed")
         finally:
-            self._slot.release()
+            self._slots.release()
 
     def _validate_chunk(
         self,

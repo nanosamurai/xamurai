@@ -24,7 +24,12 @@ message AudioChunk {
   string tenant_id = 8;
 }
 
-enum AsrType { PARTIAL = 0; FINAL = 1; }
+enum AsrType {
+  PARTIAL = 0;
+  FINAL = 1;
+  // First server response. Audio must not be sent before this is received.
+  SESSION_ACCEPTED = 2;
+}
 
 message AsrEvent {
   string  session_id = 1;
@@ -35,6 +40,8 @@ message AsrEvent {
   string  lang       = 6; // optional (e.g., "cs")
   string speaker    = 7;
   string provider_profile_id = 8;
+  // Server-generated process identity, populated only on SESSION_ACCEPTED.
+  string serving_instance_id = 9;
 }
 
 message DiarEvent {

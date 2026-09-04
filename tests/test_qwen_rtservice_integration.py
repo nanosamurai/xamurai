@@ -55,6 +55,22 @@ def _chunk(*, session_id="qwen-session", sequence=1, lang="cs", samples=1600):
     )
 
 
+def _stream(stub, requests, *, session_id="qwen-session", timeout=2):
+    return stub.Stream(
+        requests,
+        timeout=timeout,
+        metadata=(("x-session-id", session_id),),
+    )
+
+
+def _transcript_events(stub, requests, *, session_id="qwen-session", timeout=2):
+    events = list(_stream(stub, requests, session_id=session_id, timeout=timeout))
+    assert events[0].type == stream_pb2.SESSION_ACCEPTED
+    assert events[0].session_id == session_id
+    assert events[0].serving_instance_id
+    return events[1:]
+
+
 def test_qwen_rtservice_exposes_capabilities_and_native_stream(monkeypatch):
     monkeypatch.setenv("QWEN_RTSERVICE_BIND_ADDR", "127.0.0.1")
     backend = _FakeQwenBackend()
@@ -64,7 +80,7 @@ def test_qwen_rtservice_exposes_capabilities_and_native_stream(monkeypatch):
     try:
         stub = stream_pb2_grpc.RealtimeASRStub(channel)
         capabilities = stub.GetCapabilities(stream_pb2.RealtimeCapabilitiesRequest(), timeout=2)
-        events = list(stub.Stream(iter([_chunk()]), timeout=2))
+        events = _transcript_events(stub, iter([_chunk()]))
 
         assert capabilities.provider_profile_id == PROFILE_ID
         assert capabilities.native_streaming is True
@@ -106,13 +122,24 @@ def test_qwen_client_cancellation_releases_session_without_error(monkeypatch, ca
     caplog.set_level(logging.ERROR)
     try:
         stub = stream_pb2_grpc.RealtimeASRStub(channel)
-        cancelled = stub.Stream(held_request(), timeout=5)
+        cancelled = _stream(stub, held_request(), session_id="cancelled", timeout=5)
+        assert next(cancelled).type == stream_pb2.SESSION_ACCEPTED
         assert next(cancelled).text == "native partial"
+
+        with pytest.raises(grpc.RpcError) as full:
+            list(_stream(stub, iter(()), session_id="rejected", timeout=2))
+        assert full.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
+        assert full.value.details() == "REPLICA_FULL"
+
         cancelled.cancel()
         release_request.set()
         time.sleep(0.1)
 
-        recovered = list(stub.Stream(iter([_chunk(session_id="recovered")]), timeout=2))
+        recovered = _transcript_events(
+            stub,
+            iter([_chunk(session_id="recovered")]),
+            session_id="recovered",
+        )
         assert [event.text for event in recovered] == ["native partial", "native final"]
         assert "Qwen realtime stream failed" not in caplog.text
     finally:
@@ -141,11 +168,21 @@ def test_qwen_inference_failure_does_not_kill_rtservice(monkeypatch):
     try:
         stub = stream_pb2_grpc.RealtimeASRStub(channel)
         with pytest.raises(grpc.RpcError) as failure:
-            list(stub.Stream(iter([_chunk(session_id="failure")]), timeout=2))
+            list(
+                _stream(
+                    stub,
+                    iter([_chunk(session_id="failure")]),
+                    session_id="failure",
+                )
+            )
         assert failure.value.code() == grpc.StatusCode.INTERNAL
         assert failure.value.details() == "Qwen realtime inference failed"
 
-        recovered = list(stub.Stream(iter([_chunk(session_id="recovered")]), timeout=2))
+        recovered = _transcript_events(
+            stub,
+            iter([_chunk(session_id="recovered")]),
+            session_id="recovered",
+        )
         assert [event.text for event in recovered] == ["native partial", "native final"]
     finally:
         channel.close()
@@ -160,7 +197,7 @@ def test_qwen_rtservice_rejects_noncontiguous_audio(monkeypatch):
     try:
         stub = stream_pb2_grpc.RealtimeASRStub(channel)
         with pytest.raises(grpc.RpcError) as failure:
-            list(stub.Stream(iter([_chunk(sequence=1), _chunk(sequence=3)]), timeout=2))
+            list(_stream(stub, iter([_chunk(sequence=1), _chunk(sequence=3)])))
         assert failure.value.code() == grpc.StatusCode.INVALID_ARGUMENT
         assert failure.value.details() == "audio chunk sequence is not contiguous"
     finally:
@@ -178,7 +215,7 @@ def test_qwen_rtservice_rejects_unsupported_language_code(monkeypatch):
         chunk = _chunk()
         chunk.lang = "zz"
         with pytest.raises(grpc.RpcError) as failure:
-            list(stub.Stream(iter([chunk]), timeout=2))
+            list(_stream(stub, iter([chunk])))
         assert failure.value.code() == grpc.StatusCode.INVALID_ARGUMENT
         assert failure.value.details() == (
             "Qwen realtime service does not support the requested language code"
@@ -286,7 +323,7 @@ def test_qwen_supported_language_final_is_aligned_and_diarized(monkeypatch):
     try:
         stub = stream_pb2_grpc.RealtimeASRStub(channel)
         capabilities = stub.GetCapabilities(stream_pb2.RealtimeCapabilitiesRequest(), timeout=2)
-        events = list(stub.Stream(iter([_chunk(lang="en")]), timeout=2))
+        events = _transcript_events(stub, iter([_chunk(lang="en")]))
         finals = [event for event in events if event.type == stream_pb2.FINAL]
 
         assert capabilities.segment_timestamps is True
@@ -314,11 +351,9 @@ def test_qwen_enrichment_limit_or_failure_preserves_speakerless_final(monkeypatc
     server.start()
     channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
     try:
-        events = list(
-            stream_pb2_grpc.RealtimeASRStub(channel).Stream(
-                iter([_chunk(lang=lang)]),
-                timeout=2,
-            )
+        events = _transcript_events(
+            stream_pb2_grpc.RealtimeASRStub(channel),
+            iter([_chunk(lang=lang)]),
         )
         final = events[-1]
         assert final.type == stream_pb2.FINAL
@@ -444,7 +479,12 @@ def test_qwen_rtservice_rolls_epochs_without_public_cutoff_or_duplicate_text(mon
 
     try:
         stub = stream_pb2_grpc.RealtimeASRStub(channel)
-        events = list(stub.Stream(chunks(), timeout=10))
+        events = _transcript_events(
+            stub,
+            chunks(),
+            session_id="long-qwen-session",
+            timeout=10,
+        )
 
         final_events = [event for event in events if event.type == stream_pb2.FINAL]
         assert events[-1].type == stream_pb2.FINAL

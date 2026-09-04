@@ -69,6 +69,29 @@ Natural request EOF is the flush signal. A service drains accepted chunks,
 emits its terminal result when available, and completes its response stream.
 Cancellation is immediate teardown and does not synthesize a final result.
 
+### Replica-local admission
+
+Every `Stream` RPC carries `x-session-id` metadata. Before consuming any
+`AudioChunk`, the serving process atomically reserves one of its
+`RT_SERVING_MAX_SESSIONS` slots (default `1`). A successful reservation is the
+first response:
+
+```text
+AsrEvent(type=SESSION_ACCEPTED, session_id=..., serving_instance_id=...)
+```
+
+The caller must wait for that event before sending audio. A full process ends
+the unadmitted RPC with gRPC `RESOURCE_EXHAUSTED` and the stable description
+`REPLICA_FULL`; it has consumed no audio and is therefore safe for a client to
+retry on another resolved replica. The slot is released on EOF, cancellation,
+or failure. `GetCapabilities.maximum_concurrent_sessions` reports the same
+configured process limit.
+
+Admission is intentionally process-local. There is no tenant quota, shared
+database, pod registry, or global scheduler in this layer. Deployment DNS and
+the caller's load-balancing policy distribute new streams; a stream remains on
+the accepting process for its entire stateful lifetime.
+
 ## Internal implementation boundaries
 
 The Faster service retains the `SpeechProvider` Python Protocol because it
@@ -90,7 +113,7 @@ peer.
 | BFF track | Provider profile | Runtime and mode | Timing claims |
 | --- | --- | --- | --- |
 | `faster-whisper` | `faster-whisper-medium-ctranslate2-r1` | `Systran/faster-whisper-medium`; Faster-Whisper 1.2 / CTranslate2 4.6; `pyannote/speaker-diarization-3.1`; contextual windowed realtime with optional Silero VAD and enrollment mapping | Internal absolute word timestamps with deterministic seam ownership; public coalesced speaker segments |
-| `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `Qwen/Qwen3-ASR-0.6B`; `Qwen/Qwen3-ForcedAligner-0.6B`; `pyannote/speaker-diarization-3.1`; `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
+| `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `Qwen/Qwen3-ASR-0.6B`; `Qwen/Qwen3-ForcedAligner-0.6B`; `pyannote/speaker-diarization-3.1`; `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session by default | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
 
 The Qwen profile pins `Qwen/Qwen3-ASR-0.6B` revision
 `c4468bdb552ddc559e464f6081e22dd4034f2e68` and verifies the
@@ -207,8 +230,9 @@ GPU allocation, which reserved roughly 10 GiB for the earlier 0.65 setting on
 the 24 GiB development GPU despite the 0.6B model size.
 
 The profile advertises `maximum_audio_seconds=0`, meaning the public stream has
-no provider-imposed duration cutoff. It still advertises the real one-session
-concurrency limit. `speaker_labels` and `segment_timestamps` are true when the
+no provider-imposed duration cutoff. It advertises the process's configured
+`RT_SERVING_MAX_SESSIONS` limit; the Qwen profile remains qualified at the
+default of one. `speaker_labels` and `segment_timestamps` are true when the
 enricher is active, `word_timestamps` remains false, and
 `aligned_diarized_languages` contains only the public language codes reported
 by the pinned aligner. Epoch duration is an internal compute bound, not a
