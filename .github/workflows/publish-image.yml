@@ -80,6 +80,10 @@ jobs:
             dockerfile: qwen_rtservice/Dockerfile
             context: .
             ghcr_repo: xamurai-qwen-rtservice
+          - image: nemotron-rtservice
+            dockerfile: nemotron_rtservice/Dockerfile
+            context: .
+            ghcr_repo: xamurai-nemotron-rtservice
 
     steps:
       - name: Checkout

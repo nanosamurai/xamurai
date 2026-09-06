@@ -1,11 +1,11 @@
 # Modular realtime ASR services
 
-Faster-Whisper and Qwen are peer services behind the same public
+Faster-Whisper, Qwen, and Nemotron are peer services behind the same public
 `RealtimeASR` gRPC API. SamuraiBFF owns the configured track list and fans one
 accepted audio stream out to those peers. There is no
 `rtservice -> SpeechProvider gRPC -> Qwen` hop.
 The repository [README](../README.md#model-pipelines) summarizes every Xamurai
-service's model pipeline; this guide defines the realtime contract and the two
+service's model pipeline; this guide defines the realtime contract and the three
 current fixed provider profiles in detail.
 
 ```mermaid
@@ -38,14 +38,23 @@ flowchart LR
         end
     end
 
+    subgraph nemotronImage["Docker image: xamurai-nemotron-rtservice"]
+        subgraph nemotronService["Compose service: nemotron-rtservice"]
+            NemotronAPI["RealtimeASR\nGetCapabilities + Stream"]
+            NemotronNative["Nemotron 3.5 ASR 0.6B Q8\nNeMo-Speech.cpp cache stream"]
+        end
+    end
+
     WS --> Fanout
     WS --> KafkaOnce
     Fanout -->|"track=faster-whisper"| FasterAPI
     Fanout -->|"track=qwen"| QwenAPI
+    Fanout -->|"track=nemotron"| NemotronAPI
     FasterAPI --> SpeechProvider --> Faster --> FasterJoin
     FasterAPI -->|"FINAL audio"| FasterDiar --> FasterJoin
     QwenAPI --> QwenBackend --> QwenAligner --> QwenJoin
     QwenAPI -->|"epoch PCM"| QwenDiar --> QwenJoin
+    NemotronAPI --> NemotronNative
 ```
 
 ## Common service contract
@@ -108,12 +117,56 @@ official Qwen library for tests. This avoids daisy-chained gRPC services and
 lets either realtime implementation be deployed, restarted, and scaled as a
 peer.
 
+The Nemotron service follows the same isolated-peer shape, but its test seam is
+the much smaller `NemotronBackend` Protocol. Production uses one shared,
+thread-safe NeMo-Speech.cpp recognizer and one opaque native stream per admitted
+RPC. The gRPC worker that opens a native stream is its sole driver; compatible
+work from concurrent streams may be microbatched below that boundary without
+sharing stream cache rows.
+
 ## Fixed profiles
 
 | BFF track | Provider profile | Runtime and mode | Timing claims |
 | --- | --- | --- | --- |
 | `faster-whisper` | `faster-whisper-medium-ctranslate2-r1` | `Systran/faster-whisper-medium`; Faster-Whisper 1.2 / CTranslate2 4.6; `pyannote/speaker-diarization-3.1`; contextual windowed realtime with optional Silero VAD and enrollment mapping | Internal absolute word timestamps with deterministic seam ownership; public coalesced speaker segments |
 | `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `Qwen/Qwen3-ASR-0.6B`; `Qwen/Qwen3-ForcedAligner-0.6B`; `pyannote/speaker-diarization-3.1`; `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session by default | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
+| `nemotron` | `nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r1` | `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF; `nemo-speech-cpp==0.1.0`; cache-aware RNNT streaming; one concurrent session per replica by default | Native partials and finals with processed-audio duration; no segment, word, or speaker-label claim |
+
+The Nemotron profile pins the model repository at revision
+`24b151a851dd15909e1fc611b11bb2da52b9fc81` and accepts only
+`nemotron-3.5-asr-streaming-0.6b.q8_0.gguf`, whose SHA-256 is
+`a5c435f294eea8f88ce68dd27b8c3bfea7f777cb2fbba04fcd30eaa555f429ae`.
+It also builds NeMo-Speech.cpp 0.1.0 at commit
+`4f9676226f667d14608487df744f375db87127f8`. The runtime downloads no code
+from the model repository and exposes no client-controlled model path,
+revision, or decoding option. Deployment requires accepting NVIDIA's Open
+Model Development and Weights License 1.1 for the model artifact.
+
+## Nemotron native-streaming lifecycle
+
+The Nemotron container builds only NeMo-Speech.cpp's stable ASR C ABI and its
+CUDA backend. It omits the upstream HTTP, gRPC, CLI, translation, TTS,
+diarization, normalization, and language-model components. Python owns the
+existing Xamurai `RealtimeASR` boundary and passes each incoming PCM16 chunk
+once, converted to normalized float32, to
+`nemo_speech_asr_stream_push_f32`. It never rebuilds or re-feeds a session audio
+prefix. `nemo_speech_asr_stream_next` advances the cache-aware encoder and
+drains all currently available updates; EOF calls `finish`, drains the tail,
+and closes the opaque stream. Cancellation and every error path close the
+stream and release the admission slot exactly once.
+
+The fixed streaming geometry uses 160 ms chunks, 1.92 seconds of CTC padding,
+and RNNT right-context mode `1` (roughly 160 ms). Public language codes are
+allowlisted and translated to the fixed model's locale strings. The service
+accepts only mono PCM16 at 16 kHz, bounds individual payloads to 1 MiB, bounds
+session identifiers, runs as UID 10003, disables Hugging Face telemetry, and
+does not log audio or transcript contents.
+
+`RT_SERVING_MAX_SESSIONS=1` remains the validation default. A value above one
+enables NeMo-Speech.cpp batching with `max_batch_size` and
+`state_arena_slots` equal to the admitted-session limit; no additional model
+copy or scheduler is introduced. Local Compose scales process replicas instead,
+using two one-session containers behind one DNS name for the Phase 2b proof.
 
 The Qwen profile pins `Qwen/Qwen3-ASR-0.6B` revision
 `c4468bdb552ddc559e464f6081e22dd4034f2e68` and verifies the
@@ -256,14 +309,17 @@ finalization path therefore remains unchanged and is not duplicated per model.
 
 ## Validation
 
-The lightweight Xamurai suite covers both real localhost gRPC service
+The lightweight Xamurai suite covers all three real localhost gRPC service
 boundaries with fake model backends, including capabilities, native
 partial/final delivery, contiguous sequencing, cancellation permit recovery,
 safe inference/enrichment failure with coarse fallback, overlap-based speaker
 assignment with nearest-turn handling at silence boundaries,
 subsequent-session recovery, and a synthetic stream
 longer than 300 seconds that crosses more than 30 bounded epochs without
-duplicate or discontinuous public segments. BFF integration tests
+duplicate or discontinuous public segments. Nemotron tests additionally prove
+that successive native pushes contain only the newly arrived chunk and that a
+two-slot process rejects a third stream before audio, then recovers after
+cancellation. BFF integration tests
 send one WebSocket audio stream to two fake `RealtimeASR` peers and prove that
 all accepted chunks, EOF, and track-labelled terminal events reach both.
 

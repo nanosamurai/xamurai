@@ -17,6 +17,8 @@ do not live in this service repository.
 - `qwen_rtservice` exposes the same `RealtimeASR` API using Qwen3-ASR's native
   vLLM streaming implementation, then forced-aligns and pyannote-diarizes each
   bounded final epoch when the detected language is supported.
+- `nemotron_rtservice` exposes the same API using Nemotron 3.5 ASR's
+  cache-aware streaming graph through the stable NeMo-Speech.cpp C ABI.
 - `whisperx_worker` consumes `audio.raw` and emits window-based
   `transcripts.refined` events.
 - `recorder_worker` consumes `audio.raw`, stores session audio, and emits
@@ -68,14 +70,23 @@ flowchart LR
         end
     end
 
+    subgraph nemotronImage["Docker image: xamurai-nemotron-rtservice"]
+        subgraph nemotronService["Compose service: nemotron-rtservice"]
+            NemotronAPI["RealtimeASR\nGetCapabilities + Stream"]
+            NemotronNative["Nemotron 3.5 ASR 0.6B Q8\nNeMo-Speech.cpp cache stream"]
+        end
+    end
+
     WS --> Fanout
     WS --> KafkaOnce
     Fanout -->|"track=faster-whisper"| FasterAPI
     Fanout -->|"track=qwen"| QwenAPI
+    Fanout -->|"track=nemotron"| NemotronAPI
     FasterAPI --> SpeechProvider --> Faster --> FasterJoin
     FasterAPI -->|"FINAL audio"| FasterDiar --> FasterJoin
     QwenAPI --> QwenBackend --> QwenAligner --> QwenJoin
     QwenAPI -->|"epoch PCM"| QwenDiar --> QwenJoin
+    NemotronAPI --> NemotronNative
 ```
 
 The focused [modular realtime ASR guide](docs/modular-asr-providers.md) defines
@@ -88,6 +99,7 @@ fallbacks, and resource bounds.
 | --- | --- | --- | --- | --- |
 | `rtservice` | Realtime gRPC | Fixed `Systran/faster-whisper-medium` profile through Faster-Whisper/CTranslate2 | `pyannote/speaker-diarization-3.1`; optional `pyannote/embedding` enrollment mapping and Silero VAD | Replaceable partials; contextual, timestamp-owned, speaker-labelled finals |
 | `qwen_rtservice` | Realtime gRPC | Fixed `Qwen/Qwen3-ASR-0.6B` plus `Qwen/Qwen3-ForcedAligner-0.6B` | Fixed `pyannote/speaker-diarization-3.1` pipeline | Native-streaming partials; aligned and diarized epoch finals for supported alignment languages, with a coarse speakerless fallback |
+| `nemotron_rtservice` | Realtime gRPC | Fixed `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF through NeMo-Speech.cpp | None | Cache-aware native partials and final results; no timestamp or speaker-label claim |
 | `whisperx_worker` | Kafka refinement | WhisperX `medium` by default (`WHISPERX_MODEL` is operator-configurable) plus its language-specific alignment model | `pyannote/speaker-diarization-3.1` by default; optional `pyannote/embedding` enrollment mapping | Speaker-aware refined windows while the session is in progress |
 | `finalizer_worker` | Kafka completed-recording pipeline | Reuses the WhisperX ASR and language-alignment pipeline | Reuses the pyannote diarization and optional enrollment pipeline | Canonical full-session transcript with word timing where alignment succeeds |
 | `recorder_worker` | Kafka and object storage | None | None | Model-free session WAV assembly and completion notification |
@@ -118,6 +130,7 @@ session and tenant identifiers needed for correlation and isolation.
 - `proto/` and `proto_gen/`: protobuf contract and generated Python bindings
 - `rtservice/`: realtime gRPC service
 - `qwen_rtservice/`: isolated Qwen3-ASR/vLLM realtime service
+- `nemotron_rtservice/`: isolated Nemotron/NeMo-Speech.cpp realtime service
 - `whisperx_worker/`: near-realtime refinement worker
 - `recorder_worker/`: session recording worker
 - `finalizer_worker/`: full-session finalization worker
@@ -170,6 +183,7 @@ pytest -q -m "not integration" \
   tests/test_rtservice_session_isolation_unit.py \
   tests/test_speech_provider_integration.py \
   tests/test_qwen_rtservice_integration.py \
+  tests/test_nemotron_rtservice_integration.py \
   tests/test_stream_controls_unit.py
 ```
 
@@ -203,6 +217,7 @@ docker build -t xamurai-whisperx-worker:dev -f whisperx_worker/Dockerfile .
 docker build -t xamurai-recorder-worker:dev -f recorder_worker/Dockerfile .
 docker build -t xamurai-finalizer-worker:dev -f finalizer_worker/Dockerfile .
 docker build -t xamurai-qwen-rtservice:dev -f qwen_rtservice/Dockerfile .
+docker build -t xamurai-nemotron-rtservice:dev -f nemotron_rtservice/Dockerfile .
 ```
 
 The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
@@ -212,6 +227,7 @@ The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 - `ghcr.io/nanosamurai/xamurai-recorder-worker`
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
 - `ghcr.io/nanosamurai/xamurai-qwen-rtservice`
+- `ghcr.io/nanosamurai/xamurai-nemotron-rtservice`
 
 ## Configuration
 
@@ -243,6 +259,14 @@ Qwen realtime service settings include:
   `QWEN_MAX_MODEL_LEN`
 - `QWEN_KV_CACHE_MIB` (an explicit vLLM KV-cache allocation rather than a
   fraction of all available VRAM)
+
+Nemotron realtime service settings include:
+
+- `NEMOTRON_RTSERVICE_PORT` (default `50052`)
+- `NEMOTRON_GPU` (default `0`)
+- `NEMOTRON_RNNT_RIGHT_CONTEXT` (default `1`, about 160 ms)
+- `RT_SERVING_MAX_SESSIONS` (default `1`; values above one enable native
+  cross-session microbatching with the same number of independent cache slots)
 
 Worker settings include:
 
