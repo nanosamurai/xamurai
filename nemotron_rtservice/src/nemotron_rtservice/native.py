@@ -12,7 +12,7 @@ import numpy as np
 
 MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
 MODEL_FILENAME = "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
-MODEL_REVISION = "24b151a851dd15909e1fc611b11bb2da52b9fc81"
+MODEL_REVISION = "1c8deaecc64b91f034d73e08dd8b64625eb3395d"
 MODEL_DIGEST = "sha256:a5c435f294eea8f88ce68dd27b8c3bfea7f777cb2fbba04fcd30eaa555f429ae"
 NEMO_SPEECH_VERSION = "0.1.0"
 NEMO_SPEECH_REVISION = "4f9676226f667d14608487df744f375db87127f8"
@@ -280,7 +280,7 @@ class NativeNemotronBackend:
         _configure_library(self._library)
         reported_version = self._library.nemo_speech_asr_version()
         version = reported_version.decode("ascii", errors="replace") if reported_version else ""
-        if version != NEMO_SPEECH_VERSION:
+        if version != f"nemo-speech-asr {NEMO_SPEECH_VERSION}":
             raise RuntimeError("NeMo-Speech.cpp runtime version does not match the image profile")
 
         model_path_bytes = _verified_model_path().encode("utf-8")

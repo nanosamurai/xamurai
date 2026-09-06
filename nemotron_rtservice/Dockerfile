@@ -3,7 +3,7 @@
 ARG CUDA_VERSION=12.8.1
 ARG UBUNTU_VERSION=24.04
 
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS native-builder
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}@sha256:520292dbb4f755fd360766059e62956e9379485d9e073bbd2f6e3c20c270ed66 AS native-builder
 
 ARG NEMO_SPEECH_REVISION=4f9676226f667d14608487df744f375db87127f8
 ENV DEBIAN_FRONTEND=noninteractive
@@ -61,7 +61,7 @@ RUN cmake -G Ninja -S /work -B /work/build \
     && cmake --build /work/build \
     && cmake --install /work/build --prefix /opt/nemo-speech
 
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -89,7 +89,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir \
+    && /opt/venv/bin/pip install --no-cache-dir --retries 5 --timeout 120 \
       "grpcio==1.76.0" \
       "huggingface-hub==0.36.0" \
       "numpy==2.2.3" \
@@ -116,4 +116,3 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=15m --retries=3 \
 
 ENTRYPOINT []
 CMD ["python", "-m", "nemotron_rtservice.server"]
-

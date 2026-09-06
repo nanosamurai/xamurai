@@ -133,7 +133,7 @@ sharing stream cache rows.
 | `nemotron` | `nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r1` | `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF; `nemo-speech-cpp==0.1.0`; cache-aware RNNT streaming; one concurrent session per replica by default | Native partials and finals with processed-audio duration; no segment, word, or speaker-label claim |
 
 The Nemotron profile pins the model repository at revision
-`24b151a851dd15909e1fc611b11bb2da52b9fc81` and accepts only
+`1c8deaecc64b91f034d73e08dd8b64625eb3395d` and accepts only
 `nemotron-3.5-asr-streaming-0.6b.q8_0.gguf`, whose SHA-256 is
 `a5c435f294eea8f88ce68dd27b8c3bfea7f777cb2fbba04fcd30eaa555f429ae`.
 It also builds NeMo-Speech.cpp 0.1.0 at commit
