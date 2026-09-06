@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import time
 import wave
 
 import grpc
@@ -49,17 +50,46 @@ def _open(stub, session_id: str, timeout: int):
         timeout=timeout,
         metadata=(("x-session-id", session_id),),
     )
-    accepted = next(responses)
+    try:
+        accepted = next(responses)
+    except Exception:
+        requests.finish()
+        responses.cancel()
+        raise
     if accepted.type != stream_pb2.SESSION_ACCEPTED or not accepted.serving_instance_id:
+        requests.finish()
+        responses.cancel()
         raise RuntimeError("provider did not complete the admission handshake")
     return requests, responses, accepted.serving_instance_id
+
+
+def _open_with_admission_retry(stub, session_id: str, timeout: int):
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = max(1, int(deadline - time.monotonic()))
+        try:
+            return _open(stub, session_id, remaining)
+        except grpc.RpcError as exc:
+            if (
+                exc.code() != grpc.StatusCode.RESOURCE_EXHAUSTED
+                or time.monotonic() >= deadline
+            ):
+                raise
+            # A round-robin DNS channel can make its first calls before every
+            # resolved subchannel reaches READY. Retry admission so it can
+            # select another replica while existing streams remain held.
+            time.sleep(0.1)
 
 
 def verify_replicas(stub, count: int, timeout: int) -> None:
     held = []
     try:
         for index in range(count):
-            held.append(_open(stub, f"nemotron-probe-{index + 1}", timeout))
+            held.append(
+                _open_with_admission_retry(
+                    stub, f"nemotron-probe-{index + 1}", timeout
+                )
+            )
         instance_ids = {instance_id for _, _, instance_id in held}
         if len(instance_ids) != count:
             raise RuntimeError(
@@ -82,7 +112,9 @@ def transcribe_wav(stub, path: str, timeout: int) -> None:
             raise ValueError("probe WAV must be mono PCM16 at 16000 Hz")
         audio = source.readframes(source.getnframes())
 
-    requests, responses, _ = _open(stub, "nemotron-audio-probe", timeout)
+    requests, responses, _ = _open_with_admission_retry(
+        stub, "nemotron-audio-probe", timeout
+    )
     chunk_bytes = 3_200 * 2
     for sequence, offset in enumerate(range(0, len(audio), chunk_bytes), start=1):
         requests.send(
