@@ -268,6 +268,11 @@ Nemotron realtime service settings include:
 - `RT_SERVING_MAX_SESSIONS` (default `1`; values above one enable native
   cross-session microbatching with the same number of independent cache slots)
 
+Nemotron uses NeMo-Speech.cpp's native token-silence endpointing (800 ms) so
+each utterance is committed independently. A 30-second forced endpoint is the
+hard backstop for uninterrupted speech; this bounds replaceable partial text
+without limiting the total stream duration.
+
 Worker settings include:
 
 - `WHISPERX_SLICE_SECONDS`, `WHISPERX_IDLE_SECONDS`, and diarization guardrails

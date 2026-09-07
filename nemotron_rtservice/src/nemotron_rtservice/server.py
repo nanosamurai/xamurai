@@ -107,6 +107,7 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
         expected_sequence: Optional[int] = None
         language: Optional[str] = None
         last_partial = ""
+        segment_start_s = 0.0
         try:
             yield stream_pb2.AsrEvent(
                 session_id=opening_session_id,
@@ -135,7 +136,16 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                     text = update.text.strip()
                     if not text or (not update.final and text == last_partial):
                         continue
-                    yield self._event(opening_session_id, update, total_samples, language or "")
+                    event = self._event(
+                        opening_session_id,
+                        update,
+                        total_samples,
+                        language or "",
+                        segment_start_s,
+                    )
+                    yield event
+                    if update.final:
+                        segment_start_s = event.end_s
                     last_partial = "" if update.final else text
 
             if native_stream is not None and context.is_active():
@@ -143,7 +153,16 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                     text = update.text.strip()
                     if not text or (not update.final and text == last_partial):
                         continue
-                    yield self._event(opening_session_id, update, total_samples, language or "")
+                    event = self._event(
+                        opening_session_id,
+                        update,
+                        total_samples,
+                        language or "",
+                        segment_start_s,
+                    )
+                    yield event
+                    if update.final:
+                        segment_start_s = event.end_s
                     last_partial = "" if update.final else text
         except _InvalidRequest as exc:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
@@ -183,13 +202,13 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
 
     @staticmethod
     def _event(session_id: str, update: TranscriptUpdate, total_samples: int,
-               fallback_language: str):
+               fallback_language: str, segment_start_s: float):
         total_seconds = total_samples / SAMPLE_RATE
         processed = update.audio_processed_s
         end_seconds = min(total_seconds, max(0.0, processed)) if processed > 0 else total_seconds
         return stream_pb2.AsrEvent(
             session_id=session_id,
-            start_s=0.0,
+            start_s=min(end_seconds, max(0.0, segment_start_s)),
             end_s=end_seconds,
             text=update.text.strip(),
             type=stream_pb2.FINAL if update.final else stream_pb2.PARTIAL,

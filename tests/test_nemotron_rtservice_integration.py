@@ -123,6 +123,68 @@ def test_nemotron_stream_pushes_only_new_chunks_and_flushes_final(running_server
     assert native_stream.closed == 1
 
 
+def test_nemotron_final_starts_a_new_replacement_window():
+    class _EpochStream(_FakeStream):
+        def push(self, pcm16_le, sample_rate):
+            self.chunks.append((pcm16_le, sample_rate))
+            elapsed = sum(len(data) for data, _ in self.chunks) / 2 / 16_000
+            index = len(self.chunks)
+            return (
+                TranscriptUpdate(
+                    text=f"epoch-{1 if index < 3 else 2}-{index}",
+                    final=index == 2,
+                    audio_processed_s=elapsed,
+                    language="en-US",
+                ),
+            )
+
+        def finish(self):
+            return (
+                TranscriptUpdate(
+                    text="epoch-2-final",
+                    final=True,
+                    audio_processed_s=sum(len(data) for data, _ in self.chunks) / 2 / 16_000,
+                    language="en-US",
+                ),
+            )
+
+    class _EpochBackend(_FakeBackend):
+        def open(self, session_id, language):
+            stream = _EpochStream()
+            self.opens.append((session_id, language, stream))
+            return stream
+
+    backend = _EpochBackend()
+    server = create_server(backend, port=0, maximum_sessions=1)
+    server.start()
+    channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
+    try:
+        stub = stream_pb2_grpc.RealtimeASRStub(channel)
+        events = list(
+            _call(
+                stub,
+                iter(
+                    [
+                        _chunk(session_id="epoch-test", sequence=1),
+                        _chunk(session_id="epoch-test", sequence=2),
+                        _chunk(session_id="epoch-test", sequence=3),
+                    ]
+                ),
+                session_id="epoch-test",
+            )
+        )[1:]
+
+        assert [(event.start_s, event.end_s, event.type) for event in events] == [
+            (0.0, 0.1, stream_pb2.PARTIAL),
+            (0.0, 0.2, stream_pb2.FINAL),
+            (0.2, 0.3, stream_pb2.PARTIAL),
+            (0.2, 0.3, stream_pb2.FINAL),
+        ]
+    finally:
+        channel.close()
+        server.stop(grace=None).wait()
+
+
 class _HeldRequests:
     _END = object()
 

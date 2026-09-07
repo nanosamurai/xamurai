@@ -155,6 +155,12 @@ drains all currently available updates; EOF calls `finish`, drains the tail,
 and closes the opaque stream. Cancellation and every error path close the
 stream and release the admission slot exactly once.
 
+Native token-silence endpointing commits ordinary utterances after 800 ms of
+decoder silence. The adapter also requests a native endpoint after 30 seconds
+of uninterrupted speech. Each resulting final advances the public replacement
+window, so partial payloads remain bounded while one gRPC stream can continue
+for an arbitrarily long recording.
+
 The fixed streaming geometry uses 160 ms chunks, 1.92 seconds of CTC padding,
 and RNNT right-context mode `1` (roughly 160 ms). Public language codes are
 allowlisted and translated to the fixed model's locale strings. The service

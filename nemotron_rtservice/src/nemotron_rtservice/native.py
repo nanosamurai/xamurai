@@ -16,6 +16,8 @@ MODEL_REVISION = "1c8deaecc64b91f034d73e08dd8b64625eb3395d"
 MODEL_DIGEST = "sha256:a5c435f294eea8f88ce68dd27b8c3bfea7f777cb2fbba04fcd30eaa555f429ae"
 NEMO_SPEECH_VERSION = "0.1.0"
 NEMO_SPEECH_REVISION = "4f9676226f667d14608487df744f375db87127f8"
+ENDPOINTING_SILENCE_MS = 800
+MAX_UTTERANCE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,15 @@ class _BatchingConfig(ctypes.Structure):
     ]
 
 
+class _EndpointingConfig(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_size_t),
+        ("enable", ctypes.c_bool),
+        ("vad_based", ctypes.c_bool),
+        ("stop_history_eou_ms", ctypes.c_int32),
+    ]
+
+
 class _RecognizerConfig(ctypes.Structure):
     _fields_ = [
         ("size", ctypes.c_size_t),
@@ -72,7 +83,7 @@ class _RecognizerConfig(ctypes.Structure):
         ("streaming", ctypes.POINTER(_StreamingConfig)),
         ("decoder", ctypes.c_void_p),
         ("vad", ctypes.c_void_p),
-        ("endpointing", ctypes.c_void_p),
+        ("endpointing", ctypes.POINTER(_EndpointingConfig)),
         ("postproc", ctypes.c_void_p),
         ("diar", ctypes.c_void_p),
         ("batching", ctypes.POINTER(_BatchingConfig)),
@@ -153,6 +164,8 @@ def _configure_library(library: ctypes.CDLL) -> None:
     library.nemo_speech_asr_stream_push_f32.restype = ctypes.c_int
     library.nemo_speech_asr_stream_next.argtypes = [ctypes.c_void_p, handle_ptr]
     library.nemo_speech_asr_stream_next.restype = ctypes.c_int
+    library.nemo_speech_asr_stream_force_endpoint.argtypes = [ctypes.c_void_p]
+    library.nemo_speech_asr_stream_force_endpoint.restype = ctypes.c_int
     library.nemo_speech_asr_stream_finish.argtypes = [ctypes.c_void_p]
     library.nemo_speech_asr_stream_finish.restype = ctypes.c_int
     library.nemo_speech_asr_stream_close.argtypes = [ctypes.c_void_p]
@@ -195,6 +208,8 @@ class NativeSession:
         self._closed = False
         self._request_id = request_id.encode("utf-8")
         self._language = language.encode("ascii") if language else None
+        self._input_audio_s = 0.0
+        self._last_final_audio_s = 0.0
         options = library.nemo_speech_asr_recognition_options_default()
         options.request_id = self._request_id
         options.language_code = self._language
@@ -217,7 +232,15 @@ class NativeSession:
             ),
             "push audio",
         )
-        return self._drain()
+        self._input_audio_s += samples.size / sample_rate
+        updates = self._drain()
+        if self._input_audio_s - self._last_final_audio_s >= MAX_UTTERANCE_SECONDS:
+            _check(
+                self._library.nemo_speech_asr_stream_force_endpoint(self._handle),
+                "force endpoint",
+            )
+            updates += self._drain()
+        return updates
 
     def finish(self) -> tuple[TranscriptUpdate, ...]:
         _check(self._library.nemo_speech_asr_stream_finish(self._handle), "finish stream")
@@ -246,16 +269,19 @@ class NativeSession:
                 if alternatives and self._library.nemo_speech_asr_result_language_count(result, 0):
                     encoded = self._library.nemo_speech_asr_result_language_code(result, 0, 0)
                     language = encoded.decode("utf-8", errors="replace") if encoded else ""
-                updates.append(
-                    TranscriptUpdate(
-                        text=transcript.decode("utf-8", errors="replace") if transcript else "",
-                        final=bool(self._library.nemo_speech_asr_result_is_final(result)),
-                        audio_processed_s=float(
-                            self._library.nemo_speech_asr_result_audio_processed(result)
-                        ),
-                        language=language,
-                    )
+                update = TranscriptUpdate(
+                    text=transcript.decode("utf-8", errors="replace") if transcript else "",
+                    final=bool(self._library.nemo_speech_asr_result_is_final(result)),
+                    audio_processed_s=float(
+                        self._library.nemo_speech_asr_result_audio_processed(result)
+                    ),
+                    language=language,
                 )
+                updates.append(update)
+                if update.final:
+                    self._last_final_audio_s = max(
+                        self._last_final_audio_s, update.audio_processed_s
+                    )
             finally:
                 self._library.nemo_speech_asr_result_destroy(result)
         return tuple(updates)
@@ -309,6 +335,12 @@ class NativeNemotronBackend:
             ingress_cohort_delay_us=1_000,
             state_arena_slots=maximum_sessions,
         )
+        endpointing = _EndpointingConfig(
+            size=ctypes.sizeof(_EndpointingConfig),
+            enable=True,
+            vad_based=False,
+            stop_history_eou_ms=ENDPOINTING_SILENCE_MS,
+        )
         config = _RecognizerConfig(
             size=ctypes.sizeof(_RecognizerConfig),
             backend=ctypes.pointer(backend),
@@ -316,7 +348,7 @@ class NativeNemotronBackend:
             streaming=ctypes.pointer(streaming),
             decoder=None,
             vad=None,
-            endpointing=None,
+            endpointing=ctypes.pointer(endpointing),
             postproc=None,
             diar=None,
             batching=ctypes.pointer(batching),
