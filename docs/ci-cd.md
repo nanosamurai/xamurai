@@ -14,6 +14,7 @@ They:
 
 - install the pinned dependencies from `requirements.ci.txt`
 - run unit tests that do not require Kafka, model downloads, or a GPU
+- bind the real gRPC conformance test servers to loopback only
 - scan the complete Git history for committed secrets without injecting any
   repository secret into pull request jobs
 

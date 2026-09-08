@@ -123,7 +123,8 @@ def test_nemotron_stream_pushes_only_new_chunks_and_flushes_final(running_server
     assert native_stream.closed == 1
 
 
-def test_nemotron_final_starts_a_new_replacement_window():
+def test_nemotron_final_starts_a_new_replacement_window(monkeypatch):
+    monkeypatch.setenv("NEMOTRON_RTSERVICE_BIND_ADDR", "127.0.0.1")
     class _EpochStream(_FakeStream):
         def push(self, pcm16_le, sample_rate):
             self.chunks.append((pcm16_le, sample_rate))
