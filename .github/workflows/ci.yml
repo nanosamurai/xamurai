@@ -3,6 +3,7 @@ name: CI
 on:
   pull_request:
     branches:
+      - enable-realtime-replica-routing
       - master
   workflow_call:
 
