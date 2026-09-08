@@ -73,6 +73,7 @@ def _open_with_admission_retry(stub, session_id: str, timeout: int):
         except grpc.RpcError as exc:
             if (
                 exc.code() != grpc.StatusCode.RESOURCE_EXHAUSTED
+                or exc.details() != "REPLICA_FULL"
                 or time.monotonic() >= deadline
             ):
                 raise

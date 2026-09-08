@@ -33,6 +33,11 @@ def test_unknown_speaker_is_not_promoted_to_a_known_slot():
     assert speaker_turns('Hello.', (SpeakerWord('Hello.', 0, 1, 0),), 0, 2)[0].speaker == 0
 
 
+def test_late_word_end_does_not_include_the_next_speaker_audio():
+    turns = speaker_turns('One. Two.', (SpeakerWord('One.', 0, 4, 1), SpeakerWord('Two.', 2, 5, 2)), 0, 5)
+    assert turns[0].end_s == turns[1].start_s == 2
+
+
 def test_invalid_diarization_flag_fails_startup(monkeypatch):
     monkeypatch.setenv('NEMOTRON_DIARIZATION', 'tru')
     with pytest.raises(ValueError, match='true or false'):
@@ -134,3 +139,22 @@ def test_storage_failure_is_anonymous_and_logs_no_object_details(monkeypatch, ca
     assert mapper.identify('a', np.ones(24000)) == ''
     assert 'RuntimeError' in caplog.text
     assert 'private object' not in caplog.text
+
+
+def test_oversized_gallery_is_not_silently_truncated(monkeypatch):
+    client = MemoryS3()
+    for i in range(257):
+        client.enroll('a', f'id-{i:03}', f'Person {i}', 1)
+    mapper = gallery(client, monkeypatch)
+    assert mapper.identify('a', np.ones(24000)) == ''
+    assert client.reads == []
+
+
+def test_large_manifest_body_is_closed_and_not_decoded(monkeypatch):
+    client = MemoryS3()
+    client.enroll('a', 'one', 'One', 1)
+    body = io.BytesIO(b'x' * 65537)
+    client.get_object = lambda **kwargs: {'Body': body, 'ContentLength': 65537}
+    mapper = gallery(client, monkeypatch)
+    assert mapper.identify('a', np.ones(24000)) == ''
+    assert body.closed

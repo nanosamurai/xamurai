@@ -71,6 +71,11 @@ def speaker_turns(text: str, words: tuple[SpeakerWord, ...], start_s: float,
         end = positions[index] if index < len(words) else len(text)
         t0 = max(start_s, words[first].start_s)
         t1 = min(end_s, max(word.end_s for word in words[first:index]))
+        if index < len(words):
+            # RNNT punctuation can stretch a word's end into the next turn.
+            # Match the native onset-based attribution and avoid embedding
+            # the next speaker's audio as evidence for this one.
+            t1 = min(t1, words[index].start_s)
         if t1 <= t0:
             return ()
         turns.append(SpeakerTurn(text[begin:end], t0, t1, words[first].speaker))

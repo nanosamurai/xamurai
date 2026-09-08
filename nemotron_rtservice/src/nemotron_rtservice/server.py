@@ -17,7 +17,7 @@ from nemotron_rtservice.native import (
     NativeNemotronBackend,
     TranscriptUpdate,
 )
-from nemotron_rtservice.speakers import enrollment_from_env, speaker_turns
+from nemotron_rtservice.speakers import EMBEDDING_MODEL_REVISION, IDENTIFIER, enrollment_from_env, speaker_turns
 from proto_gen import stream_pb2, stream_pb2_grpc
 from xamurai_serving import SessionSlots, max_sessions_from_env, serving_instance_id
 
@@ -97,7 +97,8 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             model_revision=MODEL_REVISION,
             model_digest=MODEL_DIGEST,
             implementation_revision=(f"nemo-speech-cpp:{NEMO_SPEECH_REVISION}"
-                                     + (f";sortformer:{SORTFORMER_MODEL_REVISION}" if self._diarization else "")),
+                                     + (f";sortformer:{SORTFORMER_MODEL_REVISION}" if self._diarization else "")
+                                     + (f";wespeaker:{EMBEDDING_MODEL_REVISION}" if self._enrollment is not None else "")),
             speaker_labels=self._diarization,
         )
 
@@ -177,6 +178,8 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                     raise _InvalidRequest(error)
                 if tenant_id is None:
                     tenant_id = chunk.tenant_id
+                    if tenant_id and not IDENTIFIER.fullmatch(tenant_id):
+                        raise _InvalidRequest("invalid tenant ID")
                     if metadata.get("x-tenant-id", tenant_id) != tenant_id:
                         raise _InvalidRequest("tenant ID does not match stream metadata")
                 elif chunk.tenant_id != tenant_id:

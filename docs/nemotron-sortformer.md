@@ -33,6 +33,8 @@ native diarization build option; Python requests native speaker-tagged words
 and joins consecutive words with the same speaker into FINAL events. Every
 admitted native stream owns its Sortformer state. We do not restart it at ASR
 utterance boundaries, or share speaker-slot identity across streams/replicas.
+Word ends are clipped at the next speaker's onset so late RNNT punctuation
+cannot include the next turn in enrollment audio.
 
 | Stage | Fixed artifact | Revision | SHA-256 |
 | --- | --- | --- | --- |
@@ -134,6 +136,11 @@ replicas, the latter holds both admissions before sending fixture audio to both
 processes and requires non-empty finals from both. Counts are printed without
 transcripts or enrolled names. Real-GPU results belong in the Phase 2b plan;
 unit tests alone do not establish diarization accuracy.
+
+The real CPU embedding smoke on two non-overlapping ten-second halves of
+`test_cs.wav` returned a 256-dimensional embedding and cosine similarity
+`0.8153`. This verifies the encoder/frontend wiring for one consented speaker;
+it does not establish multi-speaker accuracy or calibrate the threshold.
 
 References: [Sortformer model](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2),
 [pinned native API](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/4f9676226f667d14608487df744f375db87127f8/include/nemo_speech/asr.h),
