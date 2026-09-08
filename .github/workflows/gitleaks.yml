@@ -3,6 +3,7 @@ name: gitleaks
 on:
   pull_request:
     branches:
+      - enable-realtime-replica-routing
       - master
       - validate-nemotron-realtime
   workflow_call:

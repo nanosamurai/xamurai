@@ -5,6 +5,11 @@ services. Full-stack orchestration, infrastructure provisioning, and
 environment-specific release configuration are intentionally outside this
 repository.
 
+The Nemotron PR is stacked on `enable-realtime-replica-routing` while that
+prerequisite is unmerged. Lightweight CI and secret scanning also run for this
+base branch, so the provider delta keeps its review checks before retargeting
+to `master`.
+
 ## Pull request validation
 
 Pull requests targeting `master` or the unmerged `validate-nemotron-realtime`
