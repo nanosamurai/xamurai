@@ -56,8 +56,11 @@ def test_local_profile_preserves_final_and_partial_decode_settings(monkeypatch):
     assert model.calls[0]["word_timestamps"] is True
     assert model.calls[1]["beam_size"] == 1
     assert model.calls[1]["word_timestamps"] is False
+    assert model.calls[0]["without_timestamps"] is False
+    assert model.calls[0]["temperature"] == (0.0, 0.3, 0.6)
+    assert model.calls[1]["without_timestamps"] is True
+    assert model.calls[1]["temperature"] == 0.0
     for call in model.calls:
-        assert call["temperature"] == (0.0, 0.3, 0.6)
         assert call["compression_ratio_threshold"] == 2.7
         assert call["condition_on_previous_text"] is False
         assert call["vad_filter"] is False

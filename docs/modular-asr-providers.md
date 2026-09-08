@@ -128,7 +128,7 @@ sharing stream cache rows.
 
 | BFF track | Provider profile | Runtime and mode | Timing claims |
 | --- | --- | --- | --- |
-| `faster-whisper` | `faster-whisper-medium-ctranslate2-r1` | `Systran/faster-whisper-medium`; Faster-Whisper 1.2 / CTranslate2 4.6; `pyannote/speaker-diarization-3.1`; contextual windowed realtime with optional Silero VAD and enrollment mapping | Internal absolute word timestamps with deterministic seam ownership; public coalesced speaker segments |
+| `faster-whisper` | `faster-whisper-medium-ctranslate2-r2` | `Systran/faster-whisper-medium`; Faster-Whisper 1.2 / CTranslate2 4.6; `pyannote/speaker-diarization-3.1`; contextual windowed realtime with optional Silero VAD and enrollment mapping | Text-only greedy drafts; internal absolute FINAL word timestamps with deterministic seam ownership; public coalesced speaker segments |
 | `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `Qwen/Qwen3-ASR-0.6B`; `Qwen/Qwen3-ForcedAligner-0.6B`; `pyannote/speaker-diarization-3.1`; `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session by default | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
 | `nemotron` | `nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r1` | `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF; `nemo-speech-cpp==0.1.0`; cache-aware RNNT streaming; one concurrent session per replica by default | Native partials and finals with processed-audio duration; no segment, word, or speaker-label claim |
 

@@ -60,7 +60,7 @@ but increases FINAL latency, PCM memory, ASR work, and diarization work.
 rtservice uses two decode settings:
 
 - **FINAL**: higher quality (beam search + word timestamps)
-- **PARTIAL**: cheaper (lower beam, no word timestamps)
+- **PARTIAL**: one greedy, text-only pass (no timestamp tokens or fallback retries)
 
 This is intentional: PARTIALs should be fast and replaceable; FINALs are the converged results.
 
@@ -83,7 +83,7 @@ measurement and a bounded maximum duration; it is not constant-cost streaming.
 
 ### Repetition fallback
 
-Both FINAL and PARTIAL decoding use faster-whisper's native compression-ratio
+FINAL decoding uses faster-whisper's native compression-ratio
 check and temperature fallback. Decoding starts deterministically at temperature
 `0.0`. When faster-whisper classifies that decode as excessively repetitive, it
 retries at the remaining configured temperatures instead of returning the first
@@ -91,8 +91,15 @@ failed decode immediately.
 
 Normal decodes stop after the first successful attempt and therefore have no
 additional inference cost. A pathological or otherwise failed decode can require
-multiple attempts and temporarily increase latency. rtservice does not rewrite,
-trim, or otherwise post-process repeated transcript text.
+multiple attempts and temporarily increase final latency.
+
+The `faster-whisper-medium-ctranslate2-r2` profile makes PARTIAL decoding a
+single greedy pass with `without_timestamps=True`. Disabling word timestamps
+alone still generated timestamp tokens and could trigger repetitive decoding
+and repeated fallback searches on incomplete speech. Drafts exceeding the
+configured compression-ratio threshold are withheld, preserving the previous
+draft until more audio arrives. FINAL text, timestamps and retries are unchanged.
+No repeated text is trimmed or rewritten.
 
 ### FINAL word ownership and diarization
 
@@ -117,7 +124,7 @@ Additional perf/overload knobs:
 
 | Env var | Default | Meaning |
 |---|---:|---|
-| `RT_ASR_TEMPERATURES` | `0.0,0.2,0.4,0.6,0.8,1.0` | Non-decreasing faster-whisper fallback schedule used by FINAL and PARTIAL decoding. |
+| `RT_ASR_TEMPERATURES` | `0.0,0.2,0.4,0.6,0.8,1.0` | Non-decreasing faster-whisper fallback schedule used by FINAL decoding. PARTIAL always uses one greedy pass. |
 | `RT_ASR_COMPRESSION_RATIO_THRESHOLD` | `2.4` | Faster-whisper threshold above which a decode is treated as too repetitive and retried. |
 | `RT_FINAL_DIAR_MERGE_GAP_SEC` | `0.75` | Maximum gap between consecutive same-speaker diarization turns merged before FINAL ASR. Set to `0` to disable positive-gap merging. |
 | `RT_FINAL_DIAR_MIN_TRANSCRIBE_SEC` | `0.7` | Minimum accumulated raw-speaker audio sent to enrolled-speaker mapping. Shorter turns retain their anonymous pyannote label. |

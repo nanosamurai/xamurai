@@ -16,7 +16,7 @@ from typing import Callable, Optional, Protocol
 
 import numpy as np
 
-FASTER_WHISPER_MEDIUM_PROFILE = "faster-whisper-medium-ctranslate2-r1"
+FASTER_WHISPER_MEDIUM_PROFILE = "faster-whisper-medium-ctranslate2-r2"
 
 
 @dataclass(frozen=True)
@@ -228,15 +228,22 @@ class LocalFasterWhisperProvider:
                 language=request.language or None,
                 task="transcribe",
                 beam_size=1 if request.partial else 5,
-                temperature=self._temperatures,
+                # Drafts need neither timestamp-token generation nor repeated
+                # fallback searches. The next audio prefix replaces this pass.
+                temperature=0.0 if request.partial else self._temperatures,
                 compression_ratio_threshold=self._compression_threshold,
                 condition_on_previous_text=False,
                 vad_filter=False,
                 word_timestamps=not request.partial,
+                without_timestamps=request.partial,
             )
             words: list[str] = []
             timed_words: list[ProviderWord] = []
             for segment in segments:
+                if request.partial and getattr(segment, "compression_ratio", 0.0) > self._compression_threshold:
+                    # Keep the previous draft instead of displaying a failed
+                    # repetitive decode or blocking ingestion with retries.
+                    return "", ()
                 if getattr(segment, "words", None):
                     for word in segment.words:
                         text = str(getattr(word, "word", ""))

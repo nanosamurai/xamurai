@@ -68,8 +68,8 @@ class _FakeWhisperModel:
         return iter([segment]), SimpleNamespace()
 
 
-def test_final_and_partial_decode_use_native_repetition_fallback(monkeypatch):
-    """FINAL and PARTIAL decoding pass the native fallback settings unchanged."""
+def test_only_final_decode_uses_timestamps_and_repetition_fallback(monkeypatch):
+    """Drafts use one text-only pass; finals retain configured quality retries."""
 
     temperatures = (0.0, 0.3, 0.6)
     compression_threshold = 2.7
@@ -92,11 +92,28 @@ def test_final_and_partial_decode_use_native_repetition_fallback(monkeypatch):
     final_call, partial_call = fake_model.calls
     assert final_call["beam_size"] == 5
     assert final_call["word_timestamps"] is True
+    assert final_call["without_timestamps"] is False
+    assert final_call["temperature"] == temperatures
     assert partial_call["beam_size"] == 1
     assert partial_call["word_timestamps"] is False
+    assert partial_call["without_timestamps"] is True
+    assert partial_call["temperature"] == 0.0
 
     for call in fake_model.calls:
-        assert call["temperature"] == temperatures
         assert call["compression_ratio_threshold"] == compression_threshold
         assert call["condition_on_previous_text"] is False
         assert call["vad_filter"] is False
+
+
+def test_repetitive_draft_is_suppressed_without_changing_final_text(monkeypatch):
+    """A failed draft leaves the last UI hypothesis intact until a new decode."""
+    monkeypatch.setenv("RT_ASR_COMPRESSION_RATIO_THRESHOLD", "2.4")
+
+    class RepetitiveModel:
+        def transcribe(self, _wave, **kwargs):
+            return iter([SimpleNamespace(words=None, text="Repeated draft", compression_ratio=3.0)]), None
+
+    provider = LocalFasterWhisperProvider(model=RepetitiveModel())
+    pcm = np.ones(16000, dtype=np.int16).tobytes()
+    assert provider.transcribe_window(WindowRequest(pcm, 16000, "en", 0, 16000, True)).text == ""
+    assert provider.transcribe_window(WindowRequest(pcm, 16000, "en", 0, 16000, False)).text == "Repeated draft"
