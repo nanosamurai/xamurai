@@ -178,6 +178,14 @@ and 789 MiB; aggregate device usage was 6,878 MiB including unrelated desktop
 GPU use. These single-speaker fixture results establish integration and tenant
 isolation, not multi-speaker accuracy or a production capacity profile.
 
+The `r2` timing correction passed 93 lightweight tests and a local replay of
+a reported 109-second, two-speaker recording. Both deployed replicas processed
+the recording concurrently and emitted six finals each, all assigned to the
+correct enrolled name. Separately, all seven original UI turn intervals matched
+at the local `0.55` cutoff. The Faster/Nemotron BFF WebSocket smoke also passed.
+Recordings, transcripts and enrollment data remain outside version control;
+this single-recording calibration does not establish general speaker accuracy.
+
 Review order: [replica admission #12](https://github.com/nanosamurai/xamurai/pull/12),
 [Nemotron #10](https://github.com/nanosamurai/xamurai/pull/10), then
 [Sortformer/enrollment #11](https://github.com/nanosamurai/xamurai/pull/11).
