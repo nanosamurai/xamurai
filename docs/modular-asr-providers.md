@@ -142,11 +142,23 @@ from the model repository and exposes no client-controlled model path,
 revision, or decoding option. Deployment requires accepting NVIDIA's Open
 Model Development and Weights License 1.1 for the model artifact.
 
+## Optional Nemotron speaker processing
+
+`NEMOTRON_DIARIZATION=true` adds the pinned native Sortformer v2 model inside
+the Nemotron service. `ENROLL_BACKEND=s3_manifest` additionally matches speaker
+audio against the tenant's existing S3 WAV gallery using a small CPU ONNX
+encoder. These modes have separate profile IDs and advertise speaker labels
+and segment timestamps. ASR-only defaults and replica routing remain unchanged.
+See [Nemotron Sortformer](nemotron-sortformer.md) for limits, pins and failure
+semantics, including why the four-speaker stream limit does not cap S3 enrollment
+at four people.
+
 ## Nemotron native-streaming lifecycle
 
 The Nemotron container builds only NeMo-Speech.cpp's stable ASR C ABI and its
 CUDA backend. It omits the upstream HTTP, gRPC, CLI, translation, TTS,
-diarization, normalization, and language-model components. Python owns the
+normalization, and language-model components. Native diarization is compiled
+in but its model is loaded only when explicitly enabled. Python owns the
 existing Xamurai `RealtimeASR` boundary and passes each incoming PCM16 chunk
 once, converted to normalized float32, to
 `nemo_speech_asr_stream_push_f32`. It never rebuilds or re-feeds a session audio

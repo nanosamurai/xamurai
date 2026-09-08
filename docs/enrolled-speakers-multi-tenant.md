@@ -2,6 +2,13 @@
 
 Status: **WIP / In progress**
 
+Nemotron now has an optional local Sortformer + S3 enrollment path, documented
+in [nemotron-sortformer.md](nemotron-sortformer.md). It reads the same manifest
+and WAV layout, computes its own fixed WeSpeaker embeddings and searches the
+tenant gallery independently of Sortformer's four audio speaker slots. The
+historical baseline and phase tracker below concern the original pyannote
+services.
+
 This document describes the target architecture and implementation plan for supporting **tenant-specific enrolled speakers** across the transcription stack:
 
 - `rtservice` (realtime diarization + ASR)

@@ -17,6 +17,8 @@ class _FakeLibrary:
         self.options = {
             "interim_results": bool(captured.interim_results),
             "enable_automatic_punctuation": bool(captured.enable_automatic_punctuation),
+            "enable_word_time_offsets": bool(captured.enable_word_time_offsets),
+            "enable_speaker_diarization": bool(captured.enable_speaker_diarization),
         }
         ctypes.cast(handle, ctypes.POINTER(ctypes.c_void_p)).contents.value = 1
         return 0
@@ -33,6 +35,18 @@ def test_native_session_requests_interim_and_self_punctuated_text():
         assert library.options == {
             "interim_results": True,
             "enable_automatic_punctuation": True,
+            "enable_word_time_offsets": False,
+            "enable_speaker_diarization": False,
         }
+    finally:
+        session.close()
+
+
+def test_native_session_requests_words_and_sortformer_together():
+    library = _FakeLibrary()
+    session = NativeSession(library, ctypes.c_void_p(7), 'session', 'en-US', diarization=True)
+    try:
+        assert library.options['enable_word_time_offsets'] is True
+        assert library.options['enable_speaker_diarization'] is True
     finally:
         session.close()

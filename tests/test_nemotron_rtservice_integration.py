@@ -4,8 +4,8 @@ import time
 import grpc
 import pytest
 
-from nemotron_rtservice.native import MODEL_DIGEST, MODEL_REVISION, TranscriptUpdate
-from nemotron_rtservice.server import PROFILE_ID, create_server
+from nemotron_rtservice.native import MODEL_DIGEST, MODEL_REVISION, SpeakerWord, TranscriptUpdate
+from nemotron_rtservice.server import DIARIZED_PROFILE_ID, ENROLLED_PROFILE_ID, PROFILE_ID, create_server
 from proto_gen import stream_pb2, stream_pb2_grpc
 
 
@@ -253,3 +253,78 @@ def test_nemotron_rejects_invalid_audio(running_server, chunks, detail):
         list(_call(stub, iter(chunks)))
     assert failure.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     assert detail in failure.value.details()
+
+
+@pytest.mark.parametrize('enrolled', [False, True])
+def test_diarized_finals_keep_native_endpoint_and_match_the_stream_tenant(monkeypatch, enrolled):
+    monkeypatch.setenv('NEMOTRON_RTSERVICE_BIND_ADDR', '127.0.0.1')
+    class DiarizedStream(_FakeStream):
+        def push(self, pcm16_le, sample_rate):
+            self.chunks.append((pcm16_le, sample_rate))
+            index = len(self.chunks)
+            if index == 1:
+                return (TranscriptUpdate('Hello. Yes.', True, 5, 'en-US', (
+                    SpeakerWord('Hello.', 0.1, 2, 1), SpeakerWord('Yes.', 2.2, 4.5, 2))),)
+            return (TranscriptUpdate('Later.', False, 10, 'en-US'),)
+
+        def finish(self):
+            return (TranscriptUpdate('Later.', True, 10, 'en-US', (SpeakerWord('Later.', 6, 9, 1),)),)
+
+    class Backend(_FakeBackend):
+        diarization = True
+        def open(self, session_id, language):
+            stream = DiarizedStream()
+            self.opens.append((session_id, language, stream))
+            return stream
+
+    class Mapper:
+        def __init__(self):
+            self.tenants = []
+        def identify(self, tenant, audio):
+            assert len(audio) > 24000
+            self.tenants.append(tenant)
+            return 'Enrolled name'
+
+    backend, mapper = Backend(), Mapper()
+    server = create_server(backend, port=0, maximum_sessions=2, enrollment=mapper if enrolled else None)
+    server.start()
+    channel = grpc.insecure_channel(f'127.0.0.1:{server.bound_port}')
+    try:
+        stub = stream_pb2_grpc.RealtimeASRStub(channel)
+        capabilities = stub.GetCapabilities(stream_pb2.RealtimeCapabilitiesRequest(), timeout=2)
+        expected_profile = ENROLLED_PROFILE_ID if enrolled else DIARIZED_PROFILE_ID
+        assert capabilities.provider_profile_id == expected_profile
+        assert capabilities.speaker_labels and capabilities.segment_timestamps
+        assert not capabilities.word_timestamps
+        chunks = [_chunk(sequence=i, payload=b'\x01\x00' * 80000, lang='en') for i in (1, 2)]
+        for chunk in chunks:
+            chunk.tenant_id = 'tenant-a'
+        events = list(_call(stub, iter(chunks)))
+        assert all(event.provider_profile_id == expected_profile for event in events)
+        assert [event.text for event in events[1:]] == ['Hello.', 'Yes.', 'Later.', 'Later.']
+        assert events[3].start_s == 5  # Native endpoint, not last word's 4.5 s end.
+        assert events[3].speaker == ''  # Partials remain replaceable and anonymous.
+        assert [events[i].speaker for i in (1, 2, 4)] == (
+            ['Enrolled name'] * 3 if enrolled else ['SPEAKER_00', 'SPEAKER_01', 'SPEAKER_00'])
+        assert mapper.tenants == (['tenant-a'] * 3 if enrolled else [])
+        assert backend.opens[0][2].closed == 1
+    finally:
+        channel.close()
+        server.stop(grace=None).wait()
+
+
+def test_tenant_cannot_change_after_admission(running_server):
+    backend, stub = running_server
+    one, two = _chunk(sequence=1), _chunk(sequence=2)
+    one.tenant_id, two.tenant_id = 'tenant-a', 'tenant-b'
+    with pytest.raises(grpc.RpcError) as failure:
+        list(_call(stub, iter((one, two))))
+    assert failure.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert len(backend.opens[0][2].chunks) == 1
+    assert backend.opens[0][2].closed == 1
+
+
+def test_automatic_language_detection_accepts_successive_chunks(running_server):
+    _, stub = running_server
+    events = list(_call(stub, iter((_chunk(sequence=1, lang=''), _chunk(sequence=2, lang='')))))
+    assert events[-1].type == stream_pb2.FINAL
