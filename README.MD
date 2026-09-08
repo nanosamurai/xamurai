@@ -271,7 +271,9 @@ Nemotron realtime service settings include:
 Nemotron uses NeMo-Speech.cpp's native token-silence endpointing (800 ms) so
 each utterance is committed independently. A 30-second forced endpoint is the
 hard backstop for uninterrupted speech; this bounds replaceable partial text
-without limiting the total stream duration.
+without limiting the total stream duration. The adapter enables the native
+automatic-punctuation request gate so Nemotron 3.5's own punctuation and
+capitalization are retained; no separate PnC model is loaded.
 
 Worker settings include:
 

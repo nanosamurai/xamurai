@@ -214,6 +214,10 @@ class NativeSession:
         options.request_id = self._request_id
         options.language_code = self._language
         options.interim_results = True
+        # The stable C ABI intentionally defaults every optional request flag
+        # to false. Nemotron 3.5 is self-punctuating, so this gate preserves the
+        # casing and punctuation emitted by the model without a PnC sidecar.
+        options.enable_automatic_punctuation = True
         _check(
             library.nemo_speech_asr_streaming_recognize(
                 recognizer, ctypes.byref(options), ctypes.byref(self._handle)
