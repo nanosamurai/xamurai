@@ -1,8 +1,9 @@
 # Optional Nemotron speaker diarization and enrollment
 
 This is a local Phase 2b validation extension, stacked on
-`validate-nemotron-realtime`. Keep the Nemotron implementation PR and this
-diarization PR separate. The implementation uses the existing RealtimeASR API,
+`validate-nemotron-realtime`. Review the shared replica-routing prerequisite
+first, then the Nemotron implementation, then this diarization PR. The
+implementation uses the existing RealtimeASR API,
 native recognizer, process-local admission and Compose DNS routing.
 
 ## Enable locally
@@ -144,6 +145,28 @@ The real CPU embedding smoke on two non-overlapping ten-second halves of
 `test_cs.wav` returned a 256-dimensional embedding and cosine similarity
 `0.8153`. This verifies the encoder/frontend wiring for one consented speaker;
 it does not establish multi-speaker accuracy or calibrate the threshold.
+The full S3 loader/matcher also passed against a fresh LocalStack enrollment
+record using the held-out half. The test removed its own objects afterward.
+
+On 2026-09-08, the real CUDA image passed in Nanosamurai Compose with two
+one-session replicas on an RTX 5090 Laptop GPU. Warm recreation took 8.14
+seconds. Both concurrent 20-second fixture streams returned 37 events and four
+finals with one anonymous speaker. Two fresh tenants then used the same session
+ID on different replicas with non-overlapping enrollment/test audio: each
+returned two finals, including its own enrolled name on one final, with no
+cross-tenant names. Processing the held-out ten seconds took 1.23 and 1.26
+seconds, including cold gallery matching. Temporary S3 objects were removed.
+
+The localhost BFF WebSocket smoke passed with speaker-labelled finals. With
+diarization disabled, the same image also passed both concurrent streams with
+four speakerless finals each. Container RAM after the enabled checks was 932.4
+and 789 MiB; aggregate device usage was 6,878 MiB including unrelated desktop
+GPU use. These single-speaker fixture results establish integration and tenant
+isolation, not multi-speaker accuracy or a production capacity profile.
+
+Review order: [replica admission #12](https://github.com/nanosamurai/xamurai/pull/12),
+[Nemotron #10](https://github.com/nanosamurai/xamurai/pull/10), then
+[Sortformer/enrollment #11](https://github.com/nanosamurai/xamurai/pull/11).
 
 References: [Sortformer model](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2),
 [pinned native API](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/4f9676226f667d14608487df744f375db87127f8/include/nemo_speech/asr.h),
