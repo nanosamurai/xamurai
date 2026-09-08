@@ -40,16 +40,22 @@ def test_late_word_end_does_not_include_the_next_speaker_audio():
 
 
 @pytest.mark.parametrize('word_end', [30.4, 100])
-def test_native_word_lookahead_is_clipped_to_the_final_audio_boundary(word_end):
+@pytest.mark.parametrize('word_start', [29.6, 30.16])
+def test_native_word_lookahead_is_clipped_to_the_final_audio_boundary(word_start, word_end):
     text = 'A long utterance ends.'
     words = (SpeakerWord('A', 0.4, 0.6, 1),
              SpeakerWord('long', 1, 2, 1),
              SpeakerWord('utterance', 2.4, 28, 1),
-             SpeakerWord('ends.', 29.6, word_end, 1))
+             SpeakerWord('ends.', word_start, word_end, 1))
     turns = speaker_turns(text, words, 0, 30.02)
     assert len(turns) == 1
     assert turns[0].text == text
     assert (turns[0].speaker, turns[0].start_s, turns[0].end_s) == (1, 0.4, 30.02)
+
+
+def test_speaker_change_entirely_after_the_audio_boundary_falls_back():
+    words = (SpeakerWord('One.', 0, 1, 1), SpeakerWord('Two.', 2.16, 2.4, 2))
+    assert speaker_turns('One. Two.', words, 0, 2) == ()
 
 
 def test_invalid_diarization_flag_fails_startup(monkeypatch):

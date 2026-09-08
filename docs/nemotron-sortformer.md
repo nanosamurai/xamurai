@@ -37,11 +37,12 @@ admitted native stream owns its Sortformer state. We do not restart it at ASR
 utterance boundaries, or share speaker-slot identity across streams/replicas.
 Word ends are clipped at the next speaker's onset so late RNNT punctuation
 cannot include the next turn in enrollment audio.
-The `sortformer-q8-r2` and `sortformer-enrolled-q8-r2` profiles also clip valid
-word ends to the final's consumed-audio boundary. Native RNNT lookahead can
-extend the last word beyond that boundary; this does not invalidate its speaker
-tag. Invalid/nonmonotonic onsets, nonfinite times and incomplete text coverage
-still use the coarse fallback. ASR-only profile behavior is unchanged.
+The `sortformer-q8-r2` and `sortformer-enrolled-q8-r2` profiles also clip turns
+to the final's consumed-audio boundary. Native RNNT lookahead can put trailing
+word starts and ends beyond that boundary; their text and slot are preserved
+when the same speaker turn starts within real audio. A turn wholly outside
+that boundary, invalid/nonmonotonic onsets, nonfinite times and incomplete text
+coverage still use the coarse fallback. ASR-only profile behavior is unchanged.
 
 | Stage | Fixed artifact | Revision | SHA-256 |
 | --- | --- | --- | --- |
