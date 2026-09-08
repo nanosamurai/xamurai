@@ -101,6 +101,11 @@ configured compression-ratio threshold are withheld, preserving the previous
 draft until more audio arrives. FINAL text, timestamps and retries are unchanged.
 No repeated text is trimmed or rewritten.
 
+The owned local model runs one second of synthetic silence through the draft
+path during startup, before the gRPC service accepts streams. This pays feature
+extraction/CUDA initialization costs before they can suppress early partials
+through the lag guard. No user recording is used for warm-up.
+
 ### FINAL word ownership and diarization
 
 FINAL ASR runs once over the contextual waveform and retains Faster-Whisper's

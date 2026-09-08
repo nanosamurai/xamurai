@@ -68,6 +68,16 @@ class _FakeWhisperModel:
         return iter([segment]), SimpleNamespace()
 
 
+def test_owned_model_is_warmed_with_silence_before_serving(monkeypatch):
+    """Startup pays the first-decode cost without reading user audio."""
+    model = _FakeWhisperModel()
+    monkeypatch.setattr(LocalFasterWhisperProvider, "_load", lambda self: model)
+    LocalFasterWhisperProvider()
+    assert len(model.calls) == 1
+    assert model.calls[0]["without_timestamps"] is True
+    assert model.calls[0]["temperature"] == 0.0
+
+
 def test_only_final_decode_uses_timestamps_and_repetition_fallback(monkeypatch):
     """Drafts use one text-only pass; finals retain configured quality retries."""
 

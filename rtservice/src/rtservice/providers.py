@@ -188,6 +188,10 @@ class LocalFasterWhisperProvider:
         self._serialize = os.getenv("RT_ASR_SERIALIZE", "false").strip().lower() in {"1", "true", "yes", "y"}
         self._temperatures, self._compression_threshold = _decode_config()
         self._load()
+        if model is None:
+            # Initialize feature extraction and CUDA before accepting streams;
+            # otherwise the first decode can trip the realtime lag guard.
+            self.transcribe_window(WindowRequest(bytes(32000), 16000, "en", 0, 16000, True))
 
     def _load(self):
         if self._model is not None:
