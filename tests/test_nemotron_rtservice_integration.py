@@ -265,7 +265,7 @@ def test_diarized_finals_keep_native_endpoint_and_match_the_stream_tenant(monkey
             index = len(self.chunks)
             if index == 1:
                 return (TranscriptUpdate('Hello. Yes.', True, 5, 'en-US', (
-                    SpeakerWord('Hello.', 0.1, 2, 1), SpeakerWord('Yes.', 2.2, 4.5, 2))),)
+                    SpeakerWord('Hello.', 0.1, 2, 1), SpeakerWord('Yes.', 2.2, 5.4, 2))),)
             return (TranscriptUpdate('Later.', False, 10, 'en-US'),)
 
         def finish(self):
@@ -304,7 +304,8 @@ def test_diarized_finals_keep_native_endpoint_and_match_the_stream_tenant(monkey
         events = list(_call(stub, iter(chunks)))
         assert all(event.provider_profile_id == expected_profile for event in events)
         assert [event.text for event in events[1:]] == ['Hello.', 'Yes.', 'Later.', 'Later.']
-        assert events[3].start_s == 5  # Native endpoint, not last word's 4.5 s end.
+        assert events[2].end_s == 5  # Clip the RNNT word's 5.4 s lookahead.
+        assert events[3].start_s == 5  # Next partial starts at the native endpoint.
         assert events[3].speaker == ''  # Partials remain replaceable and anonymous.
         assert [events[i].speaker for i in (1, 2, 4)] == (
             ['Enrolled name'] * 3 if enrolled else ['SPEAKER_00', 'SPEAKER_01', 'SPEAKER_00'])

@@ -19,7 +19,8 @@ def test_turns_preserve_punctuation_and_split_only_at_speaker_changes():
 
 
 @pytest.mark.parametrize('changes', [dict(text='missing'), dict(start_s=float('nan')),
-                                     dict(end_s=100), dict(speaker=5), dict(start_s=-1)])
+                                     dict(end_s=-1), dict(speaker=5), dict(start_s=-1),
+                                     dict(start_s=3, end_s=4)])
 def test_invalid_words_fall_back_without_dropping_text(changes):
     words = (replace(SpeakerWord('Hello.', 0, 1, 1), **changes),)
     assert speaker_turns('Hello.', words, 0, 2) == ()
@@ -36,6 +37,19 @@ def test_unknown_speaker_is_not_promoted_to_a_known_slot():
 def test_late_word_end_does_not_include_the_next_speaker_audio():
     turns = speaker_turns('One. Two.', (SpeakerWord('One.', 0, 4, 1), SpeakerWord('Two.', 2, 5, 2)), 0, 5)
     assert turns[0].end_s == turns[1].start_s == 2
+
+
+@pytest.mark.parametrize('word_end', [30.4, 100])
+def test_native_word_lookahead_is_clipped_to_the_final_audio_boundary(word_end):
+    text = 'A long utterance ends.'
+    words = (SpeakerWord('A', 0.4, 0.6, 1),
+             SpeakerWord('long', 1, 2, 1),
+             SpeakerWord('utterance', 2.4, 28, 1),
+             SpeakerWord('ends.', 29.6, word_end, 1))
+    turns = speaker_turns(text, words, 0, 30.02)
+    assert len(turns) == 1
+    assert turns[0].text == text
+    assert (turns[0].speaker, turns[0].start_s, turns[0].end_s) == (1, 0.4, 30.02)
 
 
 def test_invalid_diarization_flag_fails_startup(monkeypatch):

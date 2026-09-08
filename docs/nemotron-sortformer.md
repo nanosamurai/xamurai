@@ -37,6 +37,11 @@ admitted native stream owns its Sortformer state. We do not restart it at ASR
 utterance boundaries, or share speaker-slot identity across streams/replicas.
 Word ends are clipped at the next speaker's onset so late RNNT punctuation
 cannot include the next turn in enrollment audio.
+The `sortformer-q8-r2` and `sortformer-enrolled-q8-r2` profiles also clip valid
+word ends to the final's consumed-audio boundary. Native RNNT lookahead can
+extend the last word beyond that boundary; this does not invalidate its speaker
+tag. Invalid/nonmonotonic onsets, nonfinite times and incomplete text coverage
+still use the coarse fallback. ASR-only profile behavior is unchanged.
 
 | Stage | Fixed artifact | Revision | SHA-256 |
 | --- | --- | --- | --- |
@@ -80,6 +85,14 @@ or ambiguous matches retain an anonymous slot. Duplicate names in a gallery
 are excluded. A match is not permanently attached to a slot: each final is
 matched from its current audio, reducing propagation of an earlier wrong name.
 Names are transcript annotations, never authentication or authorization.
+
+The Nanosamurai local E2E preset uses `0.55` raw cosine with the same `0.10`
+runner-up margin, following a local two-speaker evaluation where short correct
+turns scored approximately `0.585` and `0.649`. Five crops of an unenrolled
+fixture remained below `0.09`. This is limited local calibration, not a
+universal operating point or a change to the general service default (`0.65`).
+WeSpeaker's CLI reports `(cosine + 1) / 2`; this adapter explicitly uses **raw
+cosine**, so its threshold must not be interpreted on the CLI's remapped scale.
 
 More than four distinct speakers in a continuous stream is outside this
 Sortformer profile's supported scope, even if they speak sequentially. It may

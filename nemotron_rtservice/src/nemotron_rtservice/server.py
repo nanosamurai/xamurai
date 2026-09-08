@@ -25,8 +25,8 @@ from xamurai_serving import SessionSlots, max_sessions_from_env, serving_instanc
 logger = logging.getLogger(__name__)
 
 PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r1"
-DIARIZED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-q8-r1"
-ENROLLED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-enrolled-q8-r1"
+DIARIZED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-q8-r2"
+ENROLLED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-enrolled-q8-r2"
 SAMPLE_RATE = 16_000
 MAX_CHUNK_BYTES = 1_048_576
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")

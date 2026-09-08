@@ -55,7 +55,7 @@ def speaker_turns(text: str, words: tuple[SpeakerWord, ...], start_s: float,
         if (position < 0 or text[cursor:position].strip()
                 or not math.isfinite(word.start_s) or not math.isfinite(word.end_s)
                 or word.start_s < previous_start - 0.02
-                or word.end_s < word.start_s or word.end_s > end_s + 0.16
+                or word.start_s > end_s or word.end_s < word.start_s
                 or not 0 <= word.speaker <= 4):
             return ()
         positions.append(position)
@@ -71,6 +71,9 @@ def speaker_turns(text: str, words: tuple[SpeakerWord, ...], start_s: float,
         begin = 0 if first == 0 else positions[first]
         end = positions[index] if index < len(words) else len(text)
         t0 = max(start_s, words[first].start_s)
+        # RNNT word ends include decoder/punctuation lookahead and may
+        # exceed the final's consumed-audio boundary. Keep valid onset tags
+        # and clip their ends, instead of losing every speaker in the final.
         t1 = min(end_s, max(word.end_s for word in words[first:index]))
         if index < len(words):
             # RNNT punctuation can stretch a word's end into the next turn.
