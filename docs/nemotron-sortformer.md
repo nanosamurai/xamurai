@@ -8,6 +8,7 @@ native recognizer, process-local admission and Compose DNS routing.
 ## Enable locally
 
 Build `nemotron_rtservice/Dockerfile` from `codex/add-optional-sortformer`.
+The native build uses two compiler jobs to fit local Docker Desktop memory.
 The same image supports three startup configurations:
 
 | Configuration | Result |
@@ -104,7 +105,9 @@ tracking and is not implemented.
   Only samples in the configured bucket and the manifest's own tenant/speaker
   prefix are read. File, HTTP and cross-tenant URLs are rejected.
 - S3 uses bounded reads and short network timeouts. Cache refresh and embedding
-  are serialized within each replica. Cold gallery loading adds final latency;
+  are serialized within each replica. A lookup has a 15-second work budget,
+  checked between S3/embedding operations, and stops on stream cancellation;
+  an in-flight operation may finish after that budget. Cold gallery loading adds final latency;
   large galleries need separate latency qualification.
 - Enrollment failures preserve anonymous diarization. Missing or inconsistent
   native word coverage preserves the complete coarse, speakerless transcript.

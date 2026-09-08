@@ -30,6 +30,7 @@ MAX_EMBEDDING_S = 10
 MAX_SAMPLE_BYTES = 4 * 1024 * 1024
 MAX_SPEAKERS = 256
 MAX_SAMPLES = 5
+LOOKUP_BUDGET_S = 15
 
 
 @dataclass(frozen=True)
@@ -156,7 +157,7 @@ class EnrolledSpeakers:
         # Serialize cache refresh and CPU embedding work within a replica.
         self._lock = threading.Lock()
 
-    def _gallery(self, tenant: str):
+    def _gallery(self, tenant: str, check_budget):
         now = time.monotonic()
         if tenant in self._cache:
             loaded, gallery = self._cache[tenant]
@@ -167,6 +168,7 @@ class EnrolledSpeakers:
         keys = []
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self._bucket, Prefix=root, Delimiter="/"):
+            check_budget()
             for item in page.get("CommonPrefixes", []):
                 speaker = item["Prefix"][len(root):].rstrip("/")
                 if not IDENTIFIER.fullmatch(speaker):
@@ -177,6 +179,7 @@ class EnrolledSpeakers:
         gallery = {}
         duplicate_labels = set()
         for speaker, folder in keys:
+            check_budget()
             try:
                 manifest = SpeakerManifest.loads(
                     _read_object(self._client, self._bucket, folder + "speaker.json", 65536).decode("utf-8")
@@ -189,6 +192,7 @@ class EnrolledSpeakers:
                     raise ValueError("invalid enrollment manifest")
                 embeddings = []
                 for sample in manifest.samples:
+                    check_budget()
                     url = urlsplit(sample.url)
                     key = url.path.lstrip("/")
                     if (url.scheme != "s3" or url.netloc != self._bucket
@@ -203,6 +207,8 @@ class EnrolledSpeakers:
                     duplicate_labels.add(label)
                 else:
                     gallery[label] = vector
+            except TimeoutError:
+                raise
             except Exception as exc:
                 logger.warning("Enrollment speaker unavailable error_type=%s", type(exc).__name__)
         self._cache[tenant] = (time.monotonic(), gallery)
@@ -227,20 +233,32 @@ class EnrolledSpeakers:
             audio = resample_poly(audio, SAMPLE_RATE // divisor, rate // divisor)
         return audio
 
-    def identify(self, tenant: str, audio: np.ndarray) -> str:
+    def identify(self, tenant: str, audio: np.ndarray, *, is_active=lambda: True) -> str:
         if not IDENTIFIER.fullmatch(tenant) or len(audio) < MIN_SPEECH_S * SAMPLE_RATE:
             return ""
+        deadline = time.monotonic() + LOOKUP_BUDGET_S
+
+        def check_budget():
+            if not is_active() or time.monotonic() >= deadline:
+                raise TimeoutError("enrollment lookup stopped")
+
         try:
-            with self._lock:
-                gallery = self._gallery(tenant)
+            if not self._lock.acquire(timeout=LOOKUP_BUDGET_S):
+                return ""
+            try:
+                check_budget()
+                gallery = self._gallery(tenant, check_budget)
                 if not gallery:
                     return ""
+                check_budget()
                 embedding = _normalize(self._embed(audio))
                 ranked = sorted(((float(embedding @ reference), label)
                                  for label, reference in gallery.items()), reverse=True)
                 best, label = ranked[0]
                 runner_up = ranked[1][0] if len(ranked) > 1 else -1.0
                 return label if best >= self._threshold and best - runner_up >= self._margin else ""
+            finally:
+                self._lock.release()
         except Exception as exc:
             logger.warning("Enrollment matching unavailable error_type=%s", type(exc).__name__)
             return ""

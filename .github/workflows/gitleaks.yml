@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - master
+      - validate-nemotron-realtime
   workflow_call:
 
 permissions:

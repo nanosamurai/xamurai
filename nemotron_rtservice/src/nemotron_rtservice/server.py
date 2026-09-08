@@ -146,7 +146,9 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                                     pieces.append(np.frombuffer(bytes(audio[begin * 2:end * 2]), dtype="<i2"))
                             if pieces:
                                 samples = np.concatenate(pieces).astype(np.float32) / 32768.0
-                                names[speaker] = self._enrollment.identify(tenant_id, samples)
+                                names[speaker] = self._enrollment.identify(
+                                    tenant_id, samples, is_active=context.is_active,
+                                )
                     result = tuple(stream_pb2.AsrEvent(
                         session_id=opening_session_id, start_s=turn.start_s, end_s=turn.end_s,
                         text=turn.text.strip(), type=stream_pb2.FINAL, lang=coarse.lang,

@@ -58,7 +58,7 @@ RUN cmake -G Ninja -S /work -B /work/build \
       -DNEMO_SPEECH_BUILD_TOOLS=OFF \
       -DNEMO_SPEECH_WITH_FLASHLIGHT=OFF \
       -DNEMO_SPEECH_WITH_NORM=OFF \
-    && cmake --build /work/build \
+    && cmake --build /work/build --parallel 2 \
     && cmake --install /work/build --prefix /opt/nemo-speech
 
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867

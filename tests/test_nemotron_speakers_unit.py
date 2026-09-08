@@ -158,3 +158,12 @@ def test_large_manifest_body_is_closed_and_not_decoded(monkeypatch):
     mapper = gallery(client, monkeypatch)
     assert mapper.identify('a', np.ones(24000)) == ''
     assert body.closed
+
+
+def test_cancelled_lookup_does_not_load_gallery_and_releases_lock(monkeypatch):
+    client = MemoryS3()
+    client.enroll('a', 'one', 'One', 1)
+    mapper = gallery(client, monkeypatch)
+    assert mapper.identify('a', np.ones(24000), is_active=lambda: False) == ''
+    assert client.listings == 0
+    assert mapper.identify('a', np.ones(24000)) == 'One'

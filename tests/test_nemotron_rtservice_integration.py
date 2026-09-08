@@ -280,7 +280,8 @@ def test_diarized_finals_keep_native_endpoint_and_match_the_stream_tenant(monkey
     class Mapper:
         def __init__(self):
             self.tenants = []
-        def identify(self, tenant, audio):
+        def identify(self, tenant, audio, *, is_active):
+            assert is_active()
             assert len(audio) > 24000
             self.tenants.append(tenant)
             return 'Enrolled name'
