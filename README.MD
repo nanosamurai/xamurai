@@ -225,6 +225,7 @@ Shared Kafka settings:
 Realtime service settings include:
 
 - `RT_GRPC_PORT` (default `50052`)
+- `RT_SERVING_MAX_SESSIONS` (default `1`; atomic per-process stream admission)
 - `HF_TOKEN`
 - `RT_WINDOW_SEC` (committed FINAL interval), `RT_OVERLAP_SEC` (left/right
   decoding context), and `RT_EMIT_EVERY_SEC`
