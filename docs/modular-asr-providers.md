@@ -128,7 +128,7 @@ sharing stream cache rows.
 
 | BFF track | Provider profile | Runtime and mode | Timing claims |
 | --- | --- | --- | --- |
-| `faster-whisper` | `faster-whisper-medium-ctranslate2-r1` | `Systran/faster-whisper-medium`; Faster-Whisper 1.2 / CTranslate2 4.6; `pyannote/speaker-diarization-3.1`; contextual windowed realtime with optional Silero VAD and enrollment mapping | Internal absolute word timestamps with deterministic seam ownership; public coalesced speaker segments |
+| `faster-whisper` | `faster-whisper-medium-ctranslate2-r2` | `Systran/faster-whisper-medium`; Faster-Whisper 1.2 / CTranslate2 4.6; `pyannote/speaker-diarization-3.1`; contextual windowed realtime with optional Silero VAD and enrollment mapping | Text-only greedy drafts; internal absolute FINAL word timestamps with deterministic seam ownership; public coalesced speaker segments |
 | `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `Qwen/Qwen3-ASR-0.6B`; `Qwen/Qwen3-ForcedAligner-0.6B`; `pyannote/speaker-diarization-3.1`; `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session by default | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
 | `nemotron` | `nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r1` | `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF; `nemo-speech-cpp==0.1.0`; cache-aware RNNT streaming; one concurrent session per replica by default | Native partials and finals with processed-audio duration; no segment, word, or speaker-label claim |
 
@@ -142,11 +142,23 @@ from the model repository and exposes no client-controlled model path,
 revision, or decoding option. Deployment requires accepting NVIDIA's Open
 Model Development and Weights License 1.1 for the model artifact.
 
+## Optional Nemotron speaker processing
+
+`NEMOTRON_DIARIZATION=true` adds the pinned native Sortformer v2 model inside
+the Nemotron service. `ENROLL_BACKEND=s3_manifest` additionally matches speaker
+audio against the tenant's existing S3 WAV gallery using a small CPU ONNX
+encoder. These modes have separate profile IDs and advertise speaker labels
+and segment timestamps. ASR-only defaults and replica routing remain unchanged.
+See [Nemotron Sortformer](nemotron-sortformer.md) for limits, pins and failure
+semantics, including why the four-speaker stream limit does not cap S3 enrollment
+at four people.
+
 ## Nemotron native-streaming lifecycle
 
 The Nemotron container builds only NeMo-Speech.cpp's stable ASR C ABI and its
 CUDA backend. It omits the upstream HTTP, gRPC, CLI, translation, TTS,
-diarization, normalization, and language-model components. Python owns the
+normalization, and language-model components. Native diarization is compiled
+in but its model is loaded only when explicitly enabled. Python owns the
 existing Xamurai `RealtimeASR` boundary and passes each incoming PCM16 chunk
 once, converted to normalized float32, to
 `nemo_speech_asr_stream_push_f32`. It never rebuilds or re-feeds a session audio

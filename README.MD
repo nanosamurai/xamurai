@@ -18,7 +18,8 @@ do not live in this service repository.
   vLLM streaming implementation, then forced-aligns and pyannote-diarizes each
   bounded final epoch when the detected language is supported.
 - `nemotron_rtservice` exposes the same API using Nemotron 3.5 ASR's
-  cache-aware streaming graph through the stable NeMo-Speech.cpp C ABI.
+  cache-aware streaming graph through the stable NeMo-Speech.cpp C ABI, with
+  optional native Sortformer diarization and tenant-specific S3 speaker matching.
 - `whisperx_worker` consumes `audio.raw` and emits window-based
   `transcripts.refined` events.
 - `recorder_worker` consumes `audio.raw`, stores session audio, and emits
@@ -99,7 +100,7 @@ fallbacks, and resource bounds.
 | --- | --- | --- | --- | --- |
 | `rtservice` | Realtime gRPC | Fixed `Systran/faster-whisper-medium` profile through Faster-Whisper/CTranslate2 | `pyannote/speaker-diarization-3.1`; optional `pyannote/embedding` enrollment mapping and Silero VAD | Replaceable partials; contextual, timestamp-owned, speaker-labelled finals |
 | `qwen_rtservice` | Realtime gRPC | Fixed `Qwen/Qwen3-ASR-0.6B` plus `Qwen/Qwen3-ForcedAligner-0.6B` | Fixed `pyannote/speaker-diarization-3.1` pipeline | Native-streaming partials; aligned and diarized epoch finals for supported alignment languages, with a coarse speakerless fallback |
-| `nemotron_rtservice` | Realtime gRPC | Fixed `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF through NeMo-Speech.cpp | None | Cache-aware native partials and final results; no timestamp or speaker-label claim |
+| `nemotron_rtservice` | Realtime gRPC | Fixed `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF through NeMo-Speech.cpp | Optional Sortformer v2 Q8; WeSpeaker ONNX for S3 enrollment | Native partials; optionally timed, speaker-labelled finals; no public word-timestamp claim |
 | `whisperx_worker` | Kafka refinement | WhisperX `medium` by default (`WHISPERX_MODEL` is operator-configurable) plus its language-specific alignment model | `pyannote/speaker-diarization-3.1` by default; optional `pyannote/embedding` enrollment mapping | Speaker-aware refined windows while the session is in progress |
 | `finalizer_worker` | Kafka completed-recording pipeline | Reuses the WhisperX ASR and language-alignment pipeline | Reuses the pyannote diarization and optional enrollment pipeline | Canonical full-session transcript with word timing where alignment succeeds |
 | `recorder_worker` | Kafka and object storage | None | None | Model-free session WAV assembly and completion notification |
@@ -265,6 +266,10 @@ Nemotron realtime service settings include:
 - `NEMOTRON_RTSERVICE_PORT` (default `50052`)
 - `NEMOTRON_GPU` (default `0`)
 - `NEMOTRON_RNNT_RIGHT_CONTEXT` (default `1`, about 160 ms)
+- `NEMOTRON_DIARIZATION` (default `false`); enable Sortformer finals, optionally
+  with `ENROLL_BACKEND=s3_manifest` for enrolled names. See the
+  [Sortformer and enrollment guide](docs/nemotron-sortformer.md) for the
+  four-speaker limit, S3 scope, thresholds, artifact pins and local validation.
 - `RT_SERVING_MAX_SESSIONS` (default `1`; values above one enable native
   cross-session microbatching with the same number of independent cache slots)
 

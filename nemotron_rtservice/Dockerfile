@@ -46,7 +46,7 @@ RUN cmake -G Ninja -S /work -B /work/build \
       -DNEMO_SPEECH_CUBLAS_SHIM=OFF \
       -DNEMO_SPEECH_GGML_PATCHED=ON \
       -DNEMO_SPEECH_BUILD_ASR=ON \
-      -DNEMO_SPEECH_BUILD_DIAR=OFF \
+      -DNEMO_SPEECH_BUILD_DIAR=ON \
       -DNEMO_SPEECH_BUILD_TTS=OFF \
       -DNEMO_SPEECH_BUILD_NMT=OFF \
       -DNEMO_SPEECH_BUILD_CLI=OFF \
@@ -58,7 +58,7 @@ RUN cmake -G Ninja -S /work -B /work/build \
       -DNEMO_SPEECH_BUILD_TOOLS=OFF \
       -DNEMO_SPEECH_WITH_FLASHLIGHT=OFF \
       -DNEMO_SPEECH_WITH_NORM=OFF \
-    && cmake --build /work/build \
+    && cmake --build /work/build --parallel 2 \
     && cmake --install /work/build --prefix /opt/nemo-speech
 
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867
@@ -84,6 +84,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       ca-certificates \
       libgomp1 \
       libsentencepiece0 \
+      libsndfile1 \
       python3 \
       python3-pip \
       python3-venv \
@@ -94,6 +95,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       "huggingface-hub==0.36.0" \
       "numpy==2.2.3" \
       "protobuf==6.33.0" \
+      "onnxruntime==1.23.2" \
+      "kaldi-native-fbank==1.22.3" \
+      "soundfile==0.13.1" \
+      "scipy==1.15.3" \
+      "boto3==1.43.89" \
     && /opt/venv/bin/pip check
 
 ENV PATH=/opt/venv/bin:${PATH}

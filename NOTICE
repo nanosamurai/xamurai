@@ -4,3 +4,16 @@ Copyright 2026 nanosamurai contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
+
+Optional Nemotron speaker processing downloads these unmodified model artifacts:
+
+NVIDIA Streaming Sortformer 4-speaker v2 (Q8 GGUF)
+https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2
+Provided by NVIDIA under Creative Commons Attribution 4.0 International.
+
+WeSpeaker VoxCeleb ResNet34-LM (ONNX)
+https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM
+Provided by the WeSpeaker project under Creative Commons Attribution 4.0 International.
+
+Model license: https://creativecommons.org/licenses/by/4.0/
+Model revisions and content digests: docs/nemotron-sortformer.md

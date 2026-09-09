@@ -5,6 +5,7 @@ on:
     branches:
       - enable-realtime-replica-routing
       - master
+      - validate-nemotron-realtime
   workflow_call:
 
 permissions:

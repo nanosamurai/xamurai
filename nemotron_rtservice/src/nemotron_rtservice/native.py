@@ -18,6 +18,18 @@ NEMO_SPEECH_VERSION = "0.1.0"
 NEMO_SPEECH_REVISION = "4f9676226f667d14608487df744f375db87127f8"
 ENDPOINTING_SILENCE_MS = 800
 MAX_UTTERANCE_SECONDS = 30.0
+SORTFORMER_MODEL_ID = "nvidia/diar_streaming_sortformer_4spk-v2"
+SORTFORMER_MODEL_FILENAME = "diar_streaming_sortformer_4spk-v2.q8_0.gguf"
+SORTFORMER_MODEL_REVISION = "5240a64075176943f677d30fa2171c780229f341"
+SORTFORMER_MODEL_DIGEST = "sha256:0679cfeb1ce356d0dea9470b31274f4bfc7eb927497d82005483770666da998a"
+
+
+@dataclass(frozen=True)
+class SpeakerWord:
+    text: str
+    start_s: float
+    end_s: float
+    speaker: int
 
 
 @dataclass(frozen=True)
@@ -26,6 +38,7 @@ class TranscriptUpdate:
     final: bool
     audio_processed_s: float
     language: str
+    words: tuple[SpeakerWord, ...] = ()
 
 
 class NativeRuntimeError(RuntimeError):
@@ -75,6 +88,19 @@ class _EndpointingConfig(ctypes.Structure):
     ]
 
 
+class _DiarizationConfig(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_size_t),
+        ("model_path", ctypes.c_char_p),
+        ("chunk_frames", ctypes.c_int32),
+        ("right_context_frames", ctypes.c_int32),
+        ("left_context_frames", ctypes.c_int32),
+        ("fifo_frames", ctypes.c_int32),
+        ("spkcache_frames", ctypes.c_int32),
+        ("update_period_frames", ctypes.c_int32),
+    ]
+
+
 class _RecognizerConfig(ctypes.Structure):
     _fields_ = [
         ("size", ctypes.c_size_t),
@@ -85,7 +111,7 @@ class _RecognizerConfig(ctypes.Structure):
         ("vad", ctypes.c_void_p),
         ("endpointing", ctypes.POINTER(_EndpointingConfig)),
         ("postproc", ctypes.c_void_p),
-        ("diar", ctypes.c_void_p),
+        ("diar", ctypes.POINTER(_DiarizationConfig)),
         ("batching", ctypes.POINTER(_BatchingConfig)),
     ]
 
@@ -119,23 +145,31 @@ def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return value
 
 
-def _verified_model_path() -> str:
+def diarization_from_env() -> bool:
+    value = os.getenv("NEMOTRON_DIARIZATION", "false").strip().lower()
+    if value not in ("true", "false"):
+        raise ValueError("NEMOTRON_DIARIZATION must be true or false")
+    return value == "true"
+
+
+def _verified_model_path(model_id: str = MODEL_ID, filename: str = MODEL_FILENAME,
+                         revision: str = MODEL_REVISION, expected_digest: str = MODEL_DIGEST) -> str:
     """Download exactly one immutable GGUF artifact and verify its content."""
     from huggingface_hub import hf_hub_download
 
     path = Path(
         hf_hub_download(
-            repo_id=MODEL_ID,
-            filename=MODEL_FILENAME,
-            revision=MODEL_REVISION,
+            repo_id=model_id,
+            filename=filename,
+            revision=revision,
         )
     )
     digest = hashlib.sha256()
     with path.open("rb") as source:
         for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
             digest.update(block)
-    if f"sha256:{digest.hexdigest()}" != MODEL_DIGEST:
-        raise RuntimeError("pinned Nemotron model artifact digest does not match")
+    if f"sha256:{digest.hexdigest()}" != expected_digest:
+        raise RuntimeError("pinned speech model artifact digest does not match")
     return str(path)
 
 
@@ -177,6 +211,17 @@ def _configure_library(library: ctypes.CDLL) -> None:
     library.nemo_speech_asr_result_alternative_count.restype = ctypes.c_size_t
     library.nemo_speech_asr_result_transcript.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
     library.nemo_speech_asr_result_transcript.restype = ctypes.c_char_p
+    library.nemo_speech_asr_result_word_count.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    library.nemo_speech_asr_result_word_count.restype = ctypes.c_size_t
+    for name, result_type in (
+        ("text", ctypes.c_char_p),
+        ("start_time", ctypes.c_int32),
+        ("end_time", ctypes.c_int32),
+        ("speaker_tag", ctypes.c_int32),
+    ):
+        function = getattr(library, f"nemo_speech_asr_result_word_{name}")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
+        function.restype = result_type
     library.nemo_speech_asr_result_language_count.argtypes = [
         ctypes.c_void_p,
         ctypes.c_size_t,
@@ -202,7 +247,7 @@ class NativeSession:
     """One cache-aware native stream; calls must stay on one worker thread."""
 
     def __init__(self, library: ctypes.CDLL, recognizer: ctypes.c_void_p, request_id: str,
-                 language: Optional[str]) -> None:
+                 language: Optional[str], *, diarization: bool = False) -> None:
         self._library = library
         self._handle = ctypes.c_void_p()
         self._closed = False
@@ -210,6 +255,7 @@ class NativeSession:
         self._language = language.encode("ascii") if language else None
         self._input_audio_s = 0.0
         self._last_final_audio_s = 0.0
+        self._diarization = diarization
         options = library.nemo_speech_asr_recognition_options_default()
         options.request_id = self._request_id
         options.language_code = self._language
@@ -218,6 +264,8 @@ class NativeSession:
         # to false. Nemotron 3.5 is self-punctuating, so this gate preserves the
         # casing and punctuation emitted by the model without a PnC sidecar.
         options.enable_automatic_punctuation = True
+        options.enable_word_time_offsets = diarization
+        options.enable_speaker_diarization = diarization
         _check(
             library.nemo_speech_asr_streaming_recognize(
                 recognizer, ctypes.byref(options), ctypes.byref(self._handle)
@@ -273,13 +321,27 @@ class NativeSession:
                 if alternatives and self._library.nemo_speech_asr_result_language_count(result, 0):
                     encoded = self._library.nemo_speech_asr_result_language_code(result, 0, 0)
                     language = encoded.decode("utf-8", errors="replace") if encoded else ""
+                final = bool(self._library.nemo_speech_asr_result_is_final(result))
+                words = ()
+                if self._diarization and final and alternatives:
+                    words = tuple(
+                        SpeakerWord(
+                            text=(self._library.nemo_speech_asr_result_word_text(result, 0, i)
+                                  or b"").decode("utf-8", errors="replace"),
+                            start_s=self._library.nemo_speech_asr_result_word_start_time(result, 0, i) / 1000.0,
+                            end_s=self._library.nemo_speech_asr_result_word_end_time(result, 0, i) / 1000.0,
+                            speaker=int(self._library.nemo_speech_asr_result_word_speaker_tag(result, 0, i)),
+                        )
+                        for i in range(self._library.nemo_speech_asr_result_word_count(result, 0))
+                    )
                 update = TranscriptUpdate(
                     text=transcript.decode("utf-8", errors="replace") if transcript else "",
-                    final=bool(self._library.nemo_speech_asr_result_is_final(result)),
+                    final=final,
                     audio_processed_s=float(
                         self._library.nemo_speech_asr_result_audio_processed(result)
                     ),
                     language=language,
+                    words=words,
                 )
                 updates.append(update)
                 if update.final:
@@ -302,6 +364,7 @@ class NativeNemotronBackend:
     runtime = f"nemo-speech-cpp=={NEMO_SPEECH_VERSION}"
 
     def __init__(self, maximum_sessions: int) -> None:
+        self.diarization = diarization_from_env()
         library_path = os.getenv(
             "NEMO_SPEECH_LIBRARY",
             "/opt/nemo-speech/lib/libnemo_speech_asr_c.so",
@@ -345,6 +408,19 @@ class NativeNemotronBackend:
             vad_based=False,
             stop_history_eou_ms=ENDPOINTING_SILENCE_MS,
         )
+        diar = None
+        if self.diarization:
+            diar_path = _verified_model_path(
+                SORTFORMER_MODEL_ID, SORTFORMER_MODEL_FILENAME,
+                SORTFORMER_MODEL_REVISION, SORTFORMER_MODEL_DIGEST,
+            ).encode("utf-8")
+            # Retain the pinned runtime's streaming geometry. Zero is a valid
+            # left context, so only that field needs the default sentinel.
+            diar = _DiarizationConfig(
+                size=ctypes.sizeof(_DiarizationConfig),
+                model_path=diar_path,
+                left_context_frames=-1,
+            )
         config = _RecognizerConfig(
             size=ctypes.sizeof(_RecognizerConfig),
             backend=ctypes.pointer(backend),
@@ -354,7 +430,7 @@ class NativeNemotronBackend:
             vad=None,
             endpointing=ctypes.pointer(endpointing),
             postproc=None,
-            diar=None,
+            diar=ctypes.pointer(diar) if diar is not None else None,
             batching=ctypes.pointer(batching),
         )
         self._recognizer = ctypes.c_void_p()
@@ -366,7 +442,10 @@ class NativeNemotronBackend:
         )
 
     def open(self, session_id: str, language: Optional[str]) -> NativeSession:
-        return NativeSession(self._library, self._recognizer, session_id, language)
+        return NativeSession(
+            self._library, self._recognizer, session_id, language,
+            diarization=self.diarization,
+        )
 
     def close(self) -> None:
         recognizer = getattr(self, "_recognizer", None)

@@ -7,14 +7,17 @@ from concurrent import futures
 from typing import Optional, Protocol
 
 import grpc
+import numpy as np
 
 from nemotron_rtservice.native import (
     MODEL_DIGEST,
     MODEL_REVISION,
     NEMO_SPEECH_REVISION,
+    SORTFORMER_MODEL_REVISION,
     NativeNemotronBackend,
     TranscriptUpdate,
 )
+from nemotron_rtservice.speakers import EMBEDDING_MODEL_REVISION, IDENTIFIER, enrollment_from_env, speaker_turns
 from proto_gen import stream_pb2, stream_pb2_grpc
 from xamurai_serving import SessionSlots, max_sessions_from_env, serving_instance_id
 
@@ -22,6 +25,8 @@ from xamurai_serving import SessionSlots, max_sessions_from_env, serving_instanc
 logger = logging.getLogger(__name__)
 
 PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r1"
+DIARIZED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-q8-r2"
+ENROLLED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-enrolled-q8-r2"
 SAMPLE_RATE = 16_000
 MAX_CHUNK_BYTES = 1_048_576
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -65,18 +70,22 @@ def _public_language(language: str, fallback: str) -> str:
 class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
     """Expose one pinned cache-aware Nemotron streaming profile."""
 
-    def __init__(self, backend: NemotronBackend, maximum_sessions: int) -> None:
+    def __init__(self, backend: NemotronBackend, maximum_sessions: int, enrollment=None) -> None:
         self._backend = backend
         self._slots = SessionSlots(maximum_sessions)
         self._instance_id = serving_instance_id()
+        self._diarization = bool(getattr(backend, "diarization", False))
+        self._enrollment = enrollment
+        self._profile_id = (ENROLLED_PROFILE_ID if enrollment is not None else DIARIZED_PROFILE_ID
+                            ) if self._diarization else PROFILE_ID
 
     def GetCapabilities(self, request, context):
         return stream_pb2.RealtimeCapabilities(
-            provider_profile_id=PROFILE_ID,
+            provider_profile_id=self._profile_id,
             windowed_realtime=False,
             native_streaming=True,
             batch=self._slots.maximum > 1,
-            segment_timestamps=False,
+            segment_timestamps=self._diarization,
             word_timestamps=False,
             language_detection=True,
             supported_languages=tuple(LANGUAGE_LOCALES),
@@ -87,8 +96,10 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             runtime=self._backend.runtime,
             model_revision=MODEL_REVISION,
             model_digest=MODEL_DIGEST,
-            implementation_revision=f"nemo-speech-cpp:{NEMO_SPEECH_REVISION}",
-            speaker_labels=False,
+            implementation_revision=(f"nemo-speech-cpp:{NEMO_SPEECH_REVISION}"
+                                     + (f";sortformer:{SORTFORMER_MODEL_REVISION}" if self._diarization else "")
+                                     + (f";wespeaker:{EMBEDDING_MODEL_REVISION}" if self._enrollment is not None else "")),
+            speaker_labels=self._diarization,
         )
 
     def Stream(self, request_iterator, context):
@@ -108,11 +119,54 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
         language: Optional[str] = None
         last_partial = ""
         segment_start_s = 0.0
+        tenant_id = None
+        audio = bytearray()
+
+        def events(update):
+            nonlocal segment_start_s, last_partial
+            text = update.text.strip()
+            if not text or (not update.final and text == last_partial):
+                return ()
+            coarse = self._event(opening_session_id, update, total_samples, language or "", segment_start_s)
+            result = (coarse,)
+            if self._diarization and update.final:
+                turns = speaker_turns(text, update.words, segment_start_s, coarse.end_s)
+                if turns:
+                    names = {}
+                    if self._enrollment is not None and tenant_id:
+                        offset = total_samples - len(audio) // 2
+                        for speaker in {turn.speaker for turn in turns if turn.speaker}:
+                            pieces = []
+                            for turn in turns:
+                                if turn.speaker != speaker:
+                                    continue
+                                begin = max(0, round(turn.start_s * SAMPLE_RATE) - offset)
+                                end = min(len(audio) // 2, round(turn.end_s * SAMPLE_RATE) - offset)
+                                if end > begin:
+                                    pieces.append(np.frombuffer(bytes(audio[begin * 2:end * 2]), dtype="<i2"))
+                            if pieces:
+                                samples = np.concatenate(pieces).astype(np.float32) / 32768.0
+                                names[speaker] = self._enrollment.identify(
+                                    tenant_id, samples, is_active=context.is_active,
+                                )
+                    result = tuple(stream_pb2.AsrEvent(
+                        session_id=opening_session_id, start_s=turn.start_s, end_s=turn.end_s,
+                        text=turn.text.strip(), type=stream_pb2.FINAL, lang=coarse.lang,
+                        speaker=names.get(turn.speaker) or (f"SPEAKER_{turn.speaker - 1:02d}" if turn.speaker else ""),
+                        provider_profile_id=self._profile_id,
+                    ) for turn in turns)
+            if update.final:
+                # Advance by the native endpoint, independently of the last
+                # word's time, so silence is not replayed as the next partial.
+                segment_start_s = coarse.end_s
+            last_partial = "" if update.final else text
+            return result
+
         try:
             yield stream_pb2.AsrEvent(
                 session_id=opening_session_id,
                 type=stream_pb2.SESSION_ACCEPTED,
-                provider_profile_id=PROFILE_ID,
+                provider_profile_id=self._profile_id,
                 serving_instance_id=self._instance_id,
             )
             for chunk in request_iterator:
@@ -124,6 +178,14 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                 )
                 if error:
                     raise _InvalidRequest(error)
+                if tenant_id is None:
+                    tenant_id = chunk.tenant_id
+                    if tenant_id and not IDENTIFIER.fullmatch(tenant_id):
+                        raise _InvalidRequest("invalid tenant ID")
+                    if metadata.get("x-tenant-id", tenant_id) != tenant_id:
+                        raise _InvalidRequest("tenant ID does not match stream metadata")
+                elif chunk.tenant_id != tenant_id:
+                    raise _InvalidRequest("tenant ID changed within realtime stream")
                 if native_stream is None:
                     language = chunk.lang
                     native_stream = self._backend.open(
@@ -132,38 +194,17 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                     )
                 expected_sequence = chunk.seq + 1
                 total_samples += len(chunk.pcm16_le) // 2
+                if self._enrollment is not None:
+                    audio.extend(chunk.pcm16_le)
+                    # One 30 s native utterance plus the largest accepted
+                    # ingress chunk; no session-lifetime audio accumulation.
+                    del audio[:max(0, len(audio) - 64 * SAMPLE_RATE * 2)]
                 for update in native_stream.push(chunk.pcm16_le, chunk.sample_rate):
-                    text = update.text.strip()
-                    if not text or (not update.final and text == last_partial):
-                        continue
-                    event = self._event(
-                        opening_session_id,
-                        update,
-                        total_samples,
-                        language or "",
-                        segment_start_s,
-                    )
-                    yield event
-                    if update.final:
-                        segment_start_s = event.end_s
-                    last_partial = "" if update.final else text
+                    yield from events(update)
 
             if native_stream is not None and context.is_active():
                 for update in native_stream.finish():
-                    text = update.text.strip()
-                    if not text or (not update.final and text == last_partial):
-                        continue
-                    event = self._event(
-                        opening_session_id,
-                        update,
-                        total_samples,
-                        language or "",
-                        segment_start_s,
-                    )
-                    yield event
-                    if update.final:
-                        segment_start_s = event.end_s
-                    last_partial = "" if update.final else text
+                    yield from events(update)
         except _InvalidRequest as exc:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
         except grpc.RpcError as exc:
@@ -196,12 +237,11 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             return "PCM16 payload exceeds the realtime chunk limit"
         if language is None and chunk.lang and chunk.lang not in LANGUAGE_LOCALES:
             return "Nemotron realtime service does not support the requested language code"
-        if language is not None and (chunk.lang or None) != language:
+        if language is not None and chunk.lang != language:
             return "language changed within realtime stream"
         return None
 
-    @staticmethod
-    def _event(session_id: str, update: TranscriptUpdate, total_samples: int,
+    def _event(self, session_id: str, update: TranscriptUpdate, total_samples: int,
                fallback_language: str, segment_start_s: float):
         total_seconds = total_samples / SAMPLE_RATE
         processed = update.audio_processed_s
@@ -213,20 +253,22 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             text=update.text.strip(),
             type=stream_pb2.FINAL if update.final else stream_pb2.PARTIAL,
             lang=_public_language(update.language, fallback_language),
-            provider_profile_id=PROFILE_ID,
+            provider_profile_id=self._profile_id,
         )
 
 
 def create_server(backend: Optional[NemotronBackend] = None, *, port: Optional[int] = None,
-                  maximum_sessions: Optional[int] = None) -> grpc.Server:
+                  maximum_sessions: Optional[int] = None, enrollment=None) -> grpc.Server:
     """Create the Nemotron server without starting its worker threads."""
     maximum = maximum_sessions if maximum_sessions is not None else max_sessions_from_env()
     if maximum < 1:
         raise ValueError("maximum_sessions must be positive")
     runtime = backend or NativeNemotronBackend(maximum)
+    if backend is None and runtime.diarization:
+        enrollment = enrollment_from_env()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max(4, maximum + 2)))
     stream_pb2_grpc.add_RealtimeASRServicer_to_server(
-        NemotronRealtimeServicer(runtime, maximum), server
+        NemotronRealtimeServicer(runtime, maximum, enrollment), server
     )
     bind_addr = os.getenv("NEMOTRON_RTSERVICE_BIND_ADDR", "[::]").strip() or "[::]"
     selected_port = port if port is not None else int(os.getenv("NEMOTRON_RTSERVICE_PORT", "50052"))

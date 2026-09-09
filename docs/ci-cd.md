@@ -12,11 +12,14 @@ to `master`.
 
 ## Pull request validation
 
-Pull requests targeting `master` run the lightweight CI and Gitleaks workflows.
+Pull requests targeting `master` or the unmerged `validate-nemotron-realtime`
+base run the lightweight CI and Gitleaks workflows. This lets the optional
+Sortformer/enrollment PR be reviewed and checked independently of its ASR base.
 They:
 
 - install the pinned dependencies from `requirements.ci.txt`
 - run unit tests that do not require Kafka, model downloads, or a GPU
+- bind the real gRPC conformance test servers to loopback only
 - scan the complete Git history for committed secrets without injecting any
   repository secret into pull request jobs
 

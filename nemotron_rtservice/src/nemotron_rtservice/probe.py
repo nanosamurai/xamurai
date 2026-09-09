@@ -5,6 +5,7 @@ import json
 import queue
 import time
 import wave
+from concurrent.futures import ThreadPoolExecutor
 
 import grpc
 
@@ -72,6 +73,7 @@ def _open_with_admission_retry(stub, session_id: str, timeout: int):
         except grpc.RpcError as exc:
             if (
                 exc.code() != grpc.StatusCode.RESOURCE_EXHAUSTED
+                or exc.details() != "REPLICA_FULL"
                 or time.monotonic() >= deadline
             ):
                 raise
@@ -102,7 +104,9 @@ def verify_replicas(stub, count: int, timeout: int) -> None:
             responses.cancel()
 
 
-def transcribe_wav(stub, path: str, timeout: int) -> None:
+def transcribe_wav(stub, path: str, timeout: int, *, session_id="nemotron-audio-probe",
+                   tenant_id="", require_speakers=False, require_enrolled=False,
+                   opened=None) -> dict:
     with wave.open(path, "rb") as source:
         if (
             source.getnchannels() != 1
@@ -112,32 +116,41 @@ def transcribe_wav(stub, path: str, timeout: int) -> None:
             raise ValueError("probe WAV must be mono PCM16 at 16000 Hz")
         audio = source.readframes(source.getnframes())
 
-    requests, responses, _ = _open_with_admission_retry(
-        stub, "nemotron-audio-probe", timeout
-    )
+    requests, responses, instance = opened or _open_with_admission_retry(stub, session_id, timeout)
     chunk_bytes = 3_200 * 2
     for sequence, offset in enumerate(range(0, len(audio), chunk_bytes), start=1):
         requests.send(
             stream_pb2.AudioChunk(
-                session_id="nemotron-audio-probe",
+                session_id=session_id,
                 seq=sequence,
                 sample_rate=16_000,
                 pcm16_le=audio[offset : offset + chunk_bytes],
                 lang="cs",
+                tenant_id=tenant_id,
             )
         )
     requests.finish()
     event_count = 0
     final_count = 0
     nonempty_final = False
+    speakers = set()
+    enrolled_count = 0
     for event in responses:
         event_count += 1
         if event.type == stream_pb2.FINAL:
             final_count += 1
             nonempty_final = nonempty_final or bool(event.text.strip())
+            if event.speaker:
+                speakers.add(event.speaker)
+                enrolled_count += int(not event.speaker.startswith("SPEAKER_"))
     if not nonempty_final:
         raise RuntimeError("Nemotron did not return a non-empty final transcript")
-    print(f"audio_check=ok events={event_count} finals={final_count}")
+    if require_speakers and not speakers:
+        raise RuntimeError("Nemotron did not return speaker-labelled finals")
+    if require_enrolled and not enrolled_count:
+        raise RuntimeError("Nemotron did not match an enrolled speaker")
+    print(f"audio_check=ok events={event_count} finals={final_count} speakers={len(speakers)} enrolled_finals={enrolled_count}")
+    return {"instance": instance, "finals": final_count, "speakers": len(speakers)}
 
 
 def main() -> None:
@@ -146,6 +159,10 @@ def main() -> None:
     parser.add_argument("--replicas", type=int, default=2)
     parser.add_argument("--wav")
     parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--tenant-id", default="")
+    parser.add_argument("--require-speakers", action="store_true")
+    parser.add_argument("--require-enrolled", action="store_true")
+    parser.add_argument("--concurrent-audio", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.replicas <= 16:
         parser.error("--replicas must be between 1 and 16")
@@ -154,7 +171,27 @@ def main() -> None:
         stub = stream_pb2_grpc.RealtimeASRStub(channel)
         verify_replicas(stub, args.replicas, args.timeout)
         if args.wav:
-            transcribe_wav(stub, args.wav, args.timeout)
+            kwargs = dict(tenant_id=args.tenant_id, require_speakers=args.require_speakers,
+                          require_enrolled=args.require_enrolled)
+            if args.concurrent_audio:
+                held = []
+                try:
+                    for index in range(args.replicas):
+                        held.append(_open_with_admission_retry(stub, f"nemotron-audio-{index}", args.timeout))
+                    with ThreadPoolExecutor(max_workers=args.replicas) as pool:
+                        runs = [pool.submit(transcribe_wav, stub, args.wav, args.timeout,
+                                            session_id=f"nemotron-audio-{index}", opened=opened, **kwargs)
+                                for index, opened in enumerate(held)]
+                        results = [run.result() for run in runs]
+                    if len({result["instance"] for result in results}) != args.replicas:
+                        raise RuntimeError("audio streams did not reach distinct replicas")
+                    print(f"concurrent_audio_check=ok instances={args.replicas}")
+                finally:
+                    for requests, responses, _ in held:
+                        requests.finish()
+                        responses.cancel()
+            else:
+                transcribe_wav(stub, args.wav, args.timeout, **kwargs)
 
 
 if __name__ == "__main__":
