@@ -69,3 +69,7 @@ Range API also passed. The normal WhisperX function produced six segments,
 31 words and six speaker-labelled segments on the same fixture. Its cached
 initial/warm runs took 16.657/1.502 seconds; the new worker measured
 16.171/1.459 seconds. This is a compatibility sample, not a benchmark.
+
+Publication scans recognize only the known synthetic UUID tails in the shared
+final-track vector, scoped to that file and rule; other values remain scanned.
+
