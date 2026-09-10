@@ -79,10 +79,19 @@ class S3Artifacts:
             sample_count = wav.getnframes()
         digest = file_digest(path)
         key = self.source_key(tenant_id, session_id, artifact_id)
-        with path.open("rb") as body:
-            response = self.client.put_object(
-                Bucket=self.bucket, Key=key, Body=body, IfNoneMatch="*",
-                ContentType="audio/wav", Metadata={"sha256": digest})
+        from botocore.exceptions import ClientError
+        try:
+            with path.open("rb") as body:
+                response = self.client.put_object(
+                    Bucket=self.bucket, Key=key, Body=body, IfNoneMatch="*",
+                    ContentType="audio/wav", Metadata={"sha256": digest})
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") not in ("PreconditionFailed", "412"):
+                raise
+            response = self.client.head_object(Bucket=self.bucket, Key=key)
+            if (response.get("Metadata", {}).get("sha256") != digest
+                    or response["ContentLength"] != path.stat().st_size):
+                raise ContractError("source_conflict") from None
         return pb.AudioArtifact(
             artifact_id=artifact_id, storage_uri=f"s3://{self.bucket}/{key}",
             sha256=digest, size_bytes=path.stat().st_size, sample_rate=16000,
@@ -171,7 +180,8 @@ class S3Artifacts:
             if len(canonical) > MAX_EVENT_BYTES or (legacy and len(legacy) > MAX_TRANSCRIPT_BYTES):
                 raise ValueError()
             for name in ("tenant_id", "session_id", "plan_id", "track_id", "profile_id",
-                         "run_id", "result_id", "primary"):
+                         "run_id", "result_id", "primary", "stage", "unit_id", "revision",
+                         "refinement_window"):
                 if getattr(event, name) != getattr(actual, name):
                     raise ValueError()
             if actual.source != event.source or actual.status not in ("succeeded", "failed"):

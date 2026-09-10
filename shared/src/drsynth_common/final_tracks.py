@@ -63,9 +63,11 @@ def require_name(value: str) -> str:
 
 def validate_plan(value: dict, tenant_id: str, session_id: str) -> dict:
     """Validate a frozen JSON plan against its authenticated event identity."""
-    if not isinstance(value, dict) or set(value) != {
+    required = {
         "schema_version", "plan_id", "tenant_id", "session_id", "final_tracks"
-    }:
+    }
+    if (not isinstance(value, dict) or not required <= set(value)
+            or set(value) - required not in (set(), {"refinement_tracks", "refinement_window_samples"})):
         raise ContractError("invalid_plan")
     if type(value["schema_version"]) is not int or value["schema_version"] != SCHEMA_VERSION:
         raise ContractError("unsupported_plan_version")
@@ -73,8 +75,20 @@ def validate_plan(value: dict, tenant_id: str, session_id: str) -> dict:
         require_uuid(value[name])
     if value["tenant_id"] != tenant_id or value["session_id"] != session_id:
         raise ContractError("plan_owner_mismatch")
-    selections = value["final_tracks"]
-    if not isinstance(selections, list) or not 1 <= len(selections) <= 4:
+    validate_selections(value["final_tracks"], allow_empty=bool(value.get("refinement_tracks")))
+    if "refinement_tracks" in value:
+        validate_selections(value["refinement_tracks"])
+        samples = value["refinement_window_samples"]
+        if type(samples) is not int or not 160000 <= samples <= 9600000:
+            raise ContractError("invalid_window_policy")
+    if len(canonical_json(value)) > MAX_PLAN_BYTES:
+        raise ContractError("plan_too_large")
+    return value
+
+
+def validate_selections(selections, *, allow_empty=False):
+    """Require bounded distinct tracks and exactly one primary for a stage."""
+    if not isinstance(selections, list) or not (0 if allow_empty else 1) <= len(selections) <= 4:
         raise ContractError("invalid_track_count")
     for selection in selections:
         if not isinstance(selection, dict) or set(selection) != {"track_id", "profile_id", "primary"}:
@@ -86,24 +100,25 @@ def validate_plan(value: dict, tenant_id: str, session_id: str) -> dict:
             raise ContractError("invalid_primary")
     if len({s["track_id"] for s in selections}) != len(selections):
         raise ContractError("duplicate_track")
-    if sum(s["primary"] for s in selections) != 1:
+    if selections and sum(s["primary"] for s in selections) != 1:
         raise ContractError("invalid_primary")
-    if len(canonical_json(value)) > MAX_PLAN_BYTES:
-        raise ContractError("plan_too_large")
-    return value
 
 
 def plan_headers(plan: dict) -> list[tuple[str, bytes]]:
     """Build the three routing headers from one validated frozen plan."""
     validate_plan(plan, plan["tenant_id"], plan["session_id"])
-    return [(PLAN_HEADER, canonical_json(plan)),
+    headers = [(PLAN_HEADER, canonical_json(plan)),
             (PLAN_ID_HEADER, plan["plan_id"].encode()),
             (TRACKS_HEADER, ",".join(s["track_id"] for s in plan["final_tracks"]).encode())]
+    if "refinement_tracks" in plan:
+        headers.append(("x-refinement-track-ids", ",".join(
+            s["track_id"] for s in plan["refinement_tracks"]).encode()))
+    return headers
 
 
 def read_plan(headers, tenant_id: str, session_id: str) -> dict | None:
     """Read strict UTF-8 headers; absent means legacy, partial means invalid."""
-    wanted = {PLAN_HEADER, PLAN_ID_HEADER, TRACKS_HEADER}
+    wanted = {PLAN_HEADER, PLAN_ID_HEADER, TRACKS_HEADER, "x-refinement-track-ids"}
     found = {}
     for key, value in headers or ():
         if key in wanted:
@@ -112,7 +127,7 @@ def read_plan(headers, tenant_id: str, session_id: str) -> dict | None:
             found[key] = value
     if not found:
         return None
-    if set(found) != wanted:
+    if not {PLAN_HEADER, PLAN_ID_HEADER, TRACKS_HEADER} <= set(found):
         raise ContractError("incomplete_plan_headers")
     try:
         plan = json.loads(found[PLAN_HEADER].decode("utf-8"))
@@ -133,10 +148,15 @@ def plan_proto(plan: dict) -> pb.AsyncTrackPlan:
 
 def plan_dict(plan: pb.AsyncTrackPlan) -> dict:
     """Convert protobuf without losing explicit false primary values."""
-    return dict(schema_version=plan.schema_version, plan_id=plan.plan_id,
+    value = dict(schema_version=plan.schema_version, plan_id=plan.plan_id,
                 tenant_id=plan.tenant_id, session_id=plan.session_id,
                 final_tracks=[dict(track_id=t.track_id, profile_id=t.profile_id,
                                    primary=t.primary) for t in plan.final_tracks])
+    if plan.refinement_tracks or plan.refinement_window_samples:
+        value.update(refinement_tracks=[dict(track_id=t.track_id, profile_id=t.profile_id,
+                                             primary=t.primary) for t in plan.refinement_tracks],
+                     refinement_window_samples=plan.refinement_window_samples)
+    return value
 
 
 def validate_recording(event: pb.RecordingFinished, headers) -> dict:

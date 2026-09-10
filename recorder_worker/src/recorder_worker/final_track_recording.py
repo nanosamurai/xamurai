@@ -12,6 +12,8 @@ from drsynth_common.final_track_artifacts import S3Artifacts, s3_client
 def resolve_plan(chunk, headers, controls):
     """Fail before accepting audio when a planned session cannot be supported."""
     plan = read_plan(headers, chunk.tenant_id, chunk.session_id)
+    if plan is not None and not plan["final_tracks"]:
+        return None
     if plan is not None:
         if os.getenv("FINAL_TRACKS_ENABLED") != "true":
             raise ContractError("final_tracks_disabled")

@@ -14,6 +14,7 @@ from drsynth_common.final_tracks import (
     identities, validate_recording,
 )
 from drsynth_common.stream_controls import parse_stream_controls_from_kafka_headers
+from drsynth_common import refinement_tracks
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,18 @@ def primary_projection(event, transcript):
     """Produce the legacy primary representation from accepted normalized data."""
     if not event.primary or event.status != "succeeded":
         return None
+    if event.stage == "refined":
+        window = event.refinement_window
+        legacy = pb.RefinedEvent(
+            session_id=event.session_id, tenant_id=event.tenant_id, lang=event.lang,
+            start_s=window.start_sample / 16000, end_s=window.end_sample / 16000,
+            text=transcript["full_text"], segments=transcript["segments"],
+            window_sec=window.window_samples / 16000,
+            slice_index=window.start_sample // window.window_samples,
+            flush_reason="slice" if window.flush_reason == "slice" else "idle",
+            bff_origin_uri=window.bff_origin_uri, created_at_ns=event.created_at_ns,
+            refinement_model=event.profile_id)
+        return legacy.SerializeToString(deterministic=True)
     legacy = pb.SessionTranscript(
         session_id=event.session_id, tenant_id=event.tenant_id,
         recording_url=event.source.storage_uri, lang=event.lang,
@@ -80,28 +93,34 @@ def primary_projection(event, transcript):
     return data
 
 
-def process_recording(event, headers, *, track_id, profile_id, provider, store, attempts=3):
+def process_recording(event, headers, *, track_id, profile_id, provider, store, attempts=3, window=None):
     """Return immutable outcome bytes, or None when this track is unselected.
 
     Bad routing/identity fails visibly before storage. Storage outages escape
     without committing. Bounded provider failures become durable outcomes.
     Existing manifests are replayed without rerunning the provider.
     """
-    plan = validate_recording(event, headers)
+    plan = (refinement_tracks.validate_window(window, headers) if window is not None
+            else validate_recording(event, headers))
+    stage = "refined" if window is not None else "final"
     controls = parse_stream_controls_from_kafka_headers(headers)
-    if not controls.want_final or not controls.store_recording:
+    if not (controls.want_refined if window is not None else controls.want_final) or not controls.store_recording:
         raise ContractError("unsupported_retention_or_outputs")
-    selection = next((s for s in plan["final_tracks"]
+    selection = next((s for s in plan["refinement_tracks" if window is not None else "final_tracks"]
                       if (s["track_id"], s["profile_id"]) == (track_id, profile_id)), None)
     if selection is None:
         return None
     store.validate_source(event.source, event.tenant_id, event.session_id)
-    run_id, result_id = identities(plan, event.source, selection)
+    run_id, result_id = (refinement_tracks.identities(plan, window, selection) if window is not None
+                         else identities(plan, event.source, selection))
     outcome = pb.FinalTrackResult(
         schema_version=1, session_id=event.session_id, tenant_id=event.tenant_id,
-        stage="final", track_id=track_id, profile_id=profile_id, run_id=run_id,
-        result_id=result_id, unit_id="recording", revision=1, source=event.source,
+        stage=stage, track_id=track_id, profile_id=profile_id, run_id=run_id,
+        result_id=result_id, unit_id=refinement_tracks.unit_id(window) if window is not None else "recording",
+        revision=1, source=event.source,
         primary=selection["primary"], plan_id=plan["plan_id"])
+    if window is not None:
+        outcome.refinement_window.CopyFrom(window)
     existing = store.read_outcome(outcome)
     if existing is not None:
         logger.info("Replaying final track outcome track=%s result_id=%s", track_id, result_id)
@@ -111,16 +130,25 @@ def process_recording(event, headers, *, track_id, profile_id, provider, store, 
     error_code = ""
     try:
         with store.audio_file(event.source, event.tenant_id, event.session_id) as path:
-            audio = AudioInput(path, event.source, 0, event.source.sample_count)
+            audio = AudioInput(path, event.source, window.start_sample if window is not None else 0,
+                               window.end_sample if window is not None else event.source.sample_count)
             for attempt in range(max(1, min(attempts, 3))):
                 outcome.attempt_id = str(uuid.uuid4())
                 context = RunContext(event.tenant_id, event.session_id, track_id,
-                                     profile_id, run_id, outcome.attempt_id, event.lang)
+                                     profile_id, run_id, outcome.attempt_id, event.lang, stage)
                 try:
                     result = provider.process(audio, context)
                     if provider.describe()["profile_id"] != profile_id:
                         raise ContractError("profile_mismatch")
-                    result = (result, normalize_transcript(result, event.duration_s))
+                    transcript = normalize_transcript(result, event.duration_s)
+                    if window is not None:
+                        offset = window.start_sample / 16000
+                        for segment in transcript["segments"]:
+                            for item in [segment, *segment.get("words", [])]:
+                                for key in ("start_s", "end_s"):
+                                    if key in item:
+                                        item[key] += offset
+                    result = (result, transcript)
                     break
                 except ContractError:
                     raise
@@ -168,6 +196,11 @@ def process_recording(event, headers, *, track_id, profile_id, provider, store, 
 
 def outcome_headers(outcome):
     """Stable projection identity and source metadata for idempotent SQL writes."""
+    if outcome.stage == "refined":
+        return [("x-track-outcome", outcome.SerializeToString(deterministic=True)),
+                ("x-result-id", outcome.result_id.encode()),
+                ("x-track-id", outcome.track_id.encode()),
+                ("x-profile-id", outcome.profile_id.encode())]
     return [(key, str(value).encode("utf-8")) for key, value in {
         "x-result-id": outcome.result_id, "x-source-artifact-id": outcome.source.artifact_id,
         "x-source-sha256": outcome.source.sha256, "x-source-size-bytes": outcome.source.size_bytes,
