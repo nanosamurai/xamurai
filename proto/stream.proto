@@ -111,6 +111,66 @@ message RecordingFinished {
   string tenant_id    = 6;
 
   int64 created_at_ns = 7;   // when this event was created
+
+  // Additive final-track contract. Absent on legacy recordings.
+  AudioArtifact source = 8;
+  AsyncTrackPlan final_plan = 9;
+}
+
+// Frozen by the BFF before accepting audio; clients cannot supply profiles.
+message AsyncTrackSelection {
+  string track_id = 1;
+  string profile_id = 2;
+  bool primary = 3;
+}
+
+message AsyncTrackPlan {
+  uint32 schema_version = 1;
+  string plan_id = 2;
+  string tenant_id = 3;
+  string session_id = 4;
+  repeated AsyncTrackSelection final_tracks = 5;
+}
+
+message AudioArtifact {
+  string artifact_id = 1;
+  string storage_uri = 2;
+  string sha256 = 3;
+  uint64 size_bytes = 4;
+  uint32 sample_rate = 5;
+  uint64 sample_count = 6;
+  string media_type = 7;
+  string version_id = 8;
+}
+
+// Bounded envelope on transcripts.final-tracks. Transcript JSON is in S3.
+// Delivery may repeat; result_id identifies one immutable logical outcome.
+message FinalTrackResult {
+  uint32 schema_version = 1;
+  string session_id = 2;
+  string tenant_id = 3;
+  string stage = 4;
+  string track_id = 5;
+  string profile_id = 6;
+  string run_id = 7;
+  string attempt_id = 8;
+  string result_id = 9;
+  string unit_id = 10;
+  uint32 revision = 11;
+  string status = 12;
+  AudioArtifact source = 13;
+  string result_uri = 14;
+  string result_sha256 = 15;
+  bool primary = 16;
+  string error_code = 17;
+  repeated string degradations = 18;
+  bool segment_timestamps = 19;
+  bool word_timestamps = 20;
+  bool speaker_labels = 21;
+  string provenance_json = 22;
+  int64 created_at_ns = 23;
+  string lang = 24;
+  string plan_id = 25;
 }
 
 message WordAlignment {
