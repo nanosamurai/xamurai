@@ -377,6 +377,9 @@ def _produce_with_ack(
 # --------------------------------------------------------------------------- #
 
 def main():
+    if os.getenv("FINAL_TRACKS_ENABLED") == "true":
+        from finalizer_worker.track_worker import main as track_main
+        return track_main()
     setup_logging(default_level="INFO")
     # Initialize OTEL SDK (no-op if deps missing)
     setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "finalizer-worker"))
@@ -422,6 +425,13 @@ def main():
                 try:
                     rf = stream_pb2.RecordingFinished()
                     rf.ParseFromString(msg.value())
+
+                    # Planned work belongs exclusively to the independent track groups.
+                    if rf.HasField("final_plan") or any(
+                        key == "x-asr-plan" for key, _ in (msg.headers() or [])
+                    ):
+                        consumer.commit(msg, asynchronous=False)
+                        continue
 
                     controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
 

@@ -14,6 +14,9 @@ from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
 from drsynth_common.logging_setup import setup_logging
 from drsynth_common.stream_controls import parse_stream_controls_from_kafka_headers
+from drsynth_common.final_tracks import ContractError, plan_headers, plan_proto
+from drsynth_common.kafka_ack import produce_acked
+from recorder_worker.final_track_recording import ImmutableRecordingWriter, resolve_plan
 
 try:
     from opentelemetry import trace
@@ -255,6 +258,7 @@ class SessionRecording:
     # Stream controls captured from the last consumed AudioChunk headers.
     # Used so finalize_session can propagate x-store-recording downstream.
     store_recording: bool = True
+    final_plan: Optional[dict] = None
 
     total_samples: int = 0
     last_activity: float = 0.0
@@ -323,9 +327,8 @@ def finalize_session(session_id: str, rec: SessionRecording, producer: Producer)
 
     url = rec.close_and_get_url()
     logger.info(
-        "Finalized session %s: url=%s dur=%.2fs sr=%d lang=%s tenant=%s",
+        "Finalized session %s: dur=%.2fs sr=%d lang=%s tenant=%s",
         session_id,
-        url,
         rec.duration_s,
         rec.sample_rate,
         rec.lang,
@@ -341,6 +344,15 @@ def finalize_session(session_id: str, rec: SessionRecording, producer: Producer)
         tenant_id=rec.tenant_id,
         created_at_ns=time.time_ns(),
     )
+
+    if rec.final_plan is not None:
+        event.source.CopyFrom(rec.writer.source)
+        event.final_plan.CopyFrom(plan_proto(rec.final_plan))
+        produce_acked(producer, topic=TOPIC_RECORDING_FINISHED,
+                      key=session_id.encode(), value=event.SerializeToString(deterministic=True),
+                      headers=with_current_trace_context(plan_headers(rec.final_plan) + [
+                          ("x-store-recording", b"true"), ("x-outputs", b"final")]))
+        return
 
     # Re-attach trace context captured from audio.raw consumption.
     with extracted_context_from_headers(rec.trace_headers):
@@ -408,9 +420,10 @@ def main():
                 sid for sid, rec in sessions.items() if now - rec.last_activity > SESSION_IDLE_SEC
             ]
             for sid in idle_sessions:
-                rec = sessions.pop(sid, None)
+                rec = sessions.get(sid)
                 if rec is not None:
                     finalize_session(sid, rec, producer)
+                    sessions.pop(sid, None)
 
             if msg is None:
                 continue
@@ -449,6 +462,7 @@ def main():
                     audio_chunk.ParseFromString(msg.value())
 
                     controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
+                    final_plan = resolve_plan(audio_chunk, msg.headers(), controls)
                     if not controls.want_final:
                         # Skip recording entirely (saves storage + downstream finalizer compute).
                         consumer.commit(msg, asynchronous=True)
@@ -475,8 +489,11 @@ def main():
                     tenant_id = getattr(audio_chunk, "tenant_id", "") or "default"
 
                     rec = sessions.get(session_id)
+                    if rec is not None and (rec.final_plan != final_plan or rec.tenant_id != tenant_id):
+                        raise ContractError("recording_plan_changed")
                     if rec is None:
-                        writer = make_writer_for_session(session_id, tenant_id, sr)
+                        writer = (ImmutableRecordingWriter(final_plan) if final_plan is not None
+                                  else make_writer_for_session(session_id, tenant_id, sr))
                         rec = SessionRecording(
                             session_id=session_id,
                             tenant_id=tenant_id,
@@ -484,6 +501,7 @@ def main():
                             lang=lang,
                             writer=writer,
                             last_activity=time.time(),
+                            final_plan=final_plan,
                         )
                         sessions[session_id] = rec
 
