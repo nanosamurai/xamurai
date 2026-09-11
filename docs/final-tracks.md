@@ -73,3 +73,6 @@ initial/warm runs took 16.657/1.502 seconds; the new worker measured
 Publication scans recognize only the known synthetic UUID tails in the shared
 final-track vector, scoped to that file and rule; other values remain scanned.
 
+The lightweight pull-request CI gate includes `tests/test_final_tracks_unit.py`
+alongside the existing realtime suites, using fake model and storage adapters.
+
