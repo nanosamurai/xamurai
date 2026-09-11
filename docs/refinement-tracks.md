@@ -57,6 +57,10 @@ These cover restart/replay, publication failure, interleaved commit frontiers,
 absolute timestamps, track failure isolation and tenant/plan/sequence tampering.
 Regenerate the additive Python messages with
 `buf generate proto --template proto/buf.gen.python.yaml`; the pinned compiler
-keeps smoke consumers compatible with protobuf 6.x. No RPC methods changed.
+uses v33.0 so generated messages load with the existing protobuf 6.33.0 runtime
+in CI and the realtime images. The refinement PR's initial CI run exposed the
+v33.4 generation/runtime mismatch; regenerating with the matching compiler
+preserves the wire contract and existing runtime pins. CI includes both final
+and refinement contract/replay unit suites. No RPC methods changed.
 Anonymous speaker labels are local to each window; cross-window identity is
 not inferred from a repeated label.
