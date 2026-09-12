@@ -68,29 +68,16 @@ def test_reject_ambiguous_or_tampered_plan(recording, mutation):
 
 class MemoryStore:
     def __init__(self, path):
-        self.path, self.outcomes, self.transcripts = path, {}, {}
+        self.path = path
         self.downloads = 0
 
     def validate_source(self, *args):
         pass
 
-    def read_outcome(self, event):
-        return self.outcomes.get(event.result_id)
-
     @contextmanager
     def audio_file(self, *args):
         self.downloads += 1
         yield self.path
-
-    def put_transcript(self, event, transcript):
-        self.transcripts[event.result_id] = transcript
-        return "s3://recordings/result.json", "b" * 64
-
-    def publish_once(self, event, legacy):
-        value = (pb.FinalTrackResult.FromString(event.SerializeToString()),
-                 event.SerializeToString(deterministic=True), legacy)
-        return self.outcomes.setdefault(event.result_id, value)
-
 
 class FakeTrack:
     def __init__(self, failures=0, profile="whisperx-medium-final-r1"):
@@ -107,23 +94,24 @@ class FakeTrack:
                                 "en", {"segment_timestamps": True}, {"fake": True})
 
 
-def test_retry_replay_and_primary_are_independent(recording, tmp_path):
-    event, plan, headers = recording
+def test_retry_replay_has_stable_identity_and_inline_content(recording, tmp_path):
+    event, _, headers = recording
     store, track = MemoryStore(tmp_path / "fixture.wav"), FakeTrack(failures=1)
     kwargs = dict(track_id="whisperx", profile_id=track.profile, provider=track, store=store)
-    accepted = process_recording(event, headers, **kwargs)
+    first = process_recording(event, headers, **kwargs)
+    assert first.schema_version == 2 and first.status == "succeeded"
+    assert first.full_text == "fixture" and first.segments[0].text == "fixture"
     assert track.calls == 2
-    assert accepted[0].status == "succeeded"
-    assert pb.SessionTranscript.FromString(accepted[2]).full_text == "fixture"
-    assert process_recording(event, headers, **kwargs) == accepted
-    assert track.calls == 2 and store.downloads == 1
+    replay = process_recording(event, headers, **kwargs)
+    assert replay.result_id == first.result_id and replay.full_text == first.full_text
+    assert track.calls == 3 and store.downloads == 2
     failed = FakeTrack(failures=10, profile="test-final-r1")
     second = process_recording(event, headers, track_id="test-secondary", profile_id=failed.profile,
                                provider=failed, store=store)
-    assert second[0].status == "failed" and second[2] is None and failed.calls == 3
-    assert second[0].result_id != accepted[0].result_id
-    assert "sensitive" not in second[0].provenance_json
-    assert len(store.outcomes) == 2
+    assert second.status == "failed" and not second.full_text and not second.segments
+    assert second.error_code == "inference_failed" and failed.calls == 3
+    assert second.result_id != first.result_id
+    assert b"sensitive" not in second.SerializeToString()
 
 
 def test_unselected_track_does_not_download_or_infer(recording, tmp_path):
@@ -164,7 +152,7 @@ class FakeS3:
         return {"Body": StreamingBody(io.BytesIO(data), len(data)), "ContentLength": len(data)}
 
 
-def test_s3_manifest_winner_digest_and_temporary_cleanup(recording, tmp_path):
+def test_only_source_audio_uses_s3_and_temporary_files_are_removed(recording, tmp_path):
     from drsynth_common.final_track_artifacts import S3Artifacts
     event, plan, headers = recording
     path = tmp_path / "audio.wav"
@@ -180,13 +168,11 @@ def test_s3_manifest_winner_digest_and_temporary_cleanup(recording, tmp_path):
     assert not temporary.exists()
     track = FakeTrack()
     kwargs = dict(track_id="whisperx", profile_id=track.profile, provider=track, store=store)
+    before = set(client.objects)
     accepted = process_recording(event, headers, **kwargs)
-    assert accepted[0].status == "succeeded"
-    losing = pb.FinalTrackResult.FromString(accepted[1])
-    losing.attempt_id = str(uuid.uuid4())
-    losing.status = "failed"
-    assert store.publish_once(losing, None) == accepted
-    assert process_recording(event, headers, **kwargs) == accepted and track.calls == 1
+    assert accepted.status == "succeeded" and accepted.full_text == "fixture"
+    assert process_recording(event, headers, **kwargs).result_id == accepted.result_id
+    assert track.calls == 2 and set(client.objects) == before
     key = store.validate_source(source, event.tenant_id, event.session_id)
     client.objects["recordings", key] = bytes(32044)
     with pytest.raises(ContractError, match="audio_digest_mismatch"):
@@ -194,8 +180,7 @@ def test_s3_manifest_winner_digest_and_temporary_cleanup(recording, tmp_path):
             pytest.fail("corrupt source was accepted")
 
 
-@pytest.mark.parametrize("fail_on", [1, 2])
-def test_kafka_publication_failure_replays_accepted_bytes(recording, tmp_path, monkeypatch, fail_on):
+def test_kafka_publication_failure_repeats_inference_with_same_result_id(recording, tmp_path, monkeypatch):
     from finalizer_worker import track_worker
     event, _, headers = recording
     trace = ("traceparent", b"00-00000000000000000000000000000001-0000000000000002-01")
@@ -208,14 +193,16 @@ def test_kafka_publication_failure_replays_accepted_bytes(recording, tmp_path, m
     def publish(_producer, **kwargs):
         assert trace in kwargs["headers"]
         published.append((kwargs["topic"], kwargs["value"]))
-        if len(published) == fail_on:
+        if len(published) == 1:
             raise RuntimeError("uncertain_publication")
     monkeypatch.setattr(track_worker, "produce_acked", publish)
     kwargs = dict(producer=None, track_id="whisperx", profile_id=track.profile, provider=track, store=store)
     with pytest.raises(RuntimeError, match="uncertain_publication"):
         track_worker.handle_message(Message(), **kwargs)
     track_worker.handle_message(Message(), **kwargs)
-    assert track.calls == 1 and published[:fail_on] == published[fail_on:fail_on * 2]
+    assert track.calls == 2 and len(published) == 2
+    assert {topic for topic, _ in published} == {"transcripts.final-tracks"}
+    assert len({pb.FinalTrackResult.FromString(value).result_id for _, value in published}) == 1
 
 
 def test_storage_outage_leaves_no_terminal_outcome(recording, tmp_path, monkeypatch):
@@ -223,11 +210,11 @@ def test_storage_outage_leaves_no_terminal_outcome(recording, tmp_path, monkeypa
     store, track = MemoryStore(tmp_path), FakeTrack()
     def unavailable(*args):
         raise ConnectionError("fixture outage")
-    monkeypatch.setattr(store, "read_outcome", unavailable)
+    monkeypatch.setattr(store, "audio_file", unavailable)
     with pytest.raises(ConnectionError):
         process_recording(event, headers, track_id="whisperx", profile_id=track.profile,
                           provider=track, store=store)
-    assert track.calls == 0 and not store.outcomes
+    assert track.calls == 0
 
 
 def test_missing_timing_and_speaker_enrichment_remains_explicit():
@@ -254,3 +241,41 @@ def test_recorder_propagates_plan_and_typed_source(recording, monkeypatch):
     propagated = pb.RecordingFinished.FromString(sent[0]["value"])
     assert validate_recording(propagated, sent[0]["headers"]) == plan
     assert propagated.source == event.source
+
+@pytest.mark.parametrize("kind", ["silence", "text-only", "oversized"])
+def test_inline_output_bounds_and_availability(recording, tmp_path, kind):
+    event, _, headers = recording
+    class Provider(FakeTrack):
+        def process(self, audio, context):
+            if kind == "silence":
+                return TranscriptResult("", [], "en", {}, {})
+            if kind == "text-only":
+                return TranscriptResult("fixture", [{"text": "fixture"}], "en", {}, {},
+                                        ["alignment_unavailable"])
+            return TranscriptResult("x" * 900000, [], "en", {}, {})
+    track = Provider()
+    result = process_recording(event, headers, track_id="whisperx", profile_id=track.profile,
+                               provider=track, store=MemoryStore(tmp_path))
+    assert not result.segment_timestamps and not result.word_timestamps and not result.speaker_labels
+    assert result.ByteSize() <= 900000
+    if kind == "oversized":
+        assert result.status == "failed" and result.error_code == "result_too_large"
+        assert not result.full_text and not result.segments
+    else:
+        assert result.status == "succeeded"
+        if kind == "silence":
+            assert not result.full_text and not result.segments
+        else:
+            assert result.full_text == result.segments[0].text == "fixture"
+
+
+def test_inline_proto_reserves_retired_fields():
+    from google.protobuf.descriptor_pb2 import DescriptorProto
+    descriptor = DescriptorProto()
+    pb.FinalTrackResult.DESCRIPTOR.CopyToProto(descriptor)
+    assert len(descriptor.field) == 18
+    assert {f.number for f in descriptor.field}.isdisjoint({4, 7, 8, 10, 11, 14, 15, 16, 22, 26})
+    assert {f.name: f.number for f in descriptor.field}["full_text"] == 27
+    assert {f.name: f.number for f in descriptor.field}["segments"] == 28
+    assert set(descriptor.reserved_name) == {"stage", "run_id", "attempt_id", "unit_id", "revision",
+                                             "result_uri", "result_sha256", "primary", "provenance_json"}
