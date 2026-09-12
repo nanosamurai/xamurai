@@ -6,11 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from confluent_kafka import Consumer, Producer, KafkaException, TopicPartition
 from proto_gen import stream_pb2 as pb
-from drsynth_common.final_tracks import FINAL_TRACK_TOPIC, MAX_EVENT_BYTES, ContractError, read_plan, require_name
+from drsynth_common.final_tracks import FINAL_TRACK_TOPIC, MAX_EVENT_BYTES, MAX_RECORD_BYTES, ContractError, read_plan, require_name
 from drsynth_common.final_track_artifacts import S3Artifacts, s3_client
 from drsynth_common.kafka_ack import produce_acked
 from drsynth_common.logging_setup import setup_logging
-from finalizer_worker.track_processing import process_recording, outcome_headers
+from finalizer_worker.track_processing import process_recording
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def kafka_config():
 
 
 def handle_message(message, *, producer, **processing):
-    """Publish immutable canonical and primary records before allowing a commit."""
+    """Acknowledge the inline result before allowing the recording input commit."""
     if message.value() is None or len(message.value()) > MAX_EVENT_BYTES:
         raise ContractError("recording_event_too_large")
     event = pb.RecordingFinished.FromString(message.value())
@@ -39,14 +39,13 @@ def handle_message(message, *, producer, **processing):
     accepted = process_recording(event, message.headers(), **processing)
     if accepted is None:
         return
-    outcome, canonical, primary = accepted
-    headers = outcome_headers(outcome)
-    headers.extend((key, value) for key, value in (message.headers() or [])
-                   if key in {"traceparent", "tracestate"})
+    canonical = accepted.SerializeToString(deterministic=True)
+    headers = [(key, value) for key, value in (message.headers() or [])
+               if key in {"traceparent", "tracestate"} and isinstance(value, bytes) and len(value) <= 512]
     key = event.session_id.encode()
+    if len(canonical) + len(key) + sum(len(k.encode()) + len(v) + 10 for k, v in headers) + 128 > MAX_RECORD_BYTES:
+        raise ContractError("result_record_too_large")
     produce_acked(producer, topic=FINAL_TRACK_TOPIC, key=key, value=canonical, headers=headers)
-    if primary is not None:
-        produce_acked(producer, topic="transcripts.final", key=key, value=primary, headers=headers)
 
 
 def consume(consumer, handler, *, stopped=lambda: False):
@@ -119,6 +118,7 @@ def main():
         "auto.offset.reset": "earliest", "max.poll.interval.ms": 300000,
         "max.partition.fetch.bytes": 1000000}))
     producer = Producer(dict(config, **{"enable.idempotence": True, "acks": "all",
+                                        "message.max.bytes": 1048576,
                                         "delivery.timeout.ms": 25000}))
     store = S3Artifacts(s3_client(), os.environ["S3_BUCKET"],
                         recording_prefix=os.getenv("FINAL_RECORDING_PREFIX", "recordings"))

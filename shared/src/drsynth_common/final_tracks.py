@@ -23,7 +23,10 @@ PLAN_ID_HEADER = "x-asr-plan-id"
 TRACKS_HEADER = "x-final-track-ids"
 MAX_PLAN_BYTES = 8192
 MAX_EVENT_BYTES = 65536
-MAX_TRANSCRIPT_BYTES = 1_000_000
+INLINE_SCHEMA_VERSION = 2
+# Leave room for the Kafka key, bounded tracing headers and record/batch framing.
+MAX_RESULT_BYTES = 900_000
+MAX_RECORD_BYTES = 1_000_000
 MAX_AUDIO_SECONDS = 600
 NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,95}\Z")
 SHA256 = re.compile(r"[a-f0-9]{64}\Z")

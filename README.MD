@@ -325,3 +325,10 @@ Report vulnerabilities privately as described in
 
 Licensed under Apache License 2.0. See [`LICENSE`](LICENSE) and
 [`NOTICE`](NOTICE).
+
+## Final-track storage correction
+
+Opt-in final tracks now carry inline transcripts to Persistor for authoritative
+Postgres storage and primary compatibility publication. Apply Compose migration
+016 and complete the retained-data drain before enabling the new contract.
+See [final-track contract and recovery](docs/final-tracks.md).

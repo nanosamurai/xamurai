@@ -59,5 +59,5 @@ USER 10001
 
 VOLUME ["/data/recordings"]
 
-# FINAL_TRACKS_ENABLED=true selects the S3-backed generic final-track consumer.
+# FINAL_TRACKS_ENABLED=true selects inline results with source audio in S3.
 CMD ["python", "-m", "finalizer_worker.finalizer_worker"]

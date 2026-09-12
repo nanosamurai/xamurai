@@ -1,9 +1,7 @@
-"""Tenant-scoped S3 storage for immutable final-track inputs and outcomes."""
+"""Tenant-scoped object storage for source audio only."""
 
 from __future__ import annotations
 
-import base64
-import json
 import os
 import tempfile
 import wave
@@ -12,8 +10,7 @@ from pathlib import Path
 
 from proto_gen import stream_pb2 as pb
 from drsynth_common.final_tracks import (
-    ContractError, MAX_EVENT_BYTES, MAX_TRANSCRIPT_BYTES, canonical_json,
-    file_digest, require_uuid,
+    ContractError, file_digest, require_uuid,
 )
 
 
@@ -36,22 +33,22 @@ def s3_client():
 
 
 class S3Artifacts:
-    """Validate exact source keys and publish one immutable outcome per result.
+    """Validate and transfer immutable recording audio.
 
     The source bucket/prefix is operator-controlled; event URLs cannot select
-    other storage. Outputs use the same bucket and a separate fixed prefix.
+    other storage. Transcript contents never enter this class.
     """
 
-    def __init__(self, client, bucket: str, recording_prefix="recordings", result_prefix="final-tracks"):
+    def __init__(self, client, bucket: str, recording_prefix="recordings"):
         if not bucket or any(c in bucket for c in "/\\:%"):
             raise ValueError("invalid configured bucket")
-        for prefix in (recording_prefix, result_prefix):
+        for prefix in (recording_prefix,):
             if not prefix or any(part in ("", ".", "..") for part in prefix.split("/")):
                 raise ValueError("invalid configured prefix")
             if any(c in prefix for c in "\\:%"):
                 raise ValueError("invalid configured prefix")
         self.client, self.bucket = client, bucket
-        self.recording_prefix, self.result_prefix = recording_prefix, result_prefix
+        self.recording_prefix = recording_prefix
 
     @classmethod
     def from_env(cls):
@@ -129,85 +126,3 @@ class S3Artifacts:
                 yield path
         finally:
             body.close()
-
-    def result_base(self, event):
-        """Derive a tenant/source/track/run namespace from validated identities."""
-        from drsynth_common.final_tracks import NAME
-        if not NAME.fullmatch(event.track_id):
-            raise ContractError("invalid_track")
-        return "/".join([self.result_prefix, require_uuid(event.tenant_id),
-                         require_uuid(event.session_id), require_uuid(event.source.artifact_id),
-                         event.track_id, require_uuid(event.run_id)])
-
-    def _read_json(self, key, max_bytes):
-        """Read bounded JSON or None on a genuinely absent object."""
-        from botocore.exceptions import ClientError
-        try:
-            response = self.client.get_object(Bucket=self.bucket, Key=key)
-        except ClientError as error:
-            if error.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
-                return None
-            raise
-        try:
-            if response["ContentLength"] > max_bytes:
-                raise ContractError("stored_artifact_too_large")
-            data = response["Body"].read(max_bytes + 1)
-            if len(data) > max_bytes:
-                raise ContractError("stored_artifact_too_large")
-            return json.loads(data)
-        finally:
-            response["Body"].close()
-
-    def read_outcome(self, event):
-        """Recover the exact accepted protobuf and primary-projection bytes."""
-        key = f"{self.result_base(event)}/{require_uuid(event.result_id)}.outcome.json"
-        value = self._read_json(key, 2 * MAX_TRANSCRIPT_BYTES)
-        if value is None:
-            return None
-        try:
-            canonical = base64.b64decode(value["canonical"], validate=True)
-            legacy = base64.b64decode(value["legacy"], validate=True) if value["legacy"] else None
-            actual = pb.FinalTrackResult.FromString(canonical)
-            if len(canonical) > MAX_EVENT_BYTES or (legacy and len(legacy) > MAX_TRANSCRIPT_BYTES):
-                raise ValueError()
-            for name in ("tenant_id", "session_id", "plan_id", "track_id", "profile_id",
-                         "run_id", "result_id", "primary"):
-                if getattr(event, name) != getattr(actual, name):
-                    raise ValueError()
-            if actual.source != event.source or actual.status not in ("succeeded", "failed"):
-                raise ValueError()
-            return actual, canonical, legacy
-        except (KeyError, ValueError, TypeError):
-            raise ContractError("stored_outcome_mismatch") from None
-
-    def put_transcript(self, event, transcript: dict):
-        """Write immutable attempt output; losing attempts remain unreferenced."""
-        import hashlib
-        data = canonical_json(transcript)
-        if len(data) > MAX_TRANSCRIPT_BYTES:
-            raise ContractError("transcript_too_large")
-        key = f"{self.result_base(event)}/{require_uuid(event.attempt_id)}.transcript.json"
-        self.client.put_object(Bucket=self.bucket, Key=key, Body=data,
-                               ContentType="application/json", IfNoneMatch="*")
-        return f"s3://{self.bucket}/{key}", hashlib.sha256(data).hexdigest()
-
-    def publish_once(self, event, legacy):
-        """Atomically select the first terminal outcome, then return its bytes."""
-        from botocore.exceptions import ClientError
-        canonical = event.SerializeToString(deterministic=True)
-        if len(canonical) > MAX_EVENT_BYTES:
-            raise ContractError("outcome_too_large")
-        value = canonical_json(dict(
-            canonical=base64.b64encode(canonical).decode("ascii"),
-            legacy=base64.b64encode(legacy).decode("ascii") if legacy else None))
-        key = f"{self.result_base(event)}/{require_uuid(event.result_id)}.outcome.json"
-        try:
-            self.client.put_object(Bucket=self.bucket, Key=key, Body=value,
-                                   ContentType="application/json", IfNoneMatch="*")
-        except ClientError as error:
-            if error.response.get("Error", {}).get("Code") not in ("PreconditionFailed", "412"):
-                raise
-        result = self.read_outcome(event)
-        if result is None:
-            raise RuntimeError("outcome disappeared after conditional publication")
-        return result
