@@ -6,8 +6,15 @@ id = "aws-account-id"
 description = "AWS account identifiers must not be published"
 regex = '''\b[0-9]{12}\b'''
 
-[rules.allowlist]
+[[rules.allowlists]]
 stopwords = ["000000000000"]
+
+[[rules.allowlists]]
+description = "Known synthetic UUID tails in the shared final-track fixture only"
+condition = "AND"
+regexTarget = "match"
+paths = ['''(^|/)tests/data/final_track_vector\.json$''']
+regexes = ['''^00000000000[1-4]$''']
 
 [[rules]]
 id = "aws-resource-arn"

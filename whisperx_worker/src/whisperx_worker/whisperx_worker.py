@@ -200,6 +200,8 @@ logger = logging.getLogger(__name__)
 # WhisperX globals (initialized at startup)
 # --------------------------------------------------------------------------- #
 _WHISPERX_MODEL = None
+_BATCH_ALIGNMENT_LOADER = None
+_BATCH_MODE = False
 _ALIGN_MODEL = None
 _ALIGN_METADATA = None
 _WHISPERX_DEVICE = None
@@ -878,6 +880,7 @@ def run_whisperx_words(
     lang: Optional[str] = None,
     use_alignment: bool = False,
     alignment_min_coverage: float = 0.7,
+    diagnostics: Optional[dict] = None,
 ) -> Tuple[str, List[SegmentTiming]]:
     """Run WhisperX ASR and (optionally) alignment, returning word-level timing.
 
@@ -901,8 +904,7 @@ def run_whisperx_words(
         audio, _sr = sf.read(wav_path, dtype="float32")
 
     logger.info(
-        "WhisperX: transcribing %s (lang=%s, use_alignment=%s)",
-        wav_path,
+        "WhisperX: transcribing audio (lang=%s, use_alignment=%s)",
         lang or "auto",
         use_alignment,
     )
@@ -911,19 +913,29 @@ def run_whisperx_words(
         try:
             result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
         except IndexError:
+            if _BATCH_MODE:
+                raise
             logger.info("WhisperX: no active speech detected (lang=%s)", lang)
             return "", []
     else:
         try:
             result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
         except IndexError:
+            if _BATCH_MODE:
+                raise
             logger.info("WhisperX: no active speech detected")
             return "", []
 
     detected_lang = result.get("language", lang or "unknown")
+    if diagnostics is not None:
+        diagnostics.update(language=detected_lang, asr="succeeded", alignment="unavailable")
     logger.debug("WhisperX: detected language=%s", detected_lang)
 
     asr_segments = result.get("segments", []) or []
+    if not asr_segments:
+        if diagnostics is not None:
+            diagnostics["alignment"] = "not_needed"
+        return "", []
 
     def from_asr_segments() -> Tuple[str, List[SegmentTiming]]:
         segs_out: List[SegmentTiming] = []
@@ -992,6 +1004,8 @@ def run_whisperx_words(
             texts_out.append(text)
 
         full = " ".join(texts_out).strip()
+        if diagnostics is not None:
+            diagnostics["alignment"] = "succeeded"
         logger.info(
             "WhisperX (aligned): %d segments, total_text_len=%d, coverage_ratio=%.2f",
             len(segs_out),
@@ -1001,7 +1015,7 @@ def run_whisperx_words(
         return full, segs_out
 
     except Exception as e:
-        logger.warning("WhisperX alignment failed (%s); falling back.", e)
+        logger.warning("WhisperX alignment failed kind=%s; falling back.", type(e).__name__)
         return from_asr_segments()
 
 
@@ -1011,6 +1025,7 @@ def run_whisperx_diarized_words(
     tenant: Optional[str],
     lang: Optional[str],
     use_alignment: bool,
+    diagnostics: Optional[dict] = None,
 ) -> Tuple[str, List[DiarizedSegmentTiming]]:
     """Like `run_whisperx_diarized`, but returns segments with word-level timestamps."""
 
@@ -1032,6 +1047,7 @@ def run_whisperx_diarized_words(
         wav_path,
         lang=lang,
         use_alignment=use_alignment,
+        diagnostics=diagnostics,
     )
 
     # If diarization isn't available, still return segments (speaker empty).
@@ -1505,10 +1521,25 @@ def _ensure_align_model(language_code: str) -> None:
             return
 
     logger.info("Loading WhisperX alignment model for language=%s", language_code)
+    if _BATCH_ALIGNMENT_LOADER is not None:
+        _ALIGN_MODEL, _ALIGN_METADATA = _BATCH_ALIGNMENT_LOADER(language_code)
+        return
     _ALIGN_MODEL, _ALIGN_METADATA = whisperx.load_align_model(
         language_code=language_code,
         device=_WHISPERX_DEVICE,
     )
+
+
+def configure_batch_runtime(asr_model, diarization_pipeline, alignment_loader) -> None:
+    """Install one verified composite in a dedicated single-inference process."""
+    global _WHISPERX_MODEL, _WHISPERX_DEVICE, _DIAR_PIPE, _ENABLE_DIARIZATION
+    global _BATCH_ALIGNMENT_LOADER, _BATCH_MODE, _ALIGN_MODEL, _ALIGN_METADATA
+    global _ENROLL_CACHE, _LEGACY_ENROLLED, _EMBED_INFER
+    _WHISPERX_MODEL, _WHISPERX_DEVICE = asr_model, "cuda"
+    _DIAR_PIPE, _ENABLE_DIARIZATION = diarization_pipeline, diarization_pipeline is not None
+    _BATCH_ALIGNMENT_LOADER, _BATCH_MODE = alignment_loader, True
+    _ALIGN_MODEL = _ALIGN_METADATA = _ENROLL_CACHE = _EMBED_INFER = None
+    _LEGACY_ENROLLED = {}
 
 
 def run_whisperx(

@@ -4,6 +4,9 @@ Xamurai (voX samurai) provides the speech-to-text and speaker-diarization servic
 the nanosamurai platform. It supports realtime transcription over gRPC and
 asynchronous refinement, recording, and finalization over Kafka.
 
+The opt-in [final-track spike](docs/final-tracks.md) adds independent completed-recording
+outcomes on `transcripts.final-tracks`, with a primary compatibility projection.
+
 For a complete self-hosted Community Edition stack, use the public
 [`nanosamurai/nanosamurai`](https://github.com/nanosamurai/nanosamurai)
 repository. Deployment orchestration and environment-specific infrastructure
