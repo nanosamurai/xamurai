@@ -6,6 +6,8 @@ asynchronous refinement, recording, and finalization over Kafka.
 
 The opt-in [final-track spike](docs/final-tracks.md) adds independent completed-recording
 outcomes on `transcripts.final-tracks`, with a primary compatibility projection.
+[Refinement tracks](docs/refinement-tracks.md) reuse that processor with immutable
+live audio windows, independent track groups and a primary refined projection.
 
 For a complete self-hosted Community Edition stack, use the public
 [`nanosamurai/nanosamurai`](https://github.com/nanosamurai/nanosamurai)

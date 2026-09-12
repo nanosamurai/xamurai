@@ -1728,7 +1728,8 @@ def main():
 
             hdrs = msg.headers() or None
             controls = parse_stream_controls_from_kafka_headers(hdrs)
-            if not controls.want_refined:
+            from drsynth_common.refinement_tracks import selected_audio
+            if not controls.want_refined or selected_audio(msg.value(), hdrs):
                 # Skip refined processing entirely (saves GPU/CPU). We still commit
                 # offsets so this consumer group keeps up.
                 logger.debug(

@@ -18,7 +18,8 @@ venv/
 .idea/
 
 # Git
-.git/
+.git
+.tmp
 
 # Local artifacts / recordings
 recordings/

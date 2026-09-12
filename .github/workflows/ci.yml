@@ -47,4 +47,5 @@ jobs:
             tests/test_nemotron_native_unit.py \
             tests/test_nemotron_speakers_unit.py \
             tests/test_stream_controls_unit.py \
-            tests/test_final_tracks_unit.py
+            tests/test_final_tracks_unit.py \
+            tests/test_refinement_tracks_unit.py

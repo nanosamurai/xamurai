@@ -267,7 +267,8 @@ def run_decoupled(
                 raise KafkaException(msg.error())
 
             controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
-            if not controls.want_refined:
+            from drsynth_common.refinement_tracks import selected_audio
+            if not controls.want_refined or selected_audio(msg.value(), msg.headers()):
                 # Skip refined jobs entirely; still commit offsets so group progresses.
                 if commit_after_produce:
                     consumer.commit(msg, asynchronous=False)

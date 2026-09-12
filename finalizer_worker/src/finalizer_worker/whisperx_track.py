@@ -13,13 +13,16 @@ from finalizer_worker.whisperx_profile import (
 class WhisperXTrack:
     """One fixed composite per process; models load lazily after selection."""
 
-    def __init__(self):
+    def __init__(self, profile_id="whisperx-medium-final-r1"):
+        self.profile_id = profile_id
         self._ready = False
         self._worker = None
         self._diarization_available = False
 
     def describe(self):
-        return descriptor()
+        value = descriptor()
+        value["profile_id"] = self.profile_id
+        return value
 
     def _initialize(self):
         disable_pyannote_telemetry()

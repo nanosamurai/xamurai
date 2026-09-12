@@ -6,8 +6,11 @@ from drsynth_common.final_tracks import TranscriptResult
 
 
 class TestTrack:
+    def __init__(self, profile_id="test-final-r1"):
+        self.profile_id = profile_id
+
     def describe(self):
-        return {"profile_id": "test-final-r1", "test_only": True}
+        return {"profile_id": self.profile_id, "test_only": True}
 
     def process(self, audio, context):
         time.sleep(min(10, max(0, float(os.getenv("FINAL_TRACK_TEST_DELAY_SECONDS", "0")))))
