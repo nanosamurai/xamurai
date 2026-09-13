@@ -20,8 +20,10 @@ to localhost and build contexts exclude credentials and scratch files.
 The repeatable overlay, assertions and runbook live in Nanosamurai at
 `docker-compose.final-tracks-smoke.yml`, `smoke-tests/final-tracks/` and
 `docs/final-tracks-spike.md`, mirrored in Nanodeploy. This run used a separate
-validation database in the existing Compose infrastructure. The retained DB's
-old execution-ID check needs migration 018, pending explicit approval after
-automatic review rejected its removal; no historical rows were removed.
+validation database in the existing Compose infrastructure. Following explicit
+approval, migration 018 and a separate local cleanup removed the retained DB's
+obsolete experimental schema. All original transcript/recording content was
+preserved, and the full Compose smoke passed again against that retained DB.
+Local realtime and ordinary refinement images were also rebuilt from this branch.
 
 Browser result tabs and durable per-track failure reporting remain later work.
