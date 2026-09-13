@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH"
 
-ENV PYTHONPATH=/app:/app/shared/src:/app/rtservice/src:/app/whisperx_worker/src:/app/recorder_worker/src:/app/finalizer_worker/src:/app/qwen_rtservice/src
+ENV PYTHONPATH=/app:/app/shared/src:/app/rtservice/src:/app/whisperx_worker/src:/app/recorder_worker/src:/app/finalizer_worker/src
 
 WORKDIR /app
 
@@ -40,11 +40,7 @@ RUN pip install \
       confluent-kafka \
       protobuf \
       boto3 \
-      whisperx==3.8.6 \
-      faster-whisper==1.2.1 \
-      pyannote.audio==4.0.7 \
-      transformers==4.57.6 \
-      huggingface-hub==0.36.2 \
+      whisperx \
       opentelemetry-api \
       opentelemetry-sdk \
       opentelemetry-exporter-otlp
@@ -59,5 +55,6 @@ USER 10001
 
 VOLUME ["/data/recordings"]
 
-# FINAL_TRACKS_ENABLED=true selects the S3-backed generic final-track consumer.
+# NOTE: finalizer currently supports only file:// recording URLs.
+# It must see the same filesystem path as recorder_worker used when producing file:// URLs.
 CMD ["python", "-m", "finalizer_worker.finalizer_worker"]
