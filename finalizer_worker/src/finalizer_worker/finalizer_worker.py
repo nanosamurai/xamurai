@@ -129,10 +129,7 @@ def make_producer() -> Producer:
 # --------------------------------------------------------------------------- #
 
 def _load_local_wav_from_url(url: str) -> str:
-    """For file:// URLs, return local path.
-
-    For now we only support local file recordings. S3 etc. can be added later.
-    """
+    """Return a local file path or download an S3 recording to a temporary WAV."""
 
     if url.startswith("file://"):
         return url[len("file://") :]
@@ -176,7 +173,11 @@ def _load_local_wav_from_url(url: str) -> str:
             S3_ENDPOINT or "aws",
             addressing_style,
         )
-        s3.download_file(bucket, key, dst)
+        try:
+            s3.download_file(bucket, key, dst)
+        except Exception:
+            os.unlink(dst)
+            raise
         return dst
 
     raise RuntimeError(f"Unsupported recording_url scheme for finalizer: {url}")
@@ -413,17 +414,7 @@ def main():
                         except Exception:
                             pass
 
-                    try:
-                        wav_path = _load_local_wav_from_url(rf.recording_url)
-                    except Exception as e:
-                        logger.exception(
-                            "Cannot resolve recording_url=%s, skipping: %s",
-                            rf.recording_url,
-                            e,
-                        )
-                        # Bad event is not retriable, commit and move on.
-                        consumer.commit(msg, asynchronous=True)
-                        continue
+                    wav_path = _load_local_wav_from_url(rf.recording_url)
 
                     # Full-session WhisperX with alignment + optional diarization/enrollment.
                     # Enrollment backend is configured via env (ENROLL_BACKEND=...).

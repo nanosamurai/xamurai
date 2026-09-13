@@ -341,7 +341,9 @@ unselected or disabled final stages. The final `model` header contains the
 configured `WHISPERX_MODEL` label (default `medium`).
 
 Finalizers publish with acknowledgement before committing their input. A
-publish/commit failure stops the worker for replay on restart. Multiple final
+download, inference or publish/commit failure stops the worker for replay on
+restart. A permanently invalid source needs operator repair; it is not silently
+committed. Multiple final
 tracks require `store_recording=true`; BFF rejects the unsafe combination
 before audio, and the worker also rejects it. Single-track retention behavior
 is preserved. Transcript JSON sidecars are no longer written; Persistor owns
