@@ -19,11 +19,12 @@ to localhost and build contexts exclude credentials and scratch files.
 
 The repeatable overlay, assertions and runbook live in Nanosamurai at
 `docker-compose.final-tracks-smoke.yml`, `smoke-tests/final-tracks/` and
-`docs/final-tracks-spike.md`, mirrored in Nanodeploy. This run used a separate
-validation database in the existing Compose infrastructure. Following explicit
-approval, migration 018 and a separate local cleanup removed the retained DB's
-obsolete experimental schema. All original transcript/recording content was
-preserved, and the full Compose smoke passed again against that retained DB.
-Local realtime and ordinary refinement images were also rebuilt from this branch.
+`docs/final-tracks-spike.md`, mirrored in Nanodeploy. The rollout and full smoke
+now target the original Compose project `nanosamurai` and its Postgres 18 database,
+with migrations 017/018 applied there. Its 117 original transcripts and 51
+recording records were preserved; obsolete metadata was backed up before cleanup.
+Realtime, ordinary refinement, recorder and finalizer use local images from this
+branch. The last active original WhisperX final consumer group is retained.
+The earlier experimental Compose project is stopped.
 
 Browser result tabs and durable per-track failure reporting remain later work.
