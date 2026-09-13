@@ -12,8 +12,8 @@ are produced.
 
 Important properties:
 
-- The source of truth is **the stream** (BFF/SDK forwards headers/metadata).
-- The user is expected to **not change these mid-stream**.
+- BFF saves controls before accepting audio and reuses them on reconnect;
+  workers receive that snapshot through stream headers/metadata.
 - Services must treat all client-provided values as **untrusted**; BFF should
   apply allowlists and quotas.
 
@@ -44,6 +44,20 @@ Current behavior in xamurai services:
 - `whisperx_worker` skips buffering/inference/produce when `refined` isn’t selected.
 - `recorder_worker` skips recording and therefore prevents finalization when `final` isn’t selected.
 
+### `x-final-tracks`
+
+Ordered CSV track IDs, forwarded unchanged by the recorder to
+`recordings.finished`. Omitted means `whisperx`; an explicitly empty header
+selects none. BFF accepts a non-empty subset of its configured IDs and keeps
+that selection fixed for the session. `x-outputs` still controls stage enablement.
+
+Each finalizer has `FINALIZER_TRACK_ID` and a separate consumer group, defaulting
+to `finalizer.<track_id>`. It commits skipped input for unselected tracks and
+publishes selected results with `SessionTranscript.track_id` and the actual
+`WHISPERX_MODEL` label in the `model` header. Replicas of one track share its group.
+Transcript text/segments remain separate Postgres rows via Persistor; finalizers
+no longer write local transcript JSON sidecars.
+
 ### `x-store-recording`
 
 Boolean controlling whether the recording artifact (file:// WAV or s3:// object)
@@ -63,6 +77,10 @@ Backwards compatibility:
 Current behavior in xamurai services:
 - `recorder_worker` propagates `x-store-recording` to `recordings.finished`.
 - `finalizer_worker` deletes the recording (best-effort) after successful publish+commit when false.
+
+Multiple final tracks require retention. BFF rejects multiple selected final
+tracks with `store_recording=false` before audio starts; finalizers also reject
+that unsafe combination. Single-track cleanup behavior is preserved.
 
 ### `x-refinement-window-sec`
 
