@@ -255,6 +255,7 @@ class SessionRecording:
     # Stream controls captured from the last consumed AudioChunk headers.
     # Used so finalize_session can propagate x-store-recording downstream.
     store_recording: bool = True
+    final_tracks: tuple[str, ...] = ("whisperx",)
 
     total_samples: int = 0
     last_activity: float = 0.0
@@ -366,7 +367,9 @@ def finalize_session(session_id: str, rec: SessionRecording, producer: Producer)
                 key=session_id.encode("utf-8"),
                 value=event.SerializeToString(),
                 headers=with_current_trace_context(
-                    [("x-store-recording", b"true" if rec.store_recording else b"false")]
+                    [("x-store-recording", b"true" if rec.store_recording else b"false"),
+                     ("x-outputs", b"final"),
+                     ("x-final-tracks", ",".join(rec.final_tracks).encode("utf-8"))]
                 ),
             )
             producer.poll(0)
@@ -509,6 +512,7 @@ def main():
                     rec.trace_headers = msg.headers() or rec.trace_headers
                     # Keep latest stream controls.
                     rec.store_recording = bool(controls.store_recording)
+                    rec.final_tracks = controls.final_tracks
 
                     pcm_bytes = audio_chunk.pcm16_le
                     if not pcm_bytes:

@@ -130,6 +130,7 @@ class StreamControls:
     want_refined: bool = True
     want_final: bool = True
     store_recording: bool = True
+    final_tracks: tuple[str, ...] = ("whisperx",)
 
     @property
     def want_any(self) -> bool:
@@ -146,6 +147,7 @@ def parse_stream_controls_from_kafka_headers(headers: Optional[Sequence[KafkaHea
 
     outputs_opt = _header_value_opt(headers, "x-outputs")
     store_opt = _header_value_opt(headers, "x-store-recording")
+    tracks_opt = _header_value_opt(headers, "x-final-tracks")
 
     # Backwards compat: header missing => default ALL.
     # Explicit but empty header => interpret as NONE (lets BFF disable everything if desired).
@@ -166,4 +168,6 @@ def parse_stream_controls_from_kafka_headers(headers: Optional[Sequence[KafkaHea
         want_refined=want_refined,
         want_final=want_final,
         store_recording=_parse_bool(store_opt or "", default=True),
+        final_tracks=(tuple(p.strip() for p in tracks_opt.split(",") if p.strip())
+                      if tracks_opt is not None else ("whisperx",)),
     )

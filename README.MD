@@ -168,6 +168,10 @@ python -m grpc_tools.protoc \
   proto/stream.proto
 ```
 
+Preserve the package-relative import in `proto_gen/stream_pb2_grpc.py` after
+generation (`from . import stream_pb2`). The existing
+`proto_gen/generate-proto.sh` does this when run from `proto_gen/`.
+
 Generated bindings must be committed together with any contract change.
 
 ## Tests
@@ -322,3 +326,31 @@ Report vulnerabilities privately as described in
 
 Licensed under Apache License 2.0. See [`LICENSE`](LICENSE) and
 [`NOTICE`](NOTICE).
+
+## Final track contract
+
+`SessionTranscript` adds `string track_id = 9`; other protobuf messages and
+Kafka session keys are unchanged. Omitted track IDs mean `whisperx`.
+Regenerate Python bindings with the existing command after changing the proto.
+
+Each finalizer uses `FINALIZER_TRACK_ID` (default `whisperx`) and its own
+`KAFKA_GROUP_ID_FINALIZER` (default `finalizer.<track_id>`). Replicas of one
+track share that group. `x-final-tracks` is an ordered CSV selection on
+`audio.raw`, forwarded by the recorder to `recordings.finished`. Workers skip
+unselected or disabled final stages. The final `model` header contains the
+configured `WHISPERX_MODEL` label (default `medium`).
+
+Finalizers publish with acknowledgement before committing their input. A
+publish/commit failure stops the worker for replay on restart. Multiple final
+tracks require `store_recording=true`; BFF rejects the unsafe combination
+before audio, and the worker also rejects it. Single-track retention behavior
+is preserved. Transcript JSON sidecars are no longer written; Persistor owns
+transcript storage in Postgres. Use the Community Edition Compose final-track
+smoke for real WhisperX plus a test-only synthetic second track.
+
+The acknowledgement wait polls Kafka to dispatch delivery callbacks promptly.
+Temporary S3 WAV downloads are removed after processing; retained source
+recordings stay in their existing storage.
+
+Local Docker builds exclude `.env` files and scratch worktrees from their
+contexts. Never copy model credentials into an image.

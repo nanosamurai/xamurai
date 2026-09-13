@@ -19,6 +19,10 @@ venv/
 
 # Git
 .git/
+.tmp/
+.env
+.env.*
+*.log
 
 # Local artifacts / recordings
 recordings/

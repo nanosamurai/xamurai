@@ -1,5 +1,4 @@
 # finalizer_worker.py
-import json
 import logging
 import os
 import re
@@ -43,7 +42,11 @@ TOPIC_RECORDING_FINISHED = os.getenv(
 TOPIC_TRANSCRIPTS_FINAL = os.getenv(
     "KAFKA_TOPIC_TRANSCRIPTS_FINAL", "transcripts.final"
 )
-GROUP_ID = os.getenv("KAFKA_GROUP_ID_FINALIZER", "finalizer-worker")
+TRACK_ID = os.getenv("FINALIZER_TRACK_ID", "whisperx").strip()
+if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", TRACK_ID):
+    raise ValueError("FINALIZER_TRACK_ID must be a stable lowercase track ID")
+GROUP_ID = os.getenv("KAFKA_GROUP_ID_FINALIZER", f"finalizer.{TRACK_ID}")
+MODEL = os.getenv("WHISPERX_MODEL", "medium").strip() or "medium"
 
 # Recording storage backend
 RECORDING_STORAGE_BACKEND = os.getenv("RECORDING_STORAGE_BACKEND", "local").strip().lower()
@@ -232,56 +235,6 @@ def _delete_recording_url(url: str) -> None:
     logger.warning("Unsupported recording_url scheme for deletion: %s", url)
 
 
-def _save_transcript_json(transcript: stream_pb2.SessionTranscript) -> Optional[str]:
-    """Persist transcript JSON next to WAV for file:// URLs."""
-
-    url = transcript.recording_url
-    if not url.startswith("file://"):
-        logger.info(
-            "Recording URL is not file:// (%s); skipping local JSON save for now.",
-            url,
-        )
-        return None
-
-    wav_path = url[len("file://") :]
-    base, _ = os.path.splitext(wav_path)
-    json_path = base + ".json"
-
-    data = {
-        "session_id": transcript.session_id,
-        "recording_url": transcript.recording_url,
-        "lang": transcript.lang,
-        "duration_s": transcript.duration_s,
-        "tenant_id": transcript.tenant_id,
-        "created_at_ns": transcript.created_at_ns,
-        "full_text": transcript.full_text,
-        "segments": [
-            {
-                "start_s": seg.start_s,
-                "end_s": seg.end_s,
-                "text": seg.text,
-                "speaker": seg.speaker,
-                "words": [
-                    {
-                        "start_s": w.start_s,
-                        "end_s": w.end_s,
-                        "text": w.text,
-                    }
-                    for w in seg.words
-                ],
-            }
-            for seg in transcript.segments
-        ],
-    }
-
-    os.makedirs(os.path.dirname(wav_path), exist_ok=True)
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    logger.info("Saved JSON transcript to %s", json_path)
-    return json_path
-
-
 def _produce_with_ack(
     producer: Producer,
     *,
@@ -332,8 +285,11 @@ def _produce_with_ack(
         # Let producer start IO.
         producer.poll(0)
 
-        # Wait for delivery callback.
-        if not delivered.wait(timeout_s):
+        # Delivery callbacks are dispatched by poll, not by the broker IO thread.
+        deadline = time.monotonic() + timeout_s
+        while not delivered.is_set() and time.monotonic() < deadline:
+            producer.poll(min(0.2, max(0.0, deadline - time.monotonic())))
+        if not delivered.is_set():
             # Force IO + callbacks; after flush returns, any deliverable messages
             # should have triggered callbacks.
             producer.flush(timeout_s)
@@ -419,11 +375,18 @@ def main():
                     span_cm = tracer.start_as_current_span("finalizer.session")
                     span_cm.__enter__()
 
+                wav_path = None
                 try:
                     rf = stream_pb2.RecordingFinished()
                     rf.ParseFromString(msg.value())
 
                     controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
+                    if not controls.want_final or TRACK_ID not in controls.final_tracks:
+                        logger.info("Skipping unselected final track: session=%s track=%s", rf.session_id, TRACK_ID)
+                        consumer.commit(msg, asynchronous=False)
+                        continue
+                    if len(controls.final_tracks) > 1 and not controls.store_recording:
+                        raise ValueError("Multiple final tracks require store_recording=true")
 
                     logger.info(
                         "Processing RecordingFinished: session=%s url=%s dur=%.2fs sr=%d lang=%s tenant=%s",
@@ -479,6 +442,7 @@ def main():
                         full_text=full_text,
                         tenant_id=rf.tenant_id,
                         created_at_ns=rf.created_at_ns,
+                        track_id=TRACK_ID,
                     )
 
                     for seg_in in segments:
@@ -493,10 +457,7 @@ def main():
                             w.end_s = float(w_in.get("end_s", 0.0))
                             w.text = str(w_in.get("text", "") or "")
 
-                    # 1) Persist JSON next to WAV
-                    _ = _save_transcript_json(transcript)
-
-                    # 2) Publish to Kafka for downstream consumers (persistence handled by samuraipersistor)
+                    # Publish to Kafka; transcript storage belongs to Persistor/Postgres.
                     # IMPORTANT: commit the input offset only after Kafka acked this publish.
                     try:
                         if trace is not None:
@@ -511,7 +472,7 @@ def main():
                             topic=TOPIC_TRANSCRIPTS_FINAL,
                             key=rf.session_id.encode("utf-8"),
                             value=transcript.SerializeToString(),
-                            headers=with_current_trace_context(),
+                            headers=with_current_trace_context([("model", MODEL.encode("utf-8"))]),
                             timeout_s=FINALIZER_PRODUCE_ACK_TIMEOUT_S,
                             retries=FINALIZER_PRODUCE_RETRIES,
                             base_backoff_s=FINALIZER_PRODUCE_RETRY_BACKOFF_S,
@@ -521,9 +482,8 @@ def main():
                             "Failed to publish final transcript for session=%s; will NOT commit input offset.",
                             rf.session_id,
                         )
-                        # Avoid a hot loop if Kafka is down.
-                        time.sleep(1.0)
-                        continue
+                        # Restart from the last committed input; never commit past this failure.
+                        raise
 
                     # If commit fails, we may reprocess (at-least-once). That's preferred over
                     # committing before the output exists.
@@ -535,12 +495,18 @@ def main():
                             "Worker may reprocess this RecordingFinished.",
                             rf.session_id,
                         )
+                        raise
 
                     # Best-effort deletion after successful publish + commit.
                     if not controls.store_recording:
                         _delete_recording_url(rf.recording_url)
 
                 finally:
+                    if wav_path and rf.recording_url.startswith("s3://"):
+                        try:
+                            os.unlink(wav_path)
+                        except OSError:
+                            logger.warning("Failed to remove temporary recording download", exc_info=True)
                     if span_cm is not None:
                         span_cm.__exit__(None, None, None)
 
