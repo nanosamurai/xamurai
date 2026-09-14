@@ -2,6 +2,12 @@
 
 Last updated: 2026-04-03
 
+Current implementation update (2026-09-14): the refinement spike consolidates
+the synchronous and decoupled branches into the existing decoupled runtime,
+with acknowledged publication and replay-safe session offsets. The mode and
+scheduler-only batching flags described below are historical. See
+[the current refinement spike](../refinement-tracks-spike.md) and the README.
+
 This document captures the current state of the WhisperX worker bugfix effort and the intended Phase 2 implementation.
 
 ## Problem Summary

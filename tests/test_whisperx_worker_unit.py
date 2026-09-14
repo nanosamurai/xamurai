@@ -15,8 +15,13 @@ class _DummyProducer:
     def __init__(self):
         self.produced = []
 
-    def produce(self, *, topic, key, value, headers=None):
+    def produce(self, *, topic, key, value, headers=None, on_delivery=None):
         self.produced.append({"topic": topic, "key": key, "value": value, "headers": headers})
+        if on_delivery:
+            on_delivery(None, None)
+
+    def flush(self, _timeout):
+        return 0
 
     def poll(self, _timeout):
         return None
@@ -290,7 +295,8 @@ def test_run_whisperx_diarized_smoke_no_diarization(monkeypatch, tmp_path):
     assert out_segments == [(0.0, 1.0, "Hello", "")]
 
 
-def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch, tmp_path):
+@pytest.mark.parametrize("publish_ok", [True, False])
+def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch, tmp_path, publish_ok):
     """Regression: whisperx_worker should publish ONE RefinedEvent per slice,
     with segments populated (window transcript semantics).
     """
@@ -326,6 +332,11 @@ def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch
         "slice_index": 3,
     }
 
+    if not publish_ok:
+        monkeypatch.setattr(producer, "flush", lambda _timeout: 1)
+        with pytest.raises(RuntimeError, match="not acknowledged"):
+            whisperx_worker._run_inference_and_publish(job=job, producer=producer)
+        return
     whisperx_worker._run_inference_and_publish(job=job, producer=producer)
 
     assert len(producer.produced) == 1
@@ -334,6 +345,8 @@ def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch
     ev.ParseFromString(msg["value"])
 
     assert ev.session_id == "s1"
+    assert ev.track_id == "whisperx"
+    assert ev.end_s == pytest.approx(11.0)
     assert ev.start_s == pytest.approx(10.0)
     assert ev.window_sec == pytest.approx(20.0)
     assert ev.slice_index == 3
@@ -341,69 +354,3 @@ def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch
     assert len(ev.segments) == 2
     assert [s.speaker for s in ev.segments] == ["A", "B"]
     assert ev.text.strip() == "hello world"
-
-
-def test_should_evict_idle_session_true_when_idle_and_polling_recently():
-    now = 1000.0
-    last_activity = {"s": now - 31.0}
-    last_poll_s = now - 0.5
-    assert whisperx_worker._should_evict_idle_session(
-        "s",
-        now_s=now,
-        last_activity_s=last_activity,
-        last_poll_s=last_poll_s,
-        idle_sec=30.0,
-    )
-
-
-def test_should_not_evict_when_not_idle():
-    now = 1000.0
-    last_activity = {"s": now - 10.0}
-    last_poll_s = now - 0.5
-    assert not whisperx_worker._should_evict_idle_session(
-        "s",
-        now_s=now,
-        last_activity_s=last_activity,
-        last_poll_s=last_poll_s,
-        idle_sec=30.0,
-    )
-
-
-def test_should_not_evict_when_consumer_poll_was_blocked_by_inference():
-    """Regression test for refined-timing reset bug.
-
-    If inference blocks the main loop for > idle_sec, wall-clock-based eviction is
-    unsafe because we may be behind on consuming audio.
-    """
-
-    now = 1000.0
-    last_activity = {"s": now - 31.0}
-    # last poll was also a long time ago -> indicates main loop was blocked
-    last_poll_s = now - 120.0
-    assert not whisperx_worker._should_evict_idle_session(
-        "s",
-        now_s=now,
-        last_activity_s=last_activity,
-        last_poll_s=last_poll_s,
-        idle_sec=30.0,
-    )
-
-
-def test_decoupled_runtime_job_collection_scheduler_only(monkeypatch):
-    """Unit-level sanity check for Phase 2 decoupled runtime.
-
-    This test intentionally avoids Kafka/WhisperX dependencies.
-
-    We verify that `_queue_get_many` collects multiple jobs when configured,
-    which is the foundation for future true multi-audio batching.
-    """
-
-    from whisperx_worker.decoupled_runtime import _queue_get_many
-    from queue import Queue
-
-    q: "Queue[dict]" = Queue()
-    q.put({"session_id": "a"})
-    q.put({"session_id": "b"})
-
-    batch = _queue_get_many(q, max_items=2, max_wait_ms=1)
-    assert [j["session_id"] for j in batch] == ["a", "b"]

@@ -1,14 +1,14 @@
 import logging
 import os
+import re
 import tempfile
 import threading
-from collections import defaultdict, deque
 from whisperx_worker.decoupled_runtime import run_decoupled
-from typing import Any, Deque, Dict, List, Optional, TYPE_CHECKING, Tuple, TypedDict
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, TypedDict
 
 import numpy as np
 import soundfile as sf
-from confluent_kafka import Consumer, Producer, KafkaException, TopicPartition
+from confluent_kafka import Consumer, Producer
 
 from proto_gen import stream_pb2
 
@@ -26,10 +26,6 @@ from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
 from drsynth_common.logging_setup import setup_logging
 from drsynth_common.pyannote_telemetry import disable_pyannote_telemetry
-from drsynth_common.stream_controls import (
-    parse_stream_controls_from_kafka_headers,
-    parse_refinement_window_sec_from_kafka_headers,
-)
 
 try:
     from opentelemetry import trace
@@ -134,62 +130,14 @@ KAFKA_SECURITY_PROTOCOL = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").stri
 KAFKA_SSL_CA_LOCATION = os.getenv("KAFKA_SSL_CA_LOCATION", "").strip()
 TOPIC_AUDIO = os.getenv("KAFKA_TOPIC_AUDIO", "audio.raw")
 TOPIC_REFINED = os.getenv("KAFKA_TOPIC_REFINED", "transcripts.refined")
-GROUP_ID = os.getenv("KAFKA_GROUP_ID", "whisperx-async")
+TRACK_ID = os.getenv("REFINEMENT_TRACK_ID", "whisperx").strip()
+if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", TRACK_ID):
+    raise ValueError("Invalid REFINEMENT_TRACK_ID")
+GROUP_ID = os.getenv("KAFKA_GROUP_ID", f"refinement.{TRACK_ID}")
 
 SLICE_SECONDS = float(os.getenv("WHISPERX_SLICE_SECONDS", "60.0"))
 SESSION_IDLE_SEC = float(os.getenv("WHISPERX_IDLE_SECONDS", "30.0"))
 SR = 16000
-
-_DECOUPLE_IO = os.getenv("WHISPERX_DECOUPLE_IO", "false").strip().lower() in ("1", "true", "yes", "y")
-_COMMIT_AFTER_PRODUCE = os.getenv("WHISPERX_COMMIT_AFTER_PRODUCE", "true").strip().lower() in ("1", "true", "yes", "y")
-
-
-
-def _should_evict_idle_session(
-    session_id: str,
-    *,
-    now_s: float,
-    last_activity_s: Dict[str, float],
-    last_poll_s: float,
-    idle_sec: float,
-) -> bool:
-    """Return True if a session is eligible for idle flush+eviction.
-
-    Why this exists:
-    - The worker historically ran Kafka polling + WhisperX inference in the same
-      thread.
-    - On slow inference (often CPU), the loop would not call `poll()` for longer
-      than `idle_sec`.
-    - That made the session appear "idle" based on wall clock and caused us to
-      flush+evict mid-session, which reset `slice_index` and made refined timing
-      restart from ~0.
-
-    We therefore treat "idle" as:
-    - no new audio observed for `idle_sec`, AND
-    - the consumer has been polling recently enough (i.e. we are not currently
-      behind because inference blocked the loop).
-    """
-
-    last = last_activity_s.get(session_id, 0.0)
-    if (now_s - last) <= idle_sec:
-        return False
-
-    # If the Kafka poll loop was blocked for longer than the idle threshold,
-    # we may simply be behind on consuming audio for this session.
-    # Evicting now would drop per-session state (slice_index/buffers) and cause
-    # refined timestamps to restart from 0.
-    if (now_s - last_poll_s) > idle_sec:
-        return False
-
-    return True
-
-last_activity: Dict[str, float] = defaultdict(lambda: 0.0)
-session_lang: Dict[str, Optional[str]] = defaultdict(lambda: None)
-bff_origin_uri: Dict[str, Optional[str]] = defaultdict(lambda: None)
-tenant_id: Dict[str, Optional[str]] = defaultdict(lambda: None)
-
-# Store per-session headers so idle flush uses same traceparent.
-session_trace_headers: Dict[str, Optional[list[KafkaHeader]]] = defaultdict(lambda: None)
 
 # --------------------------------------------------------------------------- #
 # Logging setup
@@ -1210,17 +1158,12 @@ def _run_inference_and_publish(*, job: Dict[str, Any], producer: Producer) -> No
                             )
                         )
 
-                    # Window end is best-effort:
-                    # - use the max segment end when segments exist
-                    # - otherwise fall back to base_start + slice duration
-                    if seg_msgs:
-                        window_end_s = max(float(s.end_s) for s in seg_msgs)
-                    else:
-                        window_end_s = float(base_start) + (float(pcm.size) / float(SR))
+                    # Identity comes from audio samples, never model segment ends.
+                    window_end_s = float(base_start) + float(pcm.size) / float(SR)
 
                     window_start_s = float(base_start)
                     effective_window_sec = float(window_sec) if float(window_sec) > 0 else float(pcm.size) / float(SR)
-                    full_text = " ".join([s.text for s in seg_msgs if (s.text or "").strip()]).strip()
+                    full_text = " ".join([s.text for s in seg_msgs if (s.text or "").strip()]).strip() or text or ""
 
                     ev = stream_pb2.RefinedEvent(
                         session_id=session_id,
@@ -1238,14 +1181,19 @@ def _run_inference_and_publish(*, job: Dict[str, Any], producer: Producer) -> No
                         flush_reason=str(flush_reason),
                         segments=seg_msgs,
                         created_at_ns=int(time.time_ns()),
-                        refinement_model="whisperx",
+                        refinement_model=os.getenv("WHISPERX_MODEL", "medium"),
+                        track_id=TRACK_ID,
                     )
+                    delivery = []
                     producer.produce(
                         topic=TOPIC_REFINED,
                         key=session_id.encode("utf-8"),
                         value=ev.SerializeToString(),
                         headers=with_current_trace_context(),
+                        on_delivery=lambda error, _message: delivery.append(error),
                     )
+                    if producer.flush(30) or not delivery or delivery[0] is not None:
+                        raise RuntimeError("Refinement Kafka publication was not acknowledged")
                 finally:
                     if publish_span_cm is not None:
                         try:
@@ -1264,177 +1212,6 @@ def _run_inference_and_publish(*, job: Dict[str, Any], producer: Producer) -> No
             os.unlink(wav_path)
         except Exception:
             pass
-
-
-def _flush_session_partial(
-    session_id: str,
-    lang_hint: Optional[str],
-    refinement_window_sec: float,
-    buffers: Dict[str, Deque[np.ndarray]],
-    buf_samples: Dict[str, int],
-    slice_index: Dict[str, int],
-    producer: Producer,
-    session_lang: Dict[str, Optional[str]],
-    bff_origin_uri: Dict[str, Optional[str]],
-    tenant_id: Dict[str, Optional[str]],
-    session_trace_headers: Dict[str, Optional[list[KafkaHeader]]],
-) -> None:
-    """Flush remaining buffered audio for a session."""
-
-    if buf_samples[session_id] <= 0 or not buffers[session_id]:
-        buffers.pop(session_id, None)
-        buf_samples.pop(session_id, None)
-        slice_index.pop(session_id, None)
-        session_trace_headers.pop(session_id, None)
-        return
-
-    parts: List[np.ndarray] = []
-    while buffers[session_id]:
-        parts.append(buffers[session_id].popleft())
-    buf_samples[session_id] = 0
-
-    pcm = np.concatenate(parts).astype("<i2")
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        wav_path = tmp.name
-
-    x = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
-    sf.write(wav_path, x, SR, subtype="PCM_16")
-
-    base_start = slice_index[session_id] * float(refinement_window_sec)
-    slice_idx = int(slice_index[session_id])
-    slice_index[session_id] += 1
-
-    logger.info(
-        "Idle flush for session %s: final slice dur=%.2fs → %s",
-        session_id,
-        len(pcm) / SR,
-        wav_path,
-    )
-
-    # Re-attach trace context captured from kafka consume.
-    # IMPORTANT: we also want refined publishing to have a *real* in-trace parent span,
-    # otherwise downstream (samuraipersistor) spans will look "orphaned" in Grafana because
-    # their parentSpanId will refer to the deterministic remote-parent seed.
-    with extracted_context_from_headers(session_trace_headers.get(session_id)):
-        slice_span_cm = None
-        if trace is not None:
-            tracer = trace.get_tracer("whisperx_worker")
-            slice_span_cm = tracer.start_as_current_span("whisperx.slice")
-            slice_span_cm.__enter__()
-
-            try:
-                span = trace.get_current_span()
-                if hasattr(span, "set_attribute"):
-                    span.set_attribute("nanosamurai.session_id", session_id)
-                    if tenant_id.get(session_id):
-                        span.set_attribute("nanosamurai.tenant_id", tenant_id.get(session_id))
-                    span.set_attribute("nanosamurai.slice_index", int(slice_idx))
-                    span.set_attribute("nanosamurai.slice_start_s", float(base_start))
-                    span.set_attribute("nanosamurai.slice_duration_s", float(len(pcm) / SR))
-                    span.set_attribute("nanosamurai.flush_reason", "idle")
-            except Exception:
-                pass
-
-        try:
-            text, segments = run_whisperx_diarized(
-                wav_path,
-                tenant=tenant_id.get(session_id),
-                lang=lang_hint,
-                use_alignment=False,
-            )
-            logger.debug("Idle WhisperX result (session=%s): %s", session_id, text)
-
-            # Add summary attributes (best-effort)
-            if trace is not None:
-                try:
-                    span = trace.get_current_span()
-                    if hasattr(span, "set_attribute"):
-                        span.set_attribute("nanosamurai.segments_count", int(len(segments)))
-                        span.set_attribute("nanosamurai.text_len", int(len(text or "")))
-                except Exception:
-                    pass
-
-            publish_span_cm = None
-            if trace is not None:
-                try:
-                    tracer = trace.get_tracer("whisperx_worker")
-                    publish_span_cm = tracer.start_as_current_span("kafka.produce transcripts.refined")
-                    publish_span_cm.__enter__()
-                    span = trace.get_current_span()
-                    if hasattr(span, "set_attribute"):
-                        span.set_attribute("messaging.system", "kafka")
-                        span.set_attribute("messaging.destination", TOPIC_REFINED)
-                        span.set_attribute("nanosamurai.session_id", session_id)
-                except Exception:
-                    publish_span_cm = None
-
-            try:
-                seg_msgs: List[stream_pb2.SessionTranscriptSegment] = []
-                for (s0, s1, seg_text, speaker) in segments:
-                    seg_msgs.append(
-                        stream_pb2.SessionTranscriptSegment(
-                            start_s=float(base_start + s0),
-                            end_s=float(base_start + s1),
-                            text=str(seg_text or ""),
-                            speaker=str(speaker or ""),
-                            words=[],
-                        )
-                    )
-
-                if seg_msgs:
-                    window_end_s = max(float(s.end_s) for s in seg_msgs)
-                else:
-                    window_end_s = float(base_start) + (float(len(pcm)) / float(SR))
-
-                window_start_s = float(base_start)
-                full_text = " ".join([s.text for s in seg_msgs if (s.text or "").strip()]).strip()
-
-                ev = stream_pb2.RefinedEvent(
-                    session_id=session_id,
-                    start_s=window_start_s,
-                    end_s=float(window_end_s),
-                    text=full_text,
-                    speaker="",
-                    supersedes_seq=[],
-                    lang=session_lang.get(session_id) or "",
-                    bff_origin_uri=bff_origin_uri.get(session_id) or "",
-                    tenant_id=tenant_id.get(session_id) or "",
-                    window_sec=float(refinement_window_sec),
-                    slice_index=int(slice_idx),
-                    flush_reason="idle",
-                    segments=seg_msgs,
-                    created_at_ns=int(time.time_ns()),
-                    refinement_model="whisperx",
-                )
-                producer.produce(
-                    topic=TOPIC_REFINED,
-                    key=session_id.encode("utf-8"),
-                    value=ev.SerializeToString(),
-                    headers=with_current_trace_context(),
-                )
-            finally:
-                if publish_span_cm is not None:
-                    try:
-                        publish_span_cm.__exit__(None, None, None)
-                    except Exception:
-                        pass
-            producer.poll(0)
-        finally:
-            if slice_span_cm is not None:
-                try:
-                    slice_span_cm.__exit__(None, None, None)
-                except Exception:
-                    pass
-            try:
-                os.unlink(wav_path)
-            except Exception:
-                pass
-
-    buffers.pop(session_id, None)
-    buf_samples.pop(session_id, None)
-    slice_index.pop(session_id, None)
-    session_trace_headers.pop(session_id, None)
 
 
 def _ensure_whisperx_imported() -> None:
@@ -1531,7 +1308,10 @@ def make_consumer() -> Consumer:
     cfg = {
         "bootstrap.servers": KAFKA_BOOTSTRAP,
         "group.id": GROUP_ID,
+        "client.id": os.getenv("KAFKA_CLIENT_ID", f"refinement.{TRACK_ID}"),
         "enable.auto.commit": False,
+        "enable.auto.offset.store": False,
+        "enable.partition.eof": True,
         "auto.offset.reset": "earliest",
         "max.partition.fetch.bytes": 5_000_000,
         "fetch.wait.max.ms": 50,
@@ -1548,7 +1328,8 @@ def make_producer() -> Producer:
     logger.info("Creating Kafka producer")
     cfg = {
         "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "client.id": "whisperx-async",
+        "client.id": f"refinement.{TRACK_ID}",
+        "enable.idempotence": True,
         "compression.type": "zstd",
         "linger.ms": 10,
         "batch.size": 131072,
@@ -1591,363 +1372,16 @@ def main():
 
     c = make_consumer()
     p = make_producer()
-    c.subscribe([TOPIC_AUDIO])
-
-    if _DECOUPLE_IO:
-        def _parse_audio_chunk(v: bytes) -> stream_pb2.AudioChunk:
-            audio = stream_pb2.AudioChunk()
-            audio.ParseFromString(v)
-            return audio
-
-        run_decoupled(
-            consumer=c,
-            topic_audio=TOPIC_AUDIO,
-            slice_seconds=SLICE_SECONDS,
-            sample_rate=SR,
-            session_idle_sec=SESSION_IDLE_SEC,
-            should_evict_idle_session=_should_evict_idle_session,
-            parse_audio_chunk=_parse_audio_chunk,
-            build_job=lambda **kw: {
-                "session_id": kw["session_id"],
-                "tenant_id": kw.get("tenant"),
-                "lang": kw.get("lang"),
-                "bff_origin_uri": kw.get("bff_uri"),
-                "trace_headers": kw.get("trace_headers"),
-                "pcm16": kw["pcm16"],
-                "base_start_s": float(kw["base_start_s"]),
-                "window_sec": float(kw.get("window_sec") or float(SLICE_SECONDS)),
-                "slice_index": int(kw["slice_index"]),
-                "flush_reason": kw.get("flush_reason", "slice"),
-                "topic": kw.get("msg_topic", TOPIC_AUDIO),
-                "partition": int(kw.get("msg_partition", 0)),
-                "offset": int(kw.get("msg_offset", -1)),
-            },
-            run_inference_and_publish=lambda job: _run_inference_and_publish(job=job, producer=p),
-        )
-        return
-
-    buffers: Dict[str, Deque[np.ndarray]] = defaultdict(deque)
-    buf_samples: Dict[str, int] = defaultdict(int)
-    slice_index: Dict[str, int] = defaultdict(int)
-    session_refinement_window_sec: Dict[str, float] = defaultdict(lambda: float(SLICE_SECONDS))
-    session_refinement_slice_samples: Dict[str, int] = defaultdict(lambda: int(round(float(SLICE_SECONDS) * SR)))
-    last_activity: Dict[str, float] = defaultdict(lambda: 0.0)
-    session_lang: Dict[str, Optional[str]] = defaultdict(lambda: None)
-    bff_origin_uri: Dict[str, Optional[str]] = defaultdict(lambda: None)
-
-    # Wall-clock time when we last attempted to poll Kafka.
-    # Used to detect when WhisperX inference blocked the loop long enough that
-    # wall-clock "idle" heuristics would be misleading.
-    last_poll_s: float = time.time()
-
-    try:
-        while True:
-            now = time.time()
-
-            # --- 1) Idle session eviction + final partial flush ---
-            idle_sessions = [
-                sid
-                for sid, _ts in list(last_activity.items())
-                if _should_evict_idle_session(
-                    sid,
-                    now_s=now,
-                    last_activity_s=last_activity,
-                    last_poll_s=last_poll_s,
-                    idle_sec=SESSION_IDLE_SEC,
-                )
-            ]
-            for sid in idle_sessions:
-                logger.info(
-                    "Session %s idle for %.1fs (threshold=%.1fs) → flushing & evicting",
-                    sid,
-                    now - last_activity[sid],
-                    SESSION_IDLE_SEC,
-                )
-                lang_hint = session_lang.get(sid)
-                win_sec = float(session_refinement_window_sec.get(sid, float(SLICE_SECONDS)))
-                _flush_session_partial(
-                    sid,
-                    lang_hint,
-                    win_sec,
-                    buffers,
-                    buf_samples,
-                    slice_index,
-                    p,
-                    session_lang,
-                    bff_origin_uri,
-                    tenant_id,
-                    session_trace_headers,
-                )
-                last_activity.pop(sid, None)
-                session_lang.pop(sid, None)
-                bff_origin_uri.pop(sid, None)
-                tenant_id.pop(sid, None)
-                session_refinement_window_sec.pop(sid, None)
-                session_refinement_slice_samples.pop(sid, None)
-
-            # --- 2) Normal Kafka polling ---
-            logger.debug("Waiting for message from Kafka")
-            last_poll_s = time.time()
-            msg = c.poll(timeout=1.0)
-            if msg is None:
-                continue
-            if msg.error():
-                logger.error("Kafka error: %s", msg.error())
-                raise KafkaException(msg.error())
-
-            hdrs = msg.headers() or None
-            controls = parse_stream_controls_from_kafka_headers(hdrs)
-            if not controls.want_refined:
-                # Skip refined processing entirely (saves GPU/CPU). We still commit
-                # offsets so this consumer group keeps up.
-                logger.debug(
-                    "Skipping refined processing due to x-outputs (session unknown yet) topic=%s partition=%s offset=%s",
-                    msg.topic(),
-                    msg.partition(),
-                    msg.offset(),
-                )
-                if _COMMIT_AFTER_PRODUCE:
-                    c.commit(msg, asynchronous=False)
-                else:
-                    c.commit(msg, asynchronous=True)
-                continue
-
-            with extracted_context_from_headers(hdrs):
-                try:
-                    audio = stream_pb2.AudioChunk()
-                    audio.ParseFromString(msg.value())
-
-                    session_id = audio.session_id
-                    lang = getattr(audio, "lang", "") or None
-                    bff_uri = getattr(audio, "bff_origin_uri", "") or None
-                    tenant = getattr(audio, "tenant_id", "") or None
-
-                    # Keep latest kafka headers for end-to-end propagation.
-                    session_trace_headers[session_id] = msg.headers() or session_trace_headers.get(session_id)
-
-                    if lang:
-                        session_lang[session_id] = lang
-                    if bff_uri:
-                        bff_origin_uri[session_id] = bff_uri
-                    if tenant:
-                        tenant_id[session_id] = tenant
-                    last_activity[session_id] = now
-
-                    # Per-session refinement window (slice duration) override.
-                    # Expected Kafka header (samuraibff): x-refinement-window-sec
-                    if session_id not in session_refinement_window_sec:
-                        win_sec = parse_refinement_window_sec_from_kafka_headers(
-                            hdrs,
-                            default_sec=SLICE_SECONDS,
-                        )
-                        session_refinement_window_sec[session_id] = float(win_sec)
-                        session_refinement_slice_samples[session_id] = int(round(float(win_sec) * SR))
-                    else:
-                        win_sec = float(session_refinement_window_sec.get(session_id, float(SLICE_SECONDS)))
-
-                    refinement_window_sec = win_sec
-                    refinement_slice_samples = int(session_refinement_slice_samples.get(session_id, int(round(win_sec * SR))))
-
-                    arr = np.frombuffer(audio.pcm16_le, dtype="<i2")
-                    buffers[session_id].append(arr)
-                    buf_samples[session_id] += arr.size
-
-                    logger.debug(
-                        "Buffer size for session %s: %d samples",
-                        session_id,
-                        buf_samples[session_id],
-                    )
-
-                    if buf_samples[session_id] >= refinement_slice_samples:
-                        need = refinement_slice_samples
-                        parts: List[np.ndarray] = []
-                        while need > 0 and buffers[session_id]:
-                            ch = buffers[session_id][0]
-                            if ch.size <= need:
-                                parts.append(buffers[session_id].popleft())
-                                need -= ch.size
-                                buf_samples[session_id] -= ch.size
-                            else:
-                                parts.append(ch[:need])
-                                buffers[session_id][0] = ch[need:]
-                                buf_samples[session_id] -= need
-                                need = 0
-
-                        pcm = np.concatenate(parts).astype("<i2")
-
-                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                            wav_path = tmp.name
-
-                        x = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
-                        sf.write(wav_path, x, SR, subtype="PCM_16")
-
-                        base_start = slice_index[session_id] * refinement_window_sec
-                        slice_idx = int(slice_index[session_id])
-                        slice_index[session_id] += 1
-
-                        logger.info(
-                            "Session %s: built %0.1fs slice → %s",
-                            session_id,
-                            refinement_window_sec,
-                            wav_path,
-                        )
-
-                        # Only span per slice (not per chunk).
-                        slice_span_cm = None
-                        if trace is not None:
-                            tracer = trace.get_tracer("whisperx_worker")
-                            slice_span_cm = tracer.start_as_current_span("whisperx.slice")
-                            slice_span_cm.__enter__()
-                            try:
-                                span = trace.get_current_span()
-                                if hasattr(span, "set_attribute"):
-                                    span.set_attribute("nanosamurai.session_id", session_id)
-                                    if tenant_id.get(session_id):
-                                        span.set_attribute("nanosamurai.tenant_id", tenant_id.get(session_id))
-                                    span.set_attribute("nanosamurai.slice_index", int(slice_idx))
-                                    span.set_attribute("nanosamurai.slice_start_s", float(base_start))
-                                    span.set_attribute("nanosamurai.slice_duration_s", float(refinement_window_sec))
-                                    span.set_attribute("nanosamurai.flush_reason", "slice")
-                            except Exception:
-                                pass
-
-                        try:
-                            text, segments = run_whisperx_diarized(
-                                wav_path,
-                                tenant=tenant_id.get(session_id),
-                                lang=session_lang.get(session_id),
-                                use_alignment=False,
-                            )
-                            logger.debug("Ran WhisperX inference, entire text is: %s", text)
-
-                            if trace is not None:
-                                try:
-                                    span = trace.get_current_span()
-                                    if hasattr(span, "set_attribute"):
-                                        span.set_attribute("nanosamurai.segments_count", int(len(segments)))
-                                        span.set_attribute("nanosamurai.text_len", int(len(text or "")))
-                                except Exception:
-                                    pass
-
-                            publish_span_cm = None
-                            if trace is not None:
-                                try:
-                                    tracer = trace.get_tracer("whisperx_worker")
-                                    publish_span_cm = tracer.start_as_current_span("kafka.produce transcripts.refined")
-                                    publish_span_cm.__enter__()
-                                    span = trace.get_current_span()
-                                    if hasattr(span, "set_attribute"):
-                                        span.set_attribute("messaging.system", "kafka")
-                                        span.set_attribute("messaging.destination", TOPIC_REFINED)
-                                        span.set_attribute("nanosamurai.session_id", session_id)
-                                except Exception:
-                                    publish_span_cm = None
-
-                            try:
-                                seg_msgs: List[stream_pb2.SessionTranscriptSegment] = []
-                                for (s0, s1, seg_text, speaker) in segments:
-                                    seg_msgs.append(
-                                        stream_pb2.SessionTranscriptSegment(
-                                            start_s=float(base_start + s0),
-                                            end_s=float(base_start + s1),
-                                            text=str(seg_text or ""),
-                                            speaker=str(speaker or ""),
-                                            words=[],
-                                        )
-                                    )
-
-                                if seg_msgs:
-                                    window_end_s = max(float(s.end_s) for s in seg_msgs)
-                                else:
-                                    window_end_s = float(base_start) + (float(pcm.size) / float(SR))
-
-                                window_start_s = float(base_start)
-                                full_text = " ".join([s.text for s in seg_msgs if (s.text or "").strip()]).strip()
-
-                                ev = stream_pb2.RefinedEvent(
-                                    session_id=session_id,
-                                    start_s=window_start_s,
-                                    end_s=float(window_end_s),
-                                    text=full_text,
-                                    speaker="",
-                                    supersedes_seq=[],
-                                    lang=session_lang.get(session_id) or "",
-                                    bff_origin_uri=bff_origin_uri.get(session_id) or "",
-                                    tenant_id=tenant_id.get(session_id) or "",
-                                    window_sec=float(refinement_window_sec),
-                                    slice_index=int(slice_index[session_id] - 1),
-                                    flush_reason="slice",
-                                    segments=seg_msgs,
-                                    created_at_ns=int(time.time_ns()),
-                                    refinement_model="whisperx",
-                                )
-                                logger.debug(
-                                    "Sending refined window message slice=%d start_s=%.1f segments=%d text_len=%d",
-                                    int(slice_index[session_id] - 1),
-                                    window_start_s,
-                                    len(seg_msgs),
-                                    len(full_text),
-                                )
-                                p.produce(
-                                    topic=TOPIC_REFINED,
-                                    key=session_id.encode("utf-8"),
-                                    value=ev.SerializeToString(),
-                                    headers=with_current_trace_context(),
-                                )
-                            finally:
-                                if publish_span_cm is not None:
-                                    try:
-                                        publish_span_cm.__exit__(None, None, None)
-                                    except Exception:
-                                        pass
-                            p.poll(0)
-                        finally:
-                            if slice_span_cm is not None:
-                                try:
-                                    slice_span_cm.__exit__(None, None, None)
-                                except Exception:
-                                    pass
-
-                        try:
-                            os.unlink(wav_path)
-                        except Exception:
-                            pass
-
-                    if _COMMIT_AFTER_PRODUCE:
-                        c.commit(msg, asynchronous=False)
-                    else:
-                        c.commit(msg, asynchronous=True)
-                finally:
-                    pass
-
-    except KeyboardInterrupt:
-        logger.info("Stopping whisperx_worker (KeyboardInterrupt)")
-    finally:
-        for sid in list(buffers.keys()):
-            lang_hint = session_lang.get(sid)
-            win_sec = float(session_refinement_window_sec.get(sid, float(SLICE_SECONDS)))
-            _flush_session_partial(
-                sid,
-                lang_hint,
-                win_sec,
-                buffers,
-                buf_samples,
-                slice_index,
-                p,
-                session_lang,
-                bff_origin_uri,
-                tenant_id,
-                session_trace_headers,
-            )
-
-        try:
-            c.close()
-        except Exception:
-            pass
-        try:
-            p.flush(2.0)
-        except Exception:
-            pass
+    run_decoupled(
+        consumer=c,
+        topic_audio=TOPIC_AUDIO,
+        slice_seconds=SLICE_SECONDS,
+        sample_rate=SR,
+        session_idle_sec=SESSION_IDLE_SEC,
+        track_id=TRACK_ID,
+        parse_audio_chunk=stream_pb2.AudioChunk.FromString,
+        run_inference_and_publish=lambda job: _run_inference_and_publish(job=job, producer=p),
+    )
 
 
 if __name__ == "__main__":
