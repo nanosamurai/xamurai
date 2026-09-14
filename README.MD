@@ -356,3 +356,9 @@ recordings stay in their existing storage.
 
 Local Docker builds exclude `.env` files and scratch worktrees from their
 contexts. Never copy model credentials into an image.
+
+## Refinement track contract
+
+Refinement tracks add only `RefinedEvent.track_id = 16`; an empty ID means
+`whisperx`. Audio, segment and word message shapes and Kafka keys stay unchanged.
+

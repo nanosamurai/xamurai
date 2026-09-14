@@ -53,6 +53,7 @@ message DiarEvent {
 }
 
 message RefinedEvent {
+  string track_id = 16; // deployment-configured refinement track; empty means whisperx
   string  session_id   = 1;
   double  start_s      = 2;
   double  end_s        = 3;
