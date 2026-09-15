@@ -182,6 +182,7 @@ message SessionTranscript {
 
   string tenant_id     = 7;
   uint64 created_at_ns = 8;
+  string track_id      = 9;
 }
 
 //python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. ./proto/stream.proto

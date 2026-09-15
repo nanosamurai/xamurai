@@ -21,3 +21,7 @@ a61fde948821fb8803f26676664e419b8630db9a:README.MD:developer-home-path:169
 b5023b97037f5c8fec4e0e5d878f253d7fc8dfe1:AGENTS.MD:developer-home-path:3
 bde6871a3d05d244d872e6836cd21d369dadb291:docs/local-k8s-observability.md:curl-auth-user:39
 ef424f47537ac75baefc6909f55e95d3ecd9901e:rtservice/environment.yml:developer-home-path:189
+# Synthetic UUID tails in the retired golden-vector fixture are not AWS accounts.
+# Scope these exceptions to the two reviewed historical additions only.
+03a52322f417853121ecfff69bcf5f263dad86f6:tests/data/final_track_vector.json:aws-account-id:1
+0e5f97cd59a6fe49b928ace3f9166c206207cf17:tests/data/final_track_vector.json:aws-account-id:1

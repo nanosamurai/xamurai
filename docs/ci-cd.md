@@ -12,6 +12,13 @@ to `master`.
 
 ## Pull request validation
 
+The lean refinement PR also receives lightweight CI and secret scanning while
+its base is `implement-lean-final-tracks`. Full-history scanning remains enabled.
+Two exact `.gitleaksignore` fingerprints cover synthetic UUID suffixes in the
+retired `final_track_vector.json` fixture: the AWS-account-ID rule otherwise
+misidentifies their twelve-digit tails in historical commits `03a52322` and
+`0e5f97cd`. New findings, including new occurrences in that path, remain checked.
+
 Pull requests targeting `master` or the unmerged `validate-nemotron-realtime`
 base run the lightweight CI and Gitleaks workflows. This lets the optional
 Sortformer/enrollment PR be reviewed and checked independently of its ASR base.

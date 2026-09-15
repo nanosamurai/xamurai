@@ -5,6 +5,7 @@ on:
     branches:
       - enable-realtime-replica-routing
       - master
+      - implement-lean-final-tracks
       - validate-nemotron-realtime
   workflow_call:
 

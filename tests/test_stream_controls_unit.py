@@ -47,3 +47,12 @@ def test_parse_refinement_window_sec_default_and_clamp():
     # parse float
     headers = [("x-refinement-window-sec", b"20")]
     assert parse_refinement_window_sec_from_kafka_headers(headers, default_sec=60.0) == 20.0
+
+
+def test_final_track_selection_and_disabled_stage():
+    assert parse_stream_controls_from_kafka_headers(None).final_tracks == ("whisperx",)
+    controls = parse_stream_controls_from_kafka_headers([
+        ("x-final-tracks", b"test-shadow,whisperx"), ("x-outputs", b"refined")])
+    assert controls.final_tracks == ("test-shadow", "whisperx")
+    assert not controls.want_final
+    assert parse_stream_controls_from_kafka_headers([("x-final-tracks", b"")]).final_tracks == ()

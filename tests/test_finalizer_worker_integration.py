@@ -1,4 +1,3 @@
-import json
 import os
 import threading
 import time
@@ -47,7 +46,7 @@ def _make_consumer(bootstrap: str, group_id: str) -> Consumer:
 @pytest.mark.timeout(900)  # allow for WhisperX model load
 @pytest.mark.integration
 @pytest.mark.skipif(not _HAS_WHISPERX, reason="whisperx not installed in this env")
-def test_finalizer_worker_writes_json_and_emits_event(
+def test_finalizer_worker_emits_event_without_sidecar(
     tmp_path: Path,
     kafka_bootstrap: str,
 ):
@@ -59,7 +58,7 @@ def test_finalizer_worker_writes_json_and_emits_event(
     - Produces one RecordingFinished event pointing to a local WAV file
       (tests/data/test_cs.wav copied into tmp_path).
     - Asserts:
-        - JSON transcript file is written next to the WAV (file:// case).
+        - No JSON transcript sidecar is written next to the WAV.
         - A SessionTranscript event appears on Kafka.
 
     Note: Postgres persistence is handled by `samuraipersistor` and is
@@ -76,8 +75,7 @@ def test_finalizer_worker_writes_json_and_emits_event(
     os.environ["KAFKA_TOPIC_RECORDING_FINISHED"] = topic_recording_finished
     # Must match finalizer_worker.TOPIC_TRANSCRIPTS_FINAL
     os.environ["KAFKA_TOPIC_TRANSCRIPTS_FINAL"] = topic_session_transcripts
-    # finalizer saves JSON next to the WAV; we copy the WAV under tmp_path so artifacts
-    # stay within tmp_path.
+    # Copy the WAV under tmp_path to verify that finalization creates no sidecar.
 
     # -------------------- 2) Use real test_cs.wav ---------------------------- #
     session_id = "finalizer-integration-1"
@@ -135,35 +133,12 @@ def test_finalizer_worker_writes_json_and_emits_event(
     )
     producer.flush(10_000)
 
-    # -------------------- 6) Wait for JSON transcript file ------------------- #
-    json_file: Path | None = None
-    deadline = time.time() + 120.0  # WhisperX can be slow on first run
-
-    while time.time() < deadline:
-        candidates = list(tmp_path.glob("*.json"))
-        if candidates:
-            json_file = candidates[0]
-            break
-        time.sleep(1.0)
-
-    assert json_file is not None, "finalizer_worker did not write any JSON transcript."
-
-    with json_file.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    assert data.get("session_id") == session_id
-    assert data.get("recording_url") == recording_url
-    assert isinstance(data.get("full_text", ""), str)
-    # With real speech we expect at least one segment
-    assert isinstance(data.get("segments"), list)
-    assert len(data["segments"]) > 0
-
     # -------------------- 7) Verify SessionTranscript on Kafka --------------- #
     consumer = _make_consumer(kafka_bootstrap, group_id="test-finalizer-consumer")
     consumer.subscribe([topic_session_transcripts])
 
     session_events: List[stream_pb2.SessionTranscript] = []
-    deadline2 = time.time() + 60.0
+    deadline2 = time.time() + 180.0
 
     try:
         while time.time() < deadline2:
@@ -188,6 +163,8 @@ def test_finalizer_worker_writes_json_and_emits_event(
     assert session_events, "Did not receive any SessionTranscript from finalizer_worker."
 
     ft = session_events[0]
+    assert not list(tmp_path.glob("*.json"))
+    assert ft.track_id == "whisperx"
     assert ft.session_id == session_id
     assert ft.recording_url == recording_url
     assert len(ft.segments) > 0
