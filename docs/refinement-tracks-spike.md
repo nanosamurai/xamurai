@@ -32,3 +32,10 @@ completion; resuming an evicted session can restart its timing origin. A durable
 end/resume contract, browser track selection/tabs and per-track failure status
 remain follow-up work. Deployment migration copies must stay byte-identical;
 this service does not own the deployment migration ledger.
+
+The post-merge WhisperX integration run on 2026-09-15 found a missing
+`defaultdict` import in legacy speaker enrollment. The runtime consolidation
+removed the import while `_init_diarization_models()` still used it. Restore
+that import so the worker can load local enrollment samples and publish results.
+The existing local-enrollment integration test covers this regression; the
+ordinary Compose smoke used S3 enrollment and did not exercise this path.

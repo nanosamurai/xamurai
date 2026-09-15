@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 import threading
+from collections import defaultdict
 from whisperx_worker.decoupled_runtime import run_decoupled
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, TypedDict
 
