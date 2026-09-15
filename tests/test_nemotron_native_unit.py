@@ -1,6 +1,66 @@
 import ctypes
+from unittest.mock import Mock
 
+import pytest
+
+from nemotron_rtservice import native
 from nemotron_rtservice.native import NativeSession, SpeakerWord, _RecognitionOptions
+
+
+@pytest.mark.parametrize("diarization", [False, True])
+@pytest.mark.parametrize("configured, expected", [
+    (None, 2000), ("800", 800), ("3000", 3000), ("1", 1), ("30000", 30000),
+])
+def test_backend_passes_endpoint_silence_to_native_config(monkeypatch, configured, expected, diarization):
+    if configured is None:
+        monkeypatch.delenv("NEMOTRON_ENDPOINTING_SILENCE_MS", raising=False)
+    else:
+        monkeypatch.setenv("NEMOTRON_ENDPOINTING_SILENCE_MS", configured)
+    monkeypatch.setenv("NEMOTRON_DIARIZATION", str(diarization).lower())
+    library = Mock()
+    library.nemo_speech_asr_version.return_value = b"nemo-speech-asr 0.1.0"
+    captured = {}
+
+    def create(config, handle):
+        config = ctypes.cast(config, ctypes.POINTER(native._RecognizerConfig)).contents
+        endpointing = config.endpointing.contents
+        captured.update(
+            silence_ms=endpointing.stop_history_eou_ms,
+            enabled=bool(endpointing.enable),
+            vad_based=bool(endpointing.vad_based),
+            vad=bool(config.vad),
+            diarization=bool(config.diar),
+        )
+        ctypes.cast(handle, ctypes.POINTER(ctypes.c_void_p)).contents.value = 7
+        return 0
+
+    library.nemo_speech_asr_create.side_effect = create
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    monkeypatch.setattr(native, "_verified_model_path", lambda *args: "model.gguf")
+    backend = native.NativeNemotronBackend(maximum_sessions=1)
+    try:
+        assert captured == {
+            "silence_ms": expected,
+            "enabled": True,
+            "vad_based": False,
+            "vad": False,
+            "diarization": diarization,
+        }
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("configured", ["", "abc", "2000.5", "0", "-1", "30001", "4294967296"])
+def test_invalid_endpoint_silence_fails_before_loading_native_runtime(monkeypatch, configured):
+    monkeypatch.setenv("NEMOTRON_ENDPOINTING_SILENCE_MS", configured)
+    monkeypatch.setenv("NEMOTRON_DIARIZATION", "false")
+    load_library = Mock()
+    monkeypatch.setattr(native.ctypes, "CDLL", load_library)
+
+    with pytest.raises(ValueError, match="NEMOTRON_ENDPOINTING_SILENCE_MS must be"):
+        native.NativeNemotronBackend(maximum_sessions=1)
+
+    load_library.assert_not_called()
 
 
 class _FakeLibrary:

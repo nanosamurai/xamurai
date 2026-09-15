@@ -35,6 +35,16 @@ native diarization build option; Python requests native speaker-tagged words
 and joins consecutive words with the same speaker into FINAL events. Every
 admitted native stream owns its Sortformer state. We do not restart it at ASR
 utterance boundaries, or share speaker-slot identity across streams/replicas.
+
+`NEMOTRON_ENDPOINTING_SILENCE_MS` controls the ASR decoder-silence timeout
+(default `2000`, integer `1`–`30000`, read at startup). Increasing it delays
+speaker-labelled finals without changing Sortformer's speaker-detection
+settings. Partials continue during the longer utterance. Consecutive words
+with the same speaker are grouped without checking silence gaps, so a pause
+that no longer triggers an endpoint can fall inside one displayed segment.
+The service loads no separate VAD model; the 30-second forced ASR endpoint
+remains in place.
+
 Word ends are clipped at the next speaker's onset so late RNNT punctuation
 cannot include the next turn in enrollment audio.
 The `sortformer-q8-r2` and `sortformer-enrolled-q8-r2` profiles also clip turns
@@ -140,6 +150,10 @@ for arbitrarily long streams. This local integration does not claim production
 capacity, >4-speaker correctness, T4 qualification or lossless pod migration.
 
 ## Validation
+
+The native unit tests cover the default and overridden endpoint timeout in
+both ASR-only and Sortformer configurations, including bounds and rejection
+of invalid startup values before native runtime loading.
 
 Run the lightweight native, speaker and gRPC tests:
 

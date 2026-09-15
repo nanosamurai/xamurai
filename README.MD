@@ -270,6 +270,8 @@ Nemotron realtime service settings include:
 - `NEMOTRON_RTSERVICE_PORT` (default `50052`)
 - `NEMOTRON_GPU` (default `0`)
 - `NEMOTRON_RNNT_RIGHT_CONTEXT` (default `1`, about 160 ms)
+- `NEMOTRON_ENDPOINTING_SILENCE_MS` (default `2000`; integer `1`–`30000`):
+  decoder-silence timeout, read at startup; invalid values fail startup.
 - `NEMOTRON_DIARIZATION` (default `false`); enable Sortformer finals, optionally
   with `ENROLL_BACKEND=s3_manifest` for enrolled names. See the
   [Sortformer and enrollment guide](docs/nemotron-sortformer.md) for the
@@ -277,8 +279,12 @@ Nemotron realtime service settings include:
 - `RT_SERVING_MAX_SESSIONS` (default `1`; values above one enable native
   cross-session microbatching with the same number of independent cache slots)
 
-Nemotron uses NeMo-Speech.cpp's native token-silence endpointing (800 ms) so
-each utterance is committed independently. A 30-second forced endpoint is the
+Nemotron uses NeMo-Speech.cpp's native token-silence endpointing (2000 ms by
+default) so each utterance is committed independently. Set
+`NEMOTRON_ENDPOINTING_SILENCE_MS=800` to restore the previous timeout, or
+`NEMOTRON_ENDPOINTING_SILENCE_MS=3000` to allow longer pauses, then recreate the
+service containers. Longer timeouts delay committed finals and speaker labels;
+streaming partials continue. A 30-second forced endpoint is the
 hard backstop for uninterrupted speech; this bounds replaceable partial text
 without limiting the total stream duration. The adapter enables the native
 automatic-punctuation request gate so Nemotron 3.5's own punctuation and

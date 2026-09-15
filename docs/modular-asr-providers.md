@@ -167,13 +167,26 @@ drains all currently available updates; EOF calls `finish`, drains the tail,
 and closes the opaque stream. Cancellation and every error path close the
 stream and release the admission slot exactly once.
 
-Native token-silence endpointing commits ordinary utterances after 800 ms of
-decoder silence. The adapter also requests a native endpoint after 30 seconds
+Native token-silence endpointing commits ordinary utterances after 2000 ms of
+decoder silence by default. Operators can set `NEMOTRON_ENDPOINTING_SILENCE_MS`
+to an integer from `1` through `30000` at process startup; malformed and
+out-of-range values fail startup before the native runtime or models load.
+The setting is not client-selectable. Use `800` to restore the previous timeout
+or `3000` to allow longer pauses, then recreate the service containers.
+The adapter also requests a native endpoint after 30 seconds
 of uninterrupted speech. Each resulting final advances the public replacement
 window, so partial payloads remain bounded while one gRPC stream can continue
 for an arbitrarily long recording. Each native request also enables automatic
 punctuation, which preserves Nemotron 3.5's built-in casing and punctuation
 without adding a postprocessing model or another inference pass.
+
+Longer silence timeouts delay committed finals and speaker labels while native
+partials continue. Endpointing uses decoder silence (`vad_based=false`); this
+profile loads no separate VAD model. Sortformer retains its state across ASR
+endpoints, and its speaker-detection settings are independent of this timeout.
+Public finals group consecutive words from the same speaker without a
+silence-gap split, so longer pauses within one utterance can remain inside one
+displayed speaker segment. See [Nemotron Sortformer](nemotron-sortformer.md).
 
 The fixed streaming geometry uses 160 ms chunks, 1.92 seconds of CTC padding,
 and RNNT right-context mode `1` (roughly 160 ms). Public language codes are
