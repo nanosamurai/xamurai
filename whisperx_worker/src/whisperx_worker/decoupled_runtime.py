@@ -1,389 +1,173 @@
-"""Decoupled runtime for whisperx_worker.
+"""Buffer audio per tenant/session while one inference thread processes windows.
 
-Goal: keep Kafka polling responsive even when WhisperX inference is slow.
-
-This module is intentionally small/isolated so we can evolve it without making
-`whisperx_worker.py` (already large) even larger.
+The poll thread alone owns the consumer. Keep each active session's first offset
+until its idle tail and all queued windows are acknowledged. Replays can then
+reconstruct sample-relative timing without a checkpoint store or message changes.
 """
-
-from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
-from collections import defaultdict, deque
-from queue import Empty, Queue
-from typing import Callable, Deque, Dict, List, Optional, TypedDict
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
-from confluent_kafka import Consumer, KafkaException, TopicPartition
+from confluent_kafka import KafkaError, KafkaException, TopicPartition
 
 from drsynth_common.stream_controls import (
     parse_stream_controls_from_kafka_headers,
     parse_refinement_window_sec_from_kafka_headers,
 )
 
-
-KafkaHeader = tuple[str, Optional[bytes]]
-
 logger = logging.getLogger(__name__)
 
 
-class SliceJob(TypedDict):
-    session_id: str
-    tenant_id: Optional[str]
-    lang: Optional[str]
-    bff_origin_uri: Optional[str]
-    trace_headers: Optional[list[KafkaHeader]]
+def run_decoupled(*, consumer, topic_audio, slice_seconds, sample_rate,
+                  session_idle_sec, track_id, parse_audio_chunk,
+                  run_inference_and_publish):
+    """Run the existing audio-to-refinement loop with replay-safe commits.
 
-    # Refinement window config for this job.
-    window_sec: float
-
-    pcm16: np.ndarray
-    base_start_s: float
-    slice_index: int
-    flush_reason: str  # "slice" | "idle"
-
-    topic: str
-    partition: int
-    offset: int
-
-
-class CommitReq(TypedDict):
-    topic: str
-    partition: int
-    offset: int  # next offset to consume
-
-
-def _queue_get_many(q: "Queue[SliceJob]", *, max_items: int, max_wait_ms: int) -> List[SliceJob]:
-    if max_items <= 1:
-        return [q.get()]
-
-    first = q.get()
-    out: List[SliceJob] = [first]
-    deadline = time.time() + (max_wait_ms / 1000.0)
-
-    while len(out) < max_items:
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            break
-        try:
-            out.append(q.get(timeout=remaining))
-        except Empty:
-            break
-    return out
-
-
-def _cut_samples_from_session_buffer(
-    session_id: str,
-    *,
-    need_samples: int,
-    buffers: Dict[str, Deque[np.ndarray]],
-    buf_samples: Dict[str, int],
-) -> np.ndarray:
-    parts: List[np.ndarray] = []
-    need = need_samples
-    while need > 0 and buffers[session_id]:
-        ch = buffers[session_id][0]
-        if ch.size <= need:
-            parts.append(buffers[session_id].popleft())
-            need -= ch.size
-            buf_samples[session_id] -= ch.size
-        else:
-            parts.append(ch[:need])
-            buffers[session_id][0] = ch[need:]
-            buf_samples[session_id] -= need
-            need = 0
-    if not parts:
-        return np.zeros((0,), dtype="<i2")
-    return np.concatenate(parts).astype("<i2")
-
-
-def run_decoupled(
-    *,
-    consumer: Consumer,
-    topic_audio: str,
-    slice_seconds: float,
-    sample_rate: int,
-    session_idle_sec: float,
-    should_evict_idle_session,
-    parse_audio_chunk: Callable[[bytes], object],
-    build_job: Callable[..., SliceJob],
-    run_inference_and_publish: Callable[[SliceJob], None],
-) -> None:
-    """Run the decoupled worker loop.
-
-    Threading model:
-    - Poll thread owns Kafka Consumer (thread-affinity).
-    - Main thread owns inference + producer.
-    - Commit-after-produce requests are executed by poll thread.
+    The inference callback must return only after Kafka acknowledges its event.
+    Exceptions stop this worker without committing its unfinished session audio.
+    Revocation discards local buffers; the next owner rebuilds them from Kafka.
     """
+    sessions = {}
+    ready = deque()
+    consumed = {}
+    committed = {}
+    caught_up = set()
+    paused = set()
+    queue_limit = max(1, int(os.getenv("WHISPERX_READY_QUEUE_MAX", "256")))
+    running = None
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisperx.inference")
 
-    # env knobs
-    commit_after_produce = os.getenv("WHISPERX_COMMIT_AFTER_PRODUCE", "true").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "y",
-    )
-    batch_max_items = int(os.getenv("WHISPERX_BATCH_MAX_ITEMS", "1"))
-    batch_max_wait_ms = int(os.getenv("WHISPERX_BATCH_MAX_WAIT_MS", "30"))
-    batch_mode = os.getenv("WHISPERX_BATCH_MODE", "sequential").strip().lower()
-    ready_q_max = int(os.getenv("WHISPERX_READY_QUEUE_MAX", "256"))
-    commit_q_max = int(os.getenv("WHISPERX_COMMIT_QUEUE_MAX", "1024"))
+    def revoke(_consumer, partitions):
+        """Invalidate revoked buffers and completions without advancing offsets."""
+        revoked = {(p.topic, p.partition) for p in partitions}
+        for key, state in list(sessions.items()):
+            if state["partition"] in revoked:
+                del sessions[key]
+        for partition in revoked:
+            consumed.pop(partition, None)
+            committed.pop(partition, None)
+        caught_up.difference_update(revoked)
+        paused.difference_update(revoked)
+        logger.info("Refinement partitions revoked: track=%s count=%d", track_id, len(revoked))
 
-    ready_q: "Queue[SliceJob]" = Queue(maxsize=ready_q_max)
-    commit_q: "Queue[CommitReq]" = Queue(maxsize=commit_q_max)
-    stop_event = threading.Event()
+    def enqueue(state, size, reason):
+        """Cut one sample-counted window and queue its existing inference payload."""
+        parts = []
+        remaining = size
+        while remaining:
+            chunk = state["buffer"][0]
+            take = min(remaining, chunk.size)
+            parts.append(chunk[:take])
+            if take == chunk.size:
+                state["buffer"].popleft()
+            else:
+                state["buffer"][0] = chunk[take:]
+            remaining -= take
+        job = dict(state["metadata"], pcm16=np.concatenate(parts),
+                   base_start_s=state["samples"] / sample_rate,
+                   slice_index=state["index"], flush_reason=reason)
+        state["samples"] += size
+        state["buffered"] -= size
+        state["index"] += 1
+        state["pending"] += 1
+        ready.append((state, job))
 
-    buffers: Dict[str, Deque[np.ndarray]] = defaultdict(deque)
-    buf_samples: Dict[str, int] = defaultdict(int)
-    slice_index: Dict[str, int] = defaultdict(int)
-    last_activity: Dict[str, float] = defaultdict(lambda: 0.0)
-    session_lang: Dict[str, Optional[str]] = defaultdict(lambda: None)
-    session_bff_uri: Dict[str, Optional[str]] = defaultdict(lambda: None)
-    session_tenant: Dict[str, Optional[str]] = defaultdict(lambda: None)
-    session_headers: Dict[str, Optional[list[KafkaHeader]]] = defaultdict(lambda: None)
-
-    # Per-session refinement window override.
-    session_slice_seconds: Dict[str, float] = defaultdict(lambda: float(slice_seconds))
-    session_slice_samples: Dict[str, int] = defaultdict(lambda: int(round(float(slice_seconds) * sample_rate)))
-
-    pending_by_session: Dict[str, int] = defaultdict(int)
-    state_lock = threading.Lock()
-    last_poll_s: float = time.time()
-    last_committed: Dict[tuple[str, int], int] = {}
-
-    default_slice_samples = int(round(float(slice_seconds) * sample_rate))
-
-    def poll_loop() -> None:
-        nonlocal last_poll_s
-        logger.info(
-            "whisperx_worker decoupled poll loop started: commit_after_produce=%s ready_q_max=%d",
-            commit_after_produce,
-            ready_q_max,
-        )
-
-        while not stop_event.is_set():
-            now_s = time.time()
-            last_poll_s = now_s
-
-            # Commit requests from inference thread.
-            if commit_after_produce:
-                while True:
-                    try:
-                        req = commit_q.get_nowait()
-                    except Empty:
-                        break
-                    key = (req["topic"], req["partition"])
-                    prev = last_committed.get(key, -1)
-                    if req["offset"] <= prev:
-                        continue
-                    consumer.commit(
-                        offsets=[TopicPartition(req["topic"], req["partition"], req["offset"])],
-                        asynchronous=False,
-                    )
-                    last_committed[key] = req["offset"]
-
-            # Idle eviction. Only when no pending jobs for session.
-            idle_sessions = [
-                sid
-                for sid, _ts in list(last_activity.items())
-                if should_evict_idle_session(
-                    sid,
-                    now_s=now_s,
-                    last_activity_s=last_activity,
-                    last_poll_s=last_poll_s,
-                    idle_sec=session_idle_sec,
-                )
-            ]
-
-            for sid in idle_sessions:
-                with state_lock:
-                    if pending_by_session.get(sid, 0) > 0:
-                        continue
-                if buf_samples.get(sid, 0) <= 0:
-                    # nothing buffered, just evict state
-                    buffers.pop(sid, None)
-                    buf_samples.pop(sid, None)
-                    slice_index.pop(sid, None)
-                    last_activity.pop(sid, None)
-                    session_lang.pop(sid, None)
-                    session_bff_uri.pop(sid, None)
-                    session_tenant.pop(sid, None)
-                    session_headers.pop(sid, None)
-                    session_slice_seconds.pop(sid, None)
-                    session_slice_samples.pop(sid, None)
-                    continue
-
-                pcm = _cut_samples_from_session_buffer(
-                    sid,
-                    need_samples=buf_samples.get(sid, 0),
-                    buffers=buffers,
-                    buf_samples=buf_samples,
-                )
-                base_start = slice_index[sid] * float(session_slice_seconds.get(sid, float(slice_seconds)))
-                slice_idx = slice_index[sid]
-                slice_index[sid] += 1
-
-                job: SliceJob = {
-                    "session_id": sid,
-                    "tenant_id": session_tenant.get(sid),
-                    "lang": session_lang.get(sid),
-                    "bff_origin_uri": session_bff_uri.get(sid),
-                    "trace_headers": session_headers.get(sid),
-
-                    "window_sec": float(session_slice_seconds.get(sid, float(slice_seconds))),
-                    "pcm16": pcm,
-                    "base_start_s": float(base_start),
-                    "slice_index": int(slice_idx),
-                    "flush_reason": "idle",
-                    "topic": topic_audio,
-                    "partition": 0,
-                    "offset": -1,
-                }
-
-                with state_lock:
-                    pending_by_session[sid] += 1
-                ready_q.put(job)
-
-                # Evict state after enqueue.
-                buffers.pop(sid, None)
-                buf_samples.pop(sid, None)
-                slice_index.pop(sid, None)
-                last_activity.pop(sid, None)
-                session_lang.pop(sid, None)
-                session_bff_uri.pop(sid, None)
-                session_tenant.pop(sid, None)
-                session_headers.pop(sid, None)
-                session_slice_seconds.pop(sid, None)
-                session_slice_samples.pop(sid, None)
-
-            msg = consumer.poll(timeout=0.5)
-            if msg is None:
-                continue
-            if msg.error():
-                raise KafkaException(msg.error())
-
-            controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
-            if not controls.want_refined:
-                # Skip refined jobs entirely; still commit offsets so group progresses.
-                if commit_after_produce:
-                    consumer.commit(msg, asynchronous=False)
-                else:
-                    consumer.commit(msg, asynchronous=True)
-                continue
-
-            # Parse protobuf in caller to avoid dependency cycle.
-            value = msg.value()
-            headers = msg.headers() or None
-            topic = msg.topic()
-            partition = msg.partition()
-            offset = msg.offset()
-
-            audio = parse_audio_chunk(value)
-
-            # AudioChunk-like interface (protobuf)
-            sid = getattr(audio, "session_id")
-
-            # Resolve per-session refinement window from headers.
-            if sid not in session_slice_seconds:
-                win_sec = parse_refinement_window_sec_from_kafka_headers(
-                    headers,
-                    default_sec=float(slice_seconds),
-                )
-                session_slice_seconds[sid] = float(win_sec)
-                session_slice_samples[sid] = int(round(float(win_sec) * sample_rate))
-
-            slice_samples = int(session_slice_samples.get(sid, default_slice_samples))
-            lang = getattr(audio, "lang", "") or None
-            bff_uri = getattr(audio, "bff_origin_uri", "") or None
-            tenant = getattr(audio, "tenant_id", "") or None
-
-            session_headers[sid] = headers or session_headers.get(sid)
-            if lang:
-                session_lang[sid] = lang
-            if bff_uri:
-                session_bff_uri[sid] = bff_uri
-            if tenant:
-                session_tenant[sid] = tenant
-            last_activity[sid] = now_s
-
-            pcm16_le = getattr(audio, "pcm16_le")
-            arr = np.frombuffer(pcm16_le, dtype="<i2")
-            buffers[sid].append(arr)
-            buf_samples[sid] += arr.size
-
-            while buf_samples[sid] >= slice_samples:
-                pcm = _cut_samples_from_session_buffer(
-                    sid,
-                    need_samples=slice_samples,
-                    buffers=buffers,
-                    buf_samples=buf_samples,
-                )
-                # base_start must use the per-session window.
-                base_start = slice_index[sid] * float(session_slice_seconds.get(sid, float(slice_seconds)))
-                slice_idx = slice_index[sid]
-                slice_index[sid] += 1
-
-                job2 = build_job(
-                    session_id=sid,
-                    pcm16=pcm,
-                    base_start_s=base_start,
-                    slice_index=slice_idx,
-                    flush_reason="slice",
-                    window_sec=float(session_slice_seconds.get(sid, float(slice_seconds))),
-                    lang=session_lang.get(sid),
-                    bff_uri=session_bff_uri.get(sid),
-                    tenant=session_tenant.get(sid),
-                    trace_headers=session_headers.get(sid),
-                    msg_topic=topic,
-                    msg_partition=int(partition),
-                    msg_offset=int(offset),
-                )
-                with state_lock:
-                    pending_by_session[sid] += 1
-                ready_q.put(job2)
-
-            # at-most-once fallback
-            if not commit_after_produce:
-                consumer.commit(msg, asynchronous=True)
-
-    poll_thread = threading.Thread(target=poll_loop, name="whisperx.poll", daemon=True)
-    poll_thread.start()
-
-    logger.info(
-        "whisperx_worker decoupled mode enabled: batch_max_items=%d batch_max_wait_ms=%d batch_mode=%s",
-        batch_max_items,
-        batch_max_wait_ms,
-        batch_mode,
-    )
-
+    consumer.subscribe([topic_audio], on_revoke=revoke, on_lost=revoke)
+    logger.info("Refinement worker started: track=%s", track_id)
     try:
         while True:
-            batch = _queue_get_many(ready_q, max_items=max(1, batch_max_items), max_wait_ms=batch_max_wait_ms)
-            if batch_mode not in ("sequential", "none"):
-                logger.warning("Unknown WHISPERX_BATCH_MODE=%s; using sequential", batch_mode)
+            if running and running[1].done():
+                state, future = running
+                # A revoked owner may finish publishing, but can never commit.
+                future.result()
+                state["pending"] -= 1
+                running = None
+            while ready and running is None:
+                state, job = ready.popleft()
+                if sessions.get(state["key"]) is state:
+                    running = (state, executor.submit(run_inference_and_publish, job))
 
-            for job in batch:
-                try:
-                    run_inference_and_publish(job)
-                finally:
-                    with state_lock:
-                        pending_by_session[job["session_id"]] = max(0, pending_by_session.get(job["session_id"], 1) - 1)
+            now = time.monotonic()
+            for key, state in list(sessions.items()):
+                # Never call a backlog or a paused partition an idle session.
+                if (state["partition"] in caught_up and state["partition"] not in paused
+                        and now - state["last_audio"] >= session_idle_sec):
+                    if state["buffered"] and len(ready) < queue_limit:
+                        enqueue(state, state["buffered"], "idle")
+                    if not state["buffered"] and not state["pending"]:
+                        del sessions[key]
 
-                if commit_after_produce and job["offset"] >= 0:
-                    commit_q.put(
-                        {
-                            "topic": job["topic"],
-                            "partition": job["partition"],
-                            "offset": int(job["offset"]) + 1,
-                        }
-                    )
+            # Pin each partition behind its earliest active session. In particular,
+            # an unselected message or another session's completion cannot jump it.
+            offsets = []
+            for partition, end in consumed.items():
+                safe = min((s["first_offset"] for s in sessions.values()
+                            if s["partition"] == partition), default=end)
+                if safe > committed.get(partition, -1):
+                    offsets.append(TopicPartition(*partition, safe))
+            if offsets:
+                consumer.commit(offsets=offsets, asynchronous=False)
+                committed.update({(p.topic, p.partition): p.offset for p in offsets})
+
+            assigned = {(p.topic, p.partition) for p in consumer.assignment()}
+            if len(ready) >= queue_limit:
+                to_pause = assigned - paused
+                if to_pause:
+                    consumer.pause([TopicPartition(*p) for p in to_pause])
+                    paused.update(to_pause)
+            elif paused:
+                consumer.resume([TopicPartition(*p) for p in paused & assigned])
+                # Require a fresh EOF before an idle flush after backpressure.
+                caught_up.difference_update(paused)
+                paused.clear()
+
+            msg = consumer.poll(0.1)
+            if msg is None:
+                continue
+            partition = (msg.topic(), msg.partition())
+            if msg.error():
+                if msg.error().code() == KafkaError._PARTITION_EOF:
+                    caught_up.add(partition)
+                    continue
+                raise KafkaException(msg.error())
+            caught_up.discard(partition)
+            consumed[partition] = msg.offset() + 1
+            headers = msg.headers() or None
+            controls = parse_stream_controls_from_kafka_headers(headers)
+            if not controls.want_refined or track_id not in controls.refinement_tracks:
+                continue
+
+            audio = parse_audio_chunk(msg.value())
+            key = (audio.tenant_id, audio.session_id)
+            if audio.sample_rate != sample_rate or len(audio.pcm16_le) % 2:
+                raise ValueError("Refinement requires whole PCM16 samples at the configured sample rate")
+            if not audio.pcm16_le:
+                continue
+            if key not in sessions:
+                window = parse_refinement_window_sec_from_kafka_headers(headers, default_sec=slice_seconds)
+                sessions[key] = {
+                    "key": key, "partition": partition, "first_offset": msg.offset(),
+                    "buffer": deque(), "buffered": 0, "samples": 0, "index": 0, "pending": 0,
+                    "window_samples": max(1, round(window * sample_rate)),
+                    "metadata": {"session_id": audio.session_id, "tenant_id": audio.tenant_id,
+                                 "lang": audio.lang, "bff_origin_uri": audio.bff_origin_uri,
+                                 "trace_headers": headers, "window_sec": window},
+                }
+            state = sessions[key]
+            if state["partition"] != partition:
+                raise ValueError("Session audio must retain its Kafka partition")
+            state["last_audio"] = time.monotonic()
+            chunk = np.frombuffer(audio.pcm16_le, dtype="<i2")
+            state["buffer"].append(chunk)
+            state["buffered"] += chunk.size
+            while state["buffered"] >= state["window_samples"]:
+                enqueue(state, state["window_samples"], "slice")
     finally:
-        stop_event.set()
-        try:
-            poll_thread.join(timeout=2.0)
-        except Exception:
-            pass
+        # Auto commit is disabled. Buffered/queued work must be replayed, not
+        # flushed with newly invented boundaries while a consumer is closing.
+        consumer.close()
+        executor.shutdown(wait=True, cancel_futures=True)

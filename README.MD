@@ -356,3 +356,41 @@ recordings stay in their existing storage.
 
 Local Docker builds exclude `.env` files and scratch worktrees from their
 contexts. Never copy model credentials into an image.
+
+## Refinement track contract
+
+Refinement tracks add only `RefinedEvent.track_id = 16`; an empty ID means
+`whisperx`. Audio, segment and word message shapes and Kafka keys stay unchanged.
+
+
+Each existing refinement worker has `REFINEMENT_TRACK_ID` (default `whisperx`)
+with a default consumer group `refinement.<track>`. `KAFKA_GROUP_ID` overrides
+that group; replicas of one track share it, different tracks must not. Existing
+Compose deployments can retain their `whisperx-async` group. The worker filters
+`x-refinement-tracks` on `audio.raw` and honors `x-outputs`; a missing selection
+means only WhisperX, while an explicitly empty selection selects no worker.
+`WHISPERX_MODEL` supplies the existing `refinement_model` field.
+
+Both full windows and idle tails now use the existing decoupled runtime and
+publish path. The duplicate synchronous loop and at-most-once switch are
+removed. `WHISPERX_DECOUPLE_IO`, `WHISPERX_COMMIT_AFTER_PRODUCE` and scheduler-only
+batch flags no longer select a different runtime. `WHISPERX_READY_QUEUE_MAX`
+still bounds queued work; Kafka polling stays responsive during inference.
+Window bounds are cumulative PCM sample counts, independent of model segment
+ends. Segments remain session-relative; no stored windows, new topics or result
+messages are introduced. Publication waits for Kafka acknowledgment.
+
+Offsets stay behind the first audio record of every active session on a
+partition until all its windows and idle tail have been published. Unselected
+messages cannot advance past that work. Revocation invalidates local buffers
+and queued completions. Another replica replays retained audio, including any
+already published windows, which the deployment's migration 019 deduplicates.
+A worker failure affects its own consumer group. This conservative policy can
+repeat inference for an active session and holds partition progress behind a
+long active session; Kafka audio retention must cover that recovery interval.
+
+The existing idle timeout remains the completion signal. Resuming a session
+after it has been idle-flushed/evicted starts a new timing origin, including
+after restart. A durable end/resume contract is a follow-up, not added here.
+Start a new session after completion. See `docs/refinement-tracks-spike.md` for
+qualification and deployment boundaries.
