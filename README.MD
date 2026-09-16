@@ -26,6 +26,10 @@ do not live in this service repository.
   `recordings.finished`.
 - `finalizer_worker` consumes `recordings.finished`, produces the canonical
   session transcript, and emits `transcripts.final`.
+- Its optional [Parakeet final track](docs/parakeet-finalizer.md) reuses that loop
+  with Parakeet TDT 0.6B v3 and embedded Sortformer, including word timestamps
+  and up to four anonymous speakers. Build the `parakeet-finalizer` target in
+  `nemotron_rtservice/Dockerfile`; no additional inference service is required.
 - `shared` contains the compatibility package `drsynth_common`, including
   Kafka tracing, enrollment, logging, and stream-control helpers. The import
   name is retained to avoid breaking downstream consumers.

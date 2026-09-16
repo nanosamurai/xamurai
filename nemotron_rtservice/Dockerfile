@@ -61,7 +61,7 @@ RUN cmake -G Ninja -S /work -B /work/build \
     && cmake --build /work/build --parallel 2 \
     && cmake --install /work/build --prefix /opt/nemo-speech
 
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867 AS native-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -115,6 +115,22 @@ RUN useradd --create-home --uid 10003 rtservice \
 
 USER 10003
 
+FROM native-runtime AS parakeet-finalizer
+USER root
+RUN /opt/venv/bin/pip install \
+      "confluent-kafka==2.12.0" \
+      "opentelemetry-api==1.36.0" \
+      "opentelemetry-sdk==1.36.0" \
+      "opentelemetry-exporter-otlp==1.36.0" \
+    && /opt/venv/bin/pip check
+COPY finalizer_worker/src /app/finalizer_worker/src
+ENV PYTHONPATH=/app:/app/shared/src:/app/nemotron_rtservice/src:/app/finalizer_worker/src \
+    FINALIZER_TRACK_ID=parakeet
+USER 10003
+ENTRYPOINT []
+CMD ["python", "-m", "finalizer_worker.parakeet"]
+
+FROM native-runtime AS nemotron-rtservice
 EXPOSE 50052
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15m --retries=3 \

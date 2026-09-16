@@ -84,6 +84,11 @@ jobs:
             dockerfile: nemotron_rtservice/Dockerfile
             context: .
             ghcr_repo: xamurai-nemotron-rtservice
+          - image: parakeet-finalizer
+            dockerfile: nemotron_rtservice/Dockerfile
+            target: parakeet-finalizer
+            context: .
+            ghcr_repo: xamurai-parakeet-finalizer
 
     steps:
       - name: Checkout
@@ -114,6 +119,7 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
           provenance: mode=max
           push: true
           sbom: true

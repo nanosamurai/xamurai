@@ -17,3 +17,9 @@ Provided by the WeSpeaker project under Creative Commons Attribution 4.0 Interna
 
 Model license: https://creativecommons.org/licenses/by/4.0/
 Model revisions and content digests: docs/nemotron-sortformer.md
+
+The Parakeet final track also downloads NVIDIA Parakeet TDT 0.6B v3 (Q8 GGUF).
+https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+Provided by NVIDIA under Creative Commons Attribution 4.0 International.
+The embedded Sortformer model is attributed above.
+Model revisions and content digests: docs/parakeet-finalizer.md
