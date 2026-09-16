@@ -1,5 +1,11 @@
 # Final track spike validation
 
+The worker's `main(transcribe=None, model=MODEL)` entry point accepts a pipeline
+returning the existing text/segment dictionaries. The default lazily loads
+WhisperX with alignment enabled. Model-specific entry points share selection,
+storage, acknowledged publication and replay handling without importing WhisperX.
+Test-only synthetic callers pass their inference function directly to `main`.
+
 Validated on 2026-09-13 on `implement-lean-final-tracks`.
 
 - Lightweight regression suite: 71 passed, including stream controls, serving

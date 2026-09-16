@@ -4,13 +4,13 @@ import os
 import re
 import tempfile
 import time
+from functools import partial
 from threading import Event
 from typing import Optional
 
 from confluent_kafka import Consumer, Producer, KafkaException
 
 from proto_gen import stream_pb2
-from whisperx_worker.whisperx_worker import run_whisperx_diarized_words
 
 from drsynth_common.otel_setup import setup_otel
 from drsynth_common.otel_kafka import extracted_context_from_headers, with_current_trace_context
@@ -333,27 +333,18 @@ def _produce_with_ack(
 # Main loop
 # --------------------------------------------------------------------------- #
 
-def main():
+def main(transcribe=None, model=MODEL):
+    """Consume selected recordings using a pipeline returning text and segment dictionaries."""
     setup_logging(default_level="INFO")
     # Initialize OTEL SDK (no-op if deps missing)
     setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "finalizer-worker"))
 
     logger.info("Starting finalizer_worker")
 
-    import torch
-
-    if not torch.cuda.is_available():
-        logger.warning(
-            "finalizer_worker: CUDA not available; running on CPU (torch=%s torch.version.cuda=%s)",
-            getattr(torch, "__version__", "unknown"),
-            getattr(getattr(torch, "version", None), "cuda", None),
-        )
-    else:
-        logger.info(
-            "finalizer_worker: CUDA available; will use GPU (torch=%s torch.version.cuda=%s)",
-            getattr(torch, "__version__", "unknown"),
-            getattr(getattr(torch, "version", None), "cuda", None),
-        )
+    if transcribe is None:
+        from whisperx_worker.whisperx_worker import run_whisperx_diarized_words
+        transcribe = partial(run_whisperx_diarized_words, use_alignment=True)
+    logger.info("Final pipeline ready: track=%s model=%s", TRACK_ID, model)
 
     consumer = make_consumer()
     producer = make_producer()
@@ -416,13 +407,10 @@ def main():
 
                     wav_path = _load_local_wav_from_url(rf.recording_url)
 
-                    # Full-session WhisperX with alignment + optional diarization/enrollment.
-                    # Enrollment backend is configured via env (ENROLL_BACKEND=...).
-                    full_text, segments = run_whisperx_diarized_words(
+                    full_text, segments = transcribe(
                         wav_path,
                         tenant=(rf.tenant_id or None),
                         lang=(rf.lang or None),
-                        use_alignment=True,
                     )
 
                     transcript = stream_pb2.SessionTranscript(
@@ -463,7 +451,7 @@ def main():
                             topic=TOPIC_TRANSCRIPTS_FINAL,
                             key=rf.session_id.encode("utf-8"),
                             value=transcript.SerializeToString(),
-                            headers=with_current_trace_context([("model", MODEL.encode("utf-8"))]),
+                            headers=with_current_trace_context([("model", model.encode("utf-8"))]),
                             timeout_s=FINALIZER_PRODUCE_ACK_TIMEOUT_S,
                             retries=FINALIZER_PRODUCE_RETRIES,
                             base_backoff_s=FINALIZER_PRODUCE_RETRY_BACKOFF_S,
