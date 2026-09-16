@@ -16,7 +16,7 @@ MODEL_REVISION = "1c8deaecc64b91f034d73e08dd8b64625eb3395d"
 MODEL_DIGEST = "sha256:a5c435f294eea8f88ce68dd27b8c3bfea7f777cb2fbba04fcd30eaa555f429ae"
 NEMO_SPEECH_VERSION = "0.1.0"
 NEMO_SPEECH_REVISION = "4f9676226f667d14608487df744f375db87127f8"
-ENDPOINTING_SILENCE_MS = 800
+DEFAULT_ENDPOINTING_SILENCE_MS = 2000
 MAX_UTTERANCE_SECONDS = 30.0
 SORTFORMER_MODEL_ID = "nvidia/diar_streaming_sortformer_4spk-v2"
 SORTFORMER_MODEL_FILENAME = "diar_streaming_sortformer_4spk-v2.q8_0.gguf"
@@ -365,6 +365,10 @@ class NativeNemotronBackend:
 
     def __init__(self, maximum_sessions: int) -> None:
         self.diarization = diarization_from_env()
+        endpointing_silence_ms = _bounded_int(
+            "NEMOTRON_ENDPOINTING_SILENCE_MS", DEFAULT_ENDPOINTING_SILENCE_MS,
+            1, int(MAX_UTTERANCE_SECONDS * 1000),
+        )
         library_path = os.getenv(
             "NEMO_SPEECH_LIBRARY",
             "/opt/nemo-speech/lib/libnemo_speech_asr_c.so",
@@ -406,7 +410,7 @@ class NativeNemotronBackend:
             size=ctypes.sizeof(_EndpointingConfig),
             enable=True,
             vad_based=False,
-            stop_history_eou_ms=ENDPOINTING_SILENCE_MS,
+            stop_history_eou_ms=endpointing_silence_ms,
         )
         diar = None
         if self.diarization:
