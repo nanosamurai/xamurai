@@ -107,6 +107,7 @@ fallbacks, and resource bounds.
 | `nemotron_rtservice` | Realtime gRPC | Fixed `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF through NeMo-Speech.cpp | Optional Sortformer v2 Q8; WeSpeaker ONNX for S3 enrollment | Native partials; optionally timed, speaker-labelled finals; no public word-timestamp claim |
 | `whisperx_worker` | Kafka refinement | WhisperX `medium` by default (`WHISPERX_MODEL` is operator-configurable) plus its language-specific alignment model | `pyannote/speaker-diarization-3.1` by default; optional `pyannote/embedding` enrollment mapping | Speaker-aware refined windows while the session is in progress |
 | `finalizer_worker` | Kafka completed-recording pipeline | Reuses the WhisperX ASR and language-alignment pipeline | Reuses the pyannote diarization and optional enrollment pipeline | Canonical full-session transcript with word timing where alignment succeeds |
+| `finalizer_worker.parakeet` | Kafka completed-recording pipeline | Parakeet TDT 0.6B v3 Q8 through NeMo-Speech.cpp; native word timing | Embedded Sortformer v2 Q8 | Independent final track with up to four anonymous speakers |
 | `recorder_worker` | Kafka and object storage | None | None | Model-free session WAV assembly and completion notification |
 
 Realtime clients select configured track IDs, not arbitrary model names,
@@ -237,6 +238,7 @@ The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
 - `ghcr.io/nanosamurai/xamurai-qwen-rtservice`
 - `ghcr.io/nanosamurai/xamurai-nemotron-rtservice`
+- `ghcr.io/nanosamurai/xamurai-parakeet-finalizer`
 
 ## Configuration
 

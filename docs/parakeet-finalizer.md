@@ -57,3 +57,13 @@ stereo input inside the native image. The Community Edition repository owns the
 real Compose smoke, including recorder, both final tracks, Kafka, Postgres and
 HTTP playback. See `nanosamurai/docs/parakeet-finalizer.md` for invocation and
 the deployment repository's spike evidence. No synthetic inference is used there.
+
+Validated on 2026-09-16 with an RTX 5090 Laptop GPU (24 GiB): both native
+integration tests passed, as did all 115 tests in the lightweight CI selection.
+The real Compose smoke passed with rebuilt `xamurai-parakeet-finalizer:local`
+and `xamurai-finalizer-worker:parakeet-spike` images. It used the full 20-second
+published Czech fixture and one second of silence. Existing Tier 1 connectivity
+and Tier 2 Nemotron FINAL smokes also passed with both finalizers loaded.
+The running Parakeet worker had zero restarts and no temporary WAV downloads
+remaining. This validates pipeline integration, not diarization accuracy on
+multi-speaker meetings or long-recording memory capacity.
