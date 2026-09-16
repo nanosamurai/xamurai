@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 from concurrent import futures
@@ -10,6 +11,7 @@ import grpc
 import numpy as np
 
 from nemotron_rtservice.native import (
+    DEFAULT_ENDPOINTING_SILENCE_MS,
     MODEL_DIGEST,
     MODEL_REVISION,
     NEMO_SPEECH_REVISION,
@@ -57,7 +59,7 @@ class NemotronStream(Protocol):
 class NemotronBackend(Protocol):
     runtime: str
 
-    def open(self, session_id: str, language: Optional[str]) -> NemotronStream: ...
+    def open(self, session_id: str, language: Optional[str], *, endpointing_silence_ms: int = 0) -> NemotronStream: ...
 
 
 def _public_language(language: str, fallback: str) -> str:
@@ -76,6 +78,12 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
         self._instance_id = serving_instance_id()
         self._diarization = bool(getattr(backend, "diarization", False))
         self._enrollment = enrollment
+        self._session_settings = {
+            "endpointing_silence_ms": {
+                "display_name": "Endpointing silence (ms)", "type": "integer", "min": 1, "max": 30000,
+                "default": getattr(backend, "endpointing_silence_ms", DEFAULT_ENDPOINTING_SILENCE_MS),
+            },
+        }
         self._profile_id = (ENROLLED_PROFILE_ID if enrollment is not None else DIARIZED_PROFILE_ID
                             ) if self._diarization else PROFILE_ID
 
@@ -100,6 +108,7 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                                      + (f";sortformer:{SORTFORMER_MODEL_REVISION}" if self._diarization else "")
                                      + (f";wespeaker:{EMBEDDING_MODEL_REVISION}" if self._enrollment is not None else "")),
             speaker_labels=self._diarization,
+            session_settings_json=json.dumps(self._session_settings),
         )
 
     def Stream(self, request_iterator, context):
@@ -108,6 +117,8 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             for key, value in (context.invocation_metadata() or ())
         }
         opening_session_id = metadata.get("x-session-id", "").strip()
+        settings = json.loads(metadata.get("x-rt-settings", "{}"))
+        silence_ms = int(settings.get("endpointing_silence_ms", self._session_settings["endpointing_silence_ms"]["default"]))
         if not SESSION_ID_PATTERN.fullmatch(opening_session_id):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "SESSION_ID_REQUIRED")
         if not self._slots.acquire():
@@ -191,6 +202,7 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                     native_stream = self._backend.open(
                         opening_session_id,
                         LANGUAGE_LOCALES.get(language) if language else None,
+                        endpointing_silence_ms=max(1, min(30000, silence_ms)),
                     )
                 expected_sequence = chunk.seq + 1
                 total_samples += len(chunk.pcm16_le) // 2

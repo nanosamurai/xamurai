@@ -154,6 +154,7 @@ message RealtimeCapabilities {
   string implementation_revision = 16;
   bool speaker_labels = 17;
   repeated string aligned_diarized_languages = 18;
+  string session_settings_json = 19; // key -> {display_name, type, min, max, default}
 }
 
 service RealtimeASR {

@@ -247,7 +247,8 @@ class NativeSession:
     """One cache-aware native stream; calls must stay on one worker thread."""
 
     def __init__(self, library: ctypes.CDLL, recognizer: ctypes.c_void_p, request_id: str,
-                 language: Optional[str], *, diarization: bool = False) -> None:
+                 language: Optional[str], *, diarization: bool = False,
+                 endpointing_silence_ms: int = 0) -> None:
         self._library = library
         self._handle = ctypes.c_void_p()
         self._closed = False
@@ -260,6 +261,7 @@ class NativeSession:
         options.request_id = self._request_id
         options.language_code = self._language
         options.interim_results = True
+        options.stop_history_eou_ms = endpointing_silence_ms
         # The stable C ABI intentionally defaults every optional request flag
         # to false. Nemotron 3.5 is self-punctuating, so this gate preserves the
         # casing and punctuation emitted by the model without a PnC sidecar.
@@ -365,7 +367,7 @@ class NativeNemotronBackend:
 
     def __init__(self, maximum_sessions: int) -> None:
         self.diarization = diarization_from_env()
-        endpointing_silence_ms = _bounded_int(
+        self.endpointing_silence_ms = _bounded_int(
             "NEMOTRON_ENDPOINTING_SILENCE_MS", DEFAULT_ENDPOINTING_SILENCE_MS,
             1, int(MAX_UTTERANCE_SECONDS * 1000),
         )
@@ -410,7 +412,7 @@ class NativeNemotronBackend:
             size=ctypes.sizeof(_EndpointingConfig),
             enable=True,
             vad_based=False,
-            stop_history_eou_ms=endpointing_silence_ms,
+            stop_history_eou_ms=self.endpointing_silence_ms,
         )
         diar = None
         if self.diarization:
@@ -445,10 +447,11 @@ class NativeNemotronBackend:
             "create recognizer",
         )
 
-    def open(self, session_id: str, language: Optional[str]) -> NativeSession:
+    def open(self, session_id: str, language: Optional[str], *, endpointing_silence_ms: int = 0) -> NativeSession:
         return NativeSession(
             self._library, self._recognizer, session_id, language,
             diarization=self.diarization,
+            endpointing_silence_ms=endpointing_silence_ms,
         )
 
     def close(self) -> None:

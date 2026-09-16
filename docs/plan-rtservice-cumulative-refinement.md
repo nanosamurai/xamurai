@@ -1,5 +1,8 @@
 # Plan C: rtservice cumulative refinement (low-latency partials → stabilized final)
 
+Historical design: the individual realtime headers below have been replaced by
+the [service-owned settings contract](stream-output-selection.md#grpc-metadata-rtservice).
+
 This document captures the implementation plan for **Plan C** discussed in the architecting exercise:
 
 > rtservice has two dimensions:
