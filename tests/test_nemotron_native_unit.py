@@ -75,6 +75,7 @@ class _FakeLibrary:
     def nemo_speech_asr_streaming_recognize(self, _recognizer, options, handle):
         captured = ctypes.cast(options, ctypes.POINTER(_RecognitionOptions)).contents
         self.options = {
+            "stop_history_eou_ms": captured.stop_history_eou_ms,
             "interim_results": bool(captured.interim_results),
             "enable_automatic_punctuation": bool(captured.enable_automatic_punctuation),
             "enable_word_time_offsets": bool(captured.enable_word_time_offsets),
@@ -87,12 +88,14 @@ class _FakeLibrary:
         return None
 
 
-def test_native_session_requests_interim_and_self_punctuated_text():
+@pytest.mark.parametrize("silence_ms", [0, 800, 3000])
+def test_native_session_requests_interim_and_self_punctuated_text(silence_ms):
     library = _FakeLibrary()
 
-    session = NativeSession(library, ctypes.c_void_p(7), "session", "en-US")
+    session = NativeSession(library, ctypes.c_void_p(7), "session", "en-US", endpointing_silence_ms=silence_ms)
     try:
         assert library.options == {
+            "stop_history_eou_ms": silence_ms,
             "interim_results": True,
             "enable_automatic_punctuation": True,
             "enable_word_time_offsets": False,

@@ -1,5 +1,8 @@
 # Spec: BFF + UI stream controls (outputs + realtime knobs)
 
+Historical design: the individual realtime headers below have been replaced by
+the [service-owned settings contract](stream-output-selection.md#grpc-metadata-rtservice).
+
 This document specifies the **samuraibff + UI** changes needed to support
 per-stream configuration of:
 

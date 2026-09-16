@@ -1,4 +1,5 @@
 from concurrent import futures
+import json
 from types import SimpleNamespace
 
 import grpc
@@ -13,6 +14,7 @@ from rtservice.providers import (
 )
 from rtservice.server import RealtimeASRServicer
 from rtservice.server import create_realtime_asr_server
+from rtservice.engine import RealtimeConfig
 
 
 class _FakeWhisperModel:
@@ -68,7 +70,10 @@ def test_local_profile_preserves_final_and_partial_decode_settings(monkeypatch):
 
 def test_faster_rtservice_broadcasts_its_fixed_capabilities():
     provider = LocalFasterWhisperProvider(model=_FakeWhisperModel())
-    engine = SimpleNamespace(default_provider=lambda: provider)
+    calls = []
+    engine = SimpleNamespace(default_provider=lambda: provider, cfg=RealtimeConfig(),
+                             feed=lambda *args, **kwargs: calls.append(kwargs) or [],
+                             close_session=lambda *args, **kwargs: None)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
     stream_pb2_grpc.add_RealtimeASRServicer_to_server(RealtimeASRServicer(engine), server)
     port = server.add_insecure_port("127.0.0.1:0")
@@ -87,6 +92,20 @@ def test_faster_rtservice_broadcasts_its_fixed_capabilities():
         assert list(capabilities.aligned_diarized_languages) == []
         assert capabilities.model_revision == provider.model_revision
         assert capabilities.model_digest == provider.model_digest
+        definitions = json.loads(capabilities.session_settings_json)
+        assert definitions["window_sec"]["default"] == engine.cfg.window_sec
+        assert definitions["partial_enable"]["type"] == "boolean"
+        settings = {"window_sec": 4, "overlap_sec": 0.25, "emit_every_sec": 1.5,
+                    "partial_enable": False, "unknown": 123}
+        list(stream_pb2_grpc.RealtimeASRStub(channel).Stream(
+            iter([stream_pb2.AudioChunk(session_id="settings", sample_rate=16000,
+                                       pcm16_le=b"\x01\x00" * 1600, seq=1)]), timeout=2,
+            metadata=(("x-session-id", "settings"), ("x-rt-settings", json.dumps(settings)))))
+        assert calls
+        for call in calls:
+            assert {key: value for key, value in call.items() if key.startswith("rt_")} == {
+                f"rt_{key}": value for key, value in settings.items() if key != "unknown"}
+        assert engine.cfg.window_sec == definitions["window_sec"]["default"]
     finally:
         channel.close()
         server.stop(grace=None).wait()

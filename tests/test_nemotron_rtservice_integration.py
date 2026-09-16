@@ -1,3 +1,4 @@
+import json
 import queue
 import time
 
@@ -45,8 +46,9 @@ class _FakeBackend:
     def __init__(self):
         self.opens = []
 
-    def open(self, session_id, language):
+    def open(self, session_id, language, *, endpointing_silence_ms=0):
         stream = _FakeStream()
+        stream.endpointing_silence_ms = endpointing_silence_ms
         self.opens.append((session_id, language, stream))
         return stream
 
@@ -62,11 +64,11 @@ def _chunk(session_id="nemotron-session", sequence=1, payload=b"\x01\x00" * 1600
     )
 
 
-def _call(stub, requests, session_id="nemotron-session", timeout=3):
+def _call(stub, requests, session_id="nemotron-session", timeout=3, settings=None):
     return stub.Stream(
         requests,
         timeout=timeout,
-        metadata=(("x-session-id", session_id),),
+        metadata=(("x-session-id", session_id), ("x-rt-settings", json.dumps(settings or {}))),
     )
 
 
@@ -110,6 +112,8 @@ def test_nemotron_stream_pushes_only_new_chunks_and_flushes_final(running_server
     assert capabilities.model_revision == MODEL_REVISION
     assert capabilities.model_digest == MODEL_DIGEST
     assert "cs" in capabilities.supported_languages
+    assert json.loads(capabilities.session_settings_json)["endpointing_silence_ms"] == {
+        "display_name": "Endpointing silence (ms)", "type": "integer", "min": 1, "max": 30000, "default": 2000}
     assert events[0].type == stream_pb2.SESSION_ACCEPTED
     assert events[0].serving_instance_id
     assert [(event.text, event.type, event.lang) for event in events[1:]] == [
@@ -121,6 +125,7 @@ def test_nemotron_stream_pushes_only_new_chunks_and_flushes_final(running_server
     native_stream = backend.opens[0][2]
     assert native_stream.chunks == [(first, 16_000), (second, 16_000)]
     assert native_stream.closed == 1
+    assert native_stream.endpointing_silence_ms == 2000
 
 
 def test_nemotron_final_starts_a_new_replacement_window(monkeypatch):
@@ -150,7 +155,7 @@ def test_nemotron_final_starts_a_new_replacement_window(monkeypatch):
             )
 
     class _EpochBackend(_FakeBackend):
-        def open(self, session_id, language):
+        def open(self, session_id, language, *, endpointing_silence_ms=0):
             stream = _EpochStream()
             self.opens.append((session_id, language, stream))
             return stream
@@ -206,14 +211,19 @@ class _HeldRequests:
 
 
 def test_nemotron_admits_two_sessions_and_recovers_after_cancel(running_server):
-    _, stub = running_server
+    backend, stub = running_server
     held_one = _HeldRequests()
     held_two = _HeldRequests()
-    first = _call(stub, held_one, "held-one", timeout=5)
-    second = _call(stub, held_two, "held-two", timeout=5)
+    first = _call(stub, held_one, "held-one", timeout=5, settings={"endpointing_silence_ms": 800, "unknown": 1})
+    second = _call(stub, held_two, "held-two", timeout=5, settings={"endpointing_silence_ms": 3000})
     try:
         assert next(first).type == stream_pb2.SESSION_ACCEPTED
         assert next(second).type == stream_pb2.SESSION_ACCEPTED
+        held_one._items.put(_chunk("held-one"))
+        held_two._items.put(_chunk("held-two"))
+        assert next(first).type == next(second).type == stream_pb2.PARTIAL
+        assert {sid: stream.endpointing_silence_ms for sid, _, stream in backend.opens} == {
+            "held-one": 800, "held-two": 3000}
 
         with pytest.raises(grpc.RpcError) as rejected:
             list(_call(stub, iter(()), "rejected", timeout=2))
@@ -274,7 +284,7 @@ def test_diarized_finals_keep_native_endpoint_and_match_the_stream_tenant(monkey
 
     class Backend(_FakeBackend):
         diarization = True
-        def open(self, session_id, language):
+        def open(self, session_id, language, *, endpointing_silence_ms=0):
             stream = DiarizedStream()
             self.opens.append((session_id, language, stream))
             return stream

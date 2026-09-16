@@ -101,14 +101,23 @@ Notes:
 
 ## gRPC metadata (rtservice)
 
-When the BFF calls `RealtimeASR.Stream`, it may pass per-stream metadata:
+Each service publishes `RealtimeCapabilities.session_settings_json`: a JSON map
+of setting keys to `{display_name, type, default, min, max}`. Types are `boolean`,
+`integer`, or `decimal` (UI step 0.01); booleans omit min/max. Defaults reflect the
+running service's configuration. Qwen currently publishes `{}`.
 
-- `x-rt-window-sec`
-- `x-rt-overlap-sec`
-- `x-rt-emit-every-sec`
-- `x-rt-partial-enable: true|false`
+The BFF sends one `x-rt-settings` JSON object per selected track. Faster Whisper
+accepts `window_sec`, `overlap_sec`, `emit_every_sec`, and `partial_enable`.
+For example `{"window_sec":5,"overlap_sec":0.5,"partial_enable":false}` disables
+PARTIAL emission while FINALs continue. Nemotron accepts
+`{"endpointing_silence_ms":800}`, applied to that native stream's recognition
+options without changing the shared recognizer or other sessions.
 
-`x-rt-partial-enable=false` disables PARTIAL emission for that stream (FINALs still emit).
+Unknown keys are ignored; omitted keys use deployment defaults. UI limits and
+existing engine guards suffice for this spike; fuller SDK validation is deferred.
+The former individual `x-rt-*` settings headers are no longer read. The UI resolves
+defaults and the BFF freezes values in `sessions.stream_controls.realtime_settings`
+and the existing `sessions.meta.stream_controls` snapshot at audio admission.
 
 ## Security notes
 

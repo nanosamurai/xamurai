@@ -1,6 +1,6 @@
 import os
 import logging
-import math
+import json
 import signal
 import sys
 import time
@@ -113,57 +113,6 @@ _M_FEED_SECONDS = Histogram("rtservice_engine_feed_seconds", "RealtimeEngine.fee
 _M_SEND_EVENT_SECONDS = Histogram("rtservice_send_event_seconds", "AsrEvent send/yield latency (seconds)") if Histogram else None
 
 
-def _parse_finite_float(s: object) -> Optional[float]:
-    if s is None:
-        return None
-    try:
-        x = float(str(s).strip())
-        if math.isfinite(x):
-            return x
-        return None
-    except Exception:
-        return None
-
-
-def _metadata_to_overrides(context: grpc.ServicerContext) -> dict:
-    """Extract per-stream rtservice override knobs from gRPC metadata.
-
-    Expected keys (lowercase on the wire):
-    - x-rt-window-sec
-    - x-rt-overlap-sec
-    - x-rt-emit-every-sec
-    - x-rt-partial-enable
-    """
-
-    md = {}
-    try:
-        for k, v in (context.invocation_metadata() or ()):  # type: ignore[attr-defined]
-            md[str(k).lower()] = v
-    except Exception:
-        return {}
-
-    win = _parse_finite_float(md.get("x-rt-window-sec"))
-    ov = _parse_finite_float(md.get("x-rt-overlap-sec"))
-    emit = _parse_finite_float(md.get("x-rt-emit-every-sec"))
-    partial_enable_raw = md.get("x-rt-partial-enable")
-
-    out = {}
-    if win is not None:
-        out["rt_window_sec"] = win
-    if ov is not None:
-        out["rt_overlap_sec"] = ov
-    if emit is not None:
-        out["rt_emit_every_sec"] = emit
-
-    if partial_enable_raw is not None:
-        raw = str(partial_enable_raw).strip().lower()
-        if raw in ("1", "true", "yes", "y", "on"):
-            out["rt_partial_enable"] = True
-        elif raw in ("0", "false", "no", "n", "off"):
-            out["rt_partial_enable"] = False
-    return out
-
-
 def _metadata_to_dict(context: grpc.ServicerContext) -> dict[str, str]:
     out: dict[str, str] = {}
     try:
@@ -221,6 +170,14 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
         self._log = logging.getLogger(__name__)
         self._slots = SessionSlots(max_sessions_from_env())
         self._instance_id = serving_instance_id()
+        self._session_settings = {
+            "window_sec": {"display_name": "Window (sec)", "type": "decimal", "min": 1, "max": 30},
+            "overlap_sec": {"display_name": "Overlap (sec)", "type": "decimal", "min": 0, "max": 30},
+            "emit_every_sec": {"display_name": "Update interval (sec)", "type": "decimal", "min": 1, "max": 30},
+            "partial_enable": {"display_name": "Show partial text", "type": "boolean"},
+        }
+        for key, definition in self._session_settings.items():
+            definition["default"] = getattr(engine.cfg, key)
 
     def GetCapabilities(self, request, context):
         """Return the fixed provider capabilities and pinned runtime provenance."""
@@ -246,6 +203,7 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
             implementation_revision=provenance.implementation_revision,
             speaker_labels=True,
             aligned_diarized_languages=capabilities.supported_languages,
+            session_settings_json=json.dumps(self._session_settings),
         )
 
     def Stream(self, request_iterator, context):
@@ -254,7 +212,8 @@ class RealtimeASRServicer(stream_pb2_grpc.RealtimeASRServicer):
         not async def and not an async generator.
         """
         md = _metadata_to_dict(context)
-        overrides = _metadata_to_overrides(context)
+        overrides = {f"rt_{key}": value for key, value in json.loads(md.get("x-rt-settings", "{}")).items()
+                     if key in self._session_settings}
         provider_profile_id = md.get("x-rt-provider-profile") or None
         if provider_profile_id is not None:
             overrides["provider_profile_id"] = provider_profile_id

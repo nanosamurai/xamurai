@@ -324,6 +324,7 @@ class QwenRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             runtime=self._backend.runtime,
             model_revision=MODEL_REVISION,
             model_digest=MODEL_DIGEST,
+            session_settings_json="{}",
             implementation_revision="xamurai-qwen-realtime-v4",
             speaker_labels=bool(self._enricher and self._enricher.supported_languages),
             aligned_diarized_languages=tuple(

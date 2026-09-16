@@ -267,6 +267,12 @@ Qwen realtime service settings include:
 
 Nemotron realtime service settings include:
 
+Per-session controls are service-owned maps advertised by `GetCapabilities`.
+The BFF renders boolean/integer/decimal fields and sends each track's values as
+`x-rt-settings` JSON. Whisper exposes its window/overlap/cadence/partials; Nemotron
+exposes `endpointing_silence_ms`; Qwen currently exposes none. Unknown keys are
+ignored. See [the settings contract](docs/stream-output-selection.md#grpc-metadata-rtservice).
+
 - `NEMOTRON_RTSERVICE_PORT` (default `50052`)
 - `NEMOTRON_GPU` (default `0`)
 - `NEMOTRON_RNNT_RIGHT_CONTEXT` (default `1`, about 160 ms)
@@ -283,7 +289,9 @@ Nemotron uses NeMo-Speech.cpp's native token-silence endpointing (2000 ms by
 default) so each utterance is committed independently. Set
 `NEMOTRON_ENDPOINTING_SILENCE_MS=800` to restore the previous timeout, or
 `NEMOTRON_ENDPOINTING_SILENCE_MS=3000` to allow longer pauses, then recreate the
-service containers. Longer timeouts delay committed finals and speaker labels;
+service containers to change the deployment default. A session can override it
+through `x-rt-settings: {"endpointing_silence_ms":800}` without a restart.
+Longer timeouts delay committed finals and speaker labels;
 streaming partials continue. A 30-second forced endpoint is the
 hard backstop for uninterrupted speech; this bounds replaceable partial text
 without limiting the total stream duration. The adapter enables the native
