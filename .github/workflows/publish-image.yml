@@ -74,6 +74,8 @@ jobs:
             ghcr_repo: xamurai-nemotron-rtservice
           - image: parakeet-finalizer
             ghcr_repo: xamurai-parakeet-finalizer
+          - image: parakeet-refinement
+            ghcr_repo: xamurai-parakeet-refinement
 
     steps:
       - name: Checkout

@@ -1,0 +1,4 @@
+# syntax=docker/dockerfile:1
+FROM parakeet-finalizer
+ENV REFINEMENT_TRACK_ID=parakeet
+CMD ["python", "-m", "parakeet_worker.refinement"]

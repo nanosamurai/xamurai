@@ -25,13 +25,16 @@ do not live in this service repository.
   `transcripts.refined`; `whisperx_worker.finalizer` reads completed recordings
   and emits `transcripts.final`. Both use pyannote and optional enrolled names.
 - `parakeet_worker` contains the Parakeet TDT 0.6B v3 pipeline and
-  `parakeet_worker.finalizer`, with embedded Sortformer and native word timing.
-  It supports up to four anonymous speakers. It has no refinement entrypoint yet.
+  refinement/finalizer entrypoints, with embedded Sortformer and native word timing.
+  It supports up to four anonymous speakers per window or recording. See
+  [Parakeet refinement](docs/parakeet-refinement.md) for the semi-batch worker.
 - `nemo_speech_native` contains the shared NeMo-Speech.cpp bindings, runtime
   checks, verified model downloads and native Docker base for Nemotron and Parakeet.
 - `recorder_worker` stores session audio and emits `recordings.finished`.
 - `xamurai_serving.finalization` contains the shared recording download,
   track selection, publication and replay loop. Each finalizer supplies its pipeline.
+- `xamurai_serving.refinement` and `refinement_runtime` share window buffering,
+  inference publication and replay handling between WhisperX and Parakeet.
 - `shared` contains the compatibility package `drsynth_common`, including
   Kafka tracing, enrollment, logging, and stream-control helpers. The import
   name is retained to avoid breaking downstream consumers.
@@ -396,7 +399,10 @@ that group; replicas of one track share it, different tracks must not. Existing
 Compose deployments can retain their `whisperx-async` group. The worker filters
 `x-refinement-tracks` on `audio.raw` and honors `x-outputs`; a missing selection
 means only WhisperX, while an explicitly empty selection selects no worker.
-`WHISPERX_MODEL` supplies the existing `refinement_model` field.
+Each pipeline supplies `refinement_model`: `WHISPERX_MODEL` for WhisperX and
+`nvidia/parakeet-tdt-0.6b-v3` for Parakeet. Parakeet's image defaults its track to
+`parakeet`. See [Parakeet refinement](docs/parakeet-refinement.md) for shared
+window/idle/queue settings and window-local speaker identity.
 
 Both full windows and idle tails now use the existing decoupled runtime and
 publish path. The duplicate synchronous loop and at-most-once switch are

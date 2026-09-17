@@ -7,6 +7,9 @@ No additional ASR server, Python ML framework, alignment model, topic or databas
 schema is needed. Inference is sequential within each worker; model weights stay
 loaded between recordings and native recognition creates fresh speaker state.
 
+The same pipeline also supports [semi-batch refinement](parakeet-refinement.md)
+through a separate entrypoint and consumer group.
+
 Build from Xamurai:
 
 ```sh

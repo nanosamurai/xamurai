@@ -14,7 +14,7 @@ MODEL_DIGEST = "sha256:e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b
 
 
 class Parakeet:
-    """Keep one ASR/diarization model pair warm; recognize recordings sequentially."""
+    """Keep one ASR/diarization model pair warm; recognize WAV inputs sequentially."""
 
     def __init__(self):
         self.library = native.load_library()
@@ -48,7 +48,7 @@ class Parakeet:
         """Return text and timed anonymous speaker segments; each call has fresh speaker state."""
         with sf.SoundFile(path) as audio:
             if audio.channels != 1 or audio.samplerate != 16000:
-                raise ValueError("Parakeet finalizer expects mono 16 kHz recordings")
+                raise ValueError("Parakeet expects mono 16 kHz audio")
             samples = audio.read(dtype="float32")
         if not samples.size:
             return "", []

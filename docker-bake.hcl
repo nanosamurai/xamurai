@@ -41,3 +41,9 @@ target "parakeet-finalizer" {
   contexts = { nemo-speech-native = "target:nemo-speech-native" }
   tags = ["xamurai-parakeet-finalizer:${TAG}"]
 }
+
+target "parakeet-refinement" {
+  dockerfile = "parakeet_worker/Dockerfile.refinement"
+  contexts = { parakeet-finalizer = "target:parakeet-finalizer" }
+  tags = ["xamurai-parakeet-refinement:${TAG}"]
+}
