@@ -36,14 +36,16 @@ and joins consecutive words with the same speaker into FINAL events. Every
 admitted native stream owns its Sortformer state. We do not restart it at ASR
 utterance boundaries, or share speaker-slot identity across streams/replicas.
 
-`NEMOTRON_ENDPOINTING_SILENCE_MS` controls the ASR decoder-silence timeout
+`NEMOTRON_ENDPOINTING_SILENCE_MS` controls the native VAD silence timeout
 (default `2000`, integer `1`–`30000`, read at startup). Increasing it delays
 speaker-labelled finals without changing Sortformer's speaker-detection
 settings. Partials continue during the longer utterance. Consecutive words
 with the same speaker are grouped without checking silence gaps, so a pause
 that no longer triggers an endpoint can fall inside one displayed segment.
-The service loads no separate VAD model; the 30-second forced ASR endpoint
-remains in place.
+The service loads the baked Silero v6.2.0 GGUF with audio masking disabled;
+the 30-second forced ASR endpoint remains in place. See
+[native VAD](nemotron-vad.md) for pins and streaming tests. The VAD profiles are
+`sortformer-q8-r3` and `sortformer-enrolled-q8-r3` (with the usual Nemotron prefix).
 
 Word ends are clipped at the next speaker's onset so late RNNT punctuation
 cannot include the next turn in enrollment audio.

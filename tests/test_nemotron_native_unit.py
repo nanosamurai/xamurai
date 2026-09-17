@@ -30,6 +30,10 @@ def test_backend_passes_endpoint_silence_to_native_config(monkeypatch, configure
             enabled=bool(endpointing.enable),
             vad_based=bool(endpointing.vad_based),
             vad=bool(config.vad),
+            vad_path=config.vad.contents.model_path,
+            masking=bool(config.vad.contents.enable_masking),
+            onset=config.vad.contents.onset,
+            offset=config.vad.contents.offset,
             diarization=bool(config.diar),
         )
         ctypes.cast(handle, ctypes.POINTER(ctypes.c_void_p)).contents.value = 7
@@ -43,8 +47,12 @@ def test_backend_passes_endpoint_silence_to_native_config(monkeypatch, configure
         assert captured == {
             "silence_ms": expected,
             "enabled": True,
-            "vad_based": False,
-            "vad": False,
+            "vad_based": True,
+            "vad": True,
+            "vad_path": b"/opt/nemo-speech/models/silero-v6.2.0.gguf",
+            "masking": False,
+            "onset": pytest.approx(0.5),
+            "offset": pytest.approx(0.3),
             "diarization": diarization,
         }
     finally:

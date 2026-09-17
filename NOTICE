@@ -23,3 +23,9 @@ https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 Provided by NVIDIA under Creative Commons Attribution 4.0 International.
 The embedded Sortformer model is attributed above.
 Model revisions and content digests: docs/parakeet-finalizer.md
+
+The native runtime image includes Silero VAD v6.2.0 weights converted to GGUF.
+https://github.com/snakers4/silero-vad
+Copyright (c) 2020-present Silero Team. Provided under the MIT License.
+The complete license ships at /opt/nemo-speech/models/LICENSE in the image.
+Conversion provenance and content digest: docs/nemotron-vad.md

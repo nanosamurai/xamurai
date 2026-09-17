@@ -60,6 +60,16 @@ class EndpointingConfig(ctypes.Structure):
     ]
 
 
+class VadConfig(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_size_t),
+        ("model_path", ctypes.c_char_p),
+        ("enable_masking", ctypes.c_bool),
+        ("onset", ctypes.c_float),
+        ("offset", ctypes.c_float),
+    ]
+
+
 class DiarizationConfig(ctypes.Structure):
     _fields_ = [
         ("size", ctypes.c_size_t),
@@ -80,7 +90,7 @@ class RecognizerConfig(ctypes.Structure):
         ("model", ctypes.POINTER(ModelConfig)),
         ("streaming", ctypes.POINTER(StreamingConfig)),
         ("decoder", ctypes.c_void_p),
-        ("vad", ctypes.c_void_p),
+        ("vad", ctypes.POINTER(VadConfig)),
         ("endpointing", ctypes.POINTER(EndpointingConfig)),
         ("postproc", ctypes.c_void_p),
         ("diar", ctypes.POINTER(DiarizationConfig)),

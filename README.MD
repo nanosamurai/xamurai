@@ -290,7 +290,7 @@ ignored. See [the settings contract](docs/stream-output-selection.md#grpc-metada
 - `NEMOTRON_GPU` (default `0`)
 - `NEMOTRON_RNNT_RIGHT_CONTEXT` (default `1`, about 160 ms)
 - `NEMOTRON_ENDPOINTING_SILENCE_MS` (default `2000`; integer `1`–`30000`):
-  decoder-silence timeout, read at startup; invalid values fail startup.
+  native VAD silence timeout, read at startup; invalid values fail startup.
 - `NEMOTRON_DIARIZATION` (default `false`); enable Sortformer finals, optionally
   with `ENROLL_BACKEND=s3_manifest` for enrolled names. See the
   [Sortformer and enrollment guide](docs/nemotron-sortformer.md) for the
@@ -298,9 +298,11 @@ ignored. See [the settings contract](docs/stream-output-selection.md#grpc-metada
 - `RT_SERVING_MAX_SESSIONS` (default `1`; values above one enable native
   cross-session microbatching with the same number of independent cache slots)
 
-Nemotron uses NeMo-Speech.cpp's native token-silence endpointing (2000 ms by
-default) so each utterance is committed independently. Set
-`NEMOTRON_ENDPOINTING_SILENCE_MS=800` to restore the previous timeout, or
+Nemotron uses NeMo-Speech.cpp's native Silero VAD endpointing (2000 ms by
+default) so each utterance is committed independently. The pinned Silero v6.2.0
+GGUF is baked into the image; audio masking is disabled, so all audio still
+reaches the streaming recognizer. Set
+`NEMOTRON_ENDPOINTING_SILENCE_MS=800` for a shorter pause, or
 `NEMOTRON_ENDPOINTING_SILENCE_MS=3000` to allow longer pauses, then recreate the
 service containers to change the deployment default. A session can override it
 through `x-rt-settings: {"endpointing_silence_ms":800}` without a restart.
@@ -310,6 +312,10 @@ hard backstop for uninterrupted speech; this bounds replaceable partial text
 without limiting the total stream duration. The adapter enables the native
 automatic-punctuation request gate so Nemotron 3.5's own punctuation and
 capitalization are retained; no separate PnC model is loaded.
+
+VAD avoids treating missing decoder tokens as silence; it does not add overlap
+or change native endpoint resets. The 30-second backstop can still split words.
+See [native VAD validation](docs/nemotron-vad.md) for artifact pins and tests.
 
 Worker settings include:
 

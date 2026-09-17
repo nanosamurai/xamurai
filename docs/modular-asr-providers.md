@@ -130,7 +130,7 @@ sharing stream cache rows.
 | --- | --- | --- | --- |
 | `faster-whisper` | `faster-whisper-medium-ctranslate2-r2` | `Systran/faster-whisper-medium`; Faster-Whisper 1.2 / CTranslate2 4.6; `pyannote/speaker-diarization-3.1`; contextual windowed realtime with optional Silero VAD and enrollment mapping | Text-only greedy drafts; internal absolute FINAL word timestamps with deterministic seam ownership; public coalesced speaker segments |
 | `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `Qwen/Qwen3-ASR-0.6B`; `Qwen/Qwen3-ForcedAligner-0.6B`; `pyannote/speaker-diarization-3.1`; `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session by default | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
-| `nemotron` | `nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r1` | `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF; `nemo-speech-cpp==0.1.0`; cache-aware RNNT streaming; one concurrent session per replica by default | Native partials and finals with processed-audio duration; no segment, word, or speaker-label claim |
+| `nemotron` | `nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r2` | `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF; `nemo-speech-cpp==0.1.0`; cache-aware RNNT streaming; native Silero VAD; one concurrent session per replica by default | Native partials and finals with processed-audio duration; no segment, word, or speaker-label claim |
 
 The Nemotron profile pins the model repository at revision
 `1c8deaecc64b91f034d73e08dd8b64625eb3395d` and accepts only
@@ -167,12 +167,13 @@ drains all currently available updates; EOF calls `finish`, drains the tail,
 and closes the opaque stream. Cancellation and every error path close the
 stream and release the admission slot exactly once.
 
-Native token-silence endpointing commits ordinary utterances after 2000 ms of
-decoder silence by default. Operators can set `NEMOTRON_ENDPOINTING_SILENCE_MS`
+Native Silero VAD endpointing commits ordinary utterances after 2000 ms of
+detected silence by default. Operators can set `NEMOTRON_ENDPOINTING_SILENCE_MS`
 to an integer from `1` through `30000` at process startup; malformed and
 out-of-range values fail startup before the native runtime or models load.
-The setting is not client-selectable. Use `800` to restore the previous timeout
-or `3000` to allow longer pauses, then recreate the service containers.
+Use `800` for shorter pauses or `3000` for longer pauses, then recreate the
+service containers. A session can override the default via the existing
+`endpointing_silence_ms` setting in `x-rt-settings` metadata.
 The adapter also requests a native endpoint after 30 seconds
 of uninterrupted speech. Each resulting final advances the public replacement
 window, so partial payloads remain bounded while one gRPC stream can continue
@@ -181,8 +182,10 @@ punctuation, which preserves Nemotron 3.5's built-in casing and punctuation
 without adding a postprocessing model or another inference pass.
 
 Longer silence timeouts delay committed finals and speaker labels while native
-partials continue. Endpointing uses decoder silence (`vad_based=false`); this
-profile loads no separate VAD model. Sortformer retains its state across ASR
+partials continue. Endpointing uses native Silero v6.2.0 (`vad_based=true`),
+with masking disabled so all audio reaches ASR. The GGUF is converted and
+checksum-verified during the image build; no Python VAD runs in the service.
+See [native VAD](nemotron-vad.md) for pins and validation. Sortformer retains its state across ASR
 endpoints, and its speaker-detection settings are independent of this timeout.
 Public finals group consecutive words from the same speaker without a
 silence-gap split, so longer pauses within one utterance can remain inside one
