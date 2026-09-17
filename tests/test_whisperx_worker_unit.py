@@ -8,7 +8,7 @@ import pytest
 # Unit tests can run without whisperx installed.
 # We will stub the lazy import mechanism.
 
-from whisperx_worker import whisperx_worker
+from whisperx_worker import pipeline as whisperx_worker, refinement
 
 
 class _DummyProducer:
@@ -314,8 +314,8 @@ def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch
     monkeypatch.setattr(whisperx_worker.os, "unlink", lambda *_a, **_kw: None, raising=False)
 
     # Avoid trace context complications.
-    monkeypatch.setattr(whisperx_worker, "extracted_context_from_headers", lambda _h: __import__("contextlib").nullcontext())
-    monkeypatch.setattr(whisperx_worker, "with_current_trace_context", lambda: [])
+    monkeypatch.setattr(refinement, "extracted_context_from_headers", lambda _h: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(refinement, "with_current_trace_context", lambda: [])
 
     producer = _DummyProducer()
 
@@ -335,13 +335,13 @@ def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch
     if not publish_ok:
         monkeypatch.setattr(producer, "flush", lambda _timeout: 1)
         with pytest.raises(RuntimeError, match="not acknowledged"):
-            whisperx_worker._run_inference_and_publish(job=job, producer=producer)
+            refinement._run_inference_and_publish(job=job, producer=producer)
         return
-    whisperx_worker._run_inference_and_publish(job=job, producer=producer)
+    refinement._run_inference_and_publish(job=job, producer=producer)
 
     assert len(producer.produced) == 1
     msg = producer.produced[0]
-    ev = whisperx_worker.stream_pb2.RefinedEvent()
+    ev = refinement.stream_pb2.RefinedEvent()
     ev.ParseFromString(msg["value"])
 
     assert ev.session_id == "s1"

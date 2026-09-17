@@ -10,11 +10,11 @@ loaded between recordings and native recognition creates fresh speaker state.
 Build from Xamurai:
 
 ```sh
-docker build --target parakeet-finalizer -t xamurai-parakeet-finalizer:local -f nemotron_rtservice/Dockerfile .
+docker buildx bake --load parakeet-finalizer
 ```
 
-The named Docker target shares the native build; the default target remains the
-Nemotron realtime service. Run `python -m finalizer_worker.parakeet` to consume
+The image uses `parakeet_worker/Dockerfile.finalizer` and the shared native base.
+Run `python -m parakeet_worker.finalizer` to consume
 `recordings.finished`. The image defaults `FINALIZER_TRACK_ID=parakeet`, with
 consumer group `finalizer.parakeet`; replicas of that track share the group.
 `PARAKEET_GPU=0` selects the GPU (`-1` permits CPU). Existing Kafka, recording
@@ -45,8 +45,8 @@ content hashes. The worker runs as UID 10003, publishes no host ports and disabl
 HF telemetry. It publishes before committing input; inference/download failures
 leave work for replay. Temporary recording downloads are removed after each job.
 
-Native full-recording inference consumes memory proportional to recording length;
-qualification on short recordings does not establish unlimited recording capacity.
+The whole waveform is loaded into memory; inference also needs model workspace.
+Qualification on short recordings does not establish unlimited recording capacity.
 Deployment memory and concurrency budgets must include both models and audio.
 
 ## Validation
@@ -57,13 +57,3 @@ stereo input inside the native image. The Community Edition repository owns the
 real Compose smoke, including recorder, both final tracks, Kafka, Postgres and
 HTTP playback. See `nanosamurai/docs/parakeet-finalizer.md` for invocation and
 the deployment repository's spike evidence. No synthetic inference is used there.
-
-Validated on 2026-09-16 with an RTX 5090 Laptop GPU (24 GiB): both native
-integration tests passed, as did all 115 tests in the lightweight CI selection.
-The real Compose smoke passed with rebuilt `xamurai-parakeet-finalizer:local`
-and `xamurai-finalizer-worker:parakeet-spike` images. It used the full 20-second
-published Czech fixture and one second of silence. Existing Tier 1 connectivity
-and Tier 2 Nemotron FINAL smokes also passed with both finalizers loaded.
-The running Parakeet worker had zero restarts and no temporary WAV downloads
-remaining. This validates pipeline integration, not diarization accuracy on
-multi-speaker meetings or long-recording memory capacity.

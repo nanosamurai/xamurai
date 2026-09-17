@@ -77,8 +77,9 @@ def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
 
     # Import AFTER env is set so module-level constants pick them up
     import importlib
-    from whisperx_worker import whisperx_worker  # adjust if package name differs
+    from whisperx_worker import refinement as whisperx_worker  # adjust if package name differs
 
+    importlib.reload(whisperx_worker.pipeline)
     importlib.reload(whisperx_worker)
 
     # Sanity: log which topics the worker thinks it uses
@@ -259,8 +260,9 @@ def test_whisperx_worker_diarization_and_enrollment_on_test_wav(kafka_bootstrap,
 
     # make sure worker re-reads env
     import importlib
-    from whisperx_worker import whisperx_worker
+    from whisperx_worker import refinement as whisperx_worker
 
+    importlib.reload(whisperx_worker.pipeline)
     importlib.reload(whisperx_worker)
 
     worker_thread = threading.Thread(
@@ -425,8 +427,9 @@ def test_whisperx_worker_diarization_and_s3_enrollment_on_test_wav(
 
     # make sure worker re-reads env
     import importlib
-    from whisperx_worker import whisperx_worker
+    from whisperx_worker import refinement as whisperx_worker
 
+    importlib.reload(whisperx_worker.pipeline)
     importlib.reload(whisperx_worker)
 
     worker_thread = threading.Thread(

@@ -18,7 +18,7 @@ for rel in [
     "rtservice/src",
     "recorder_worker/src",
     "whisperx_worker/src",
-    "finalizer_worker/src",
+    "parakeet_worker/src",
     "shared/src",
     "qwen_rtservice/src",
     "nemotron_rtservice/src",

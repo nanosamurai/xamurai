@@ -8,7 +8,7 @@ native recognizer, process-local admission and Compose DNS routing.
 
 ## Enable locally
 
-Build `nemotron_rtservice/Dockerfile` from `codex/add-optional-sortformer`.
+Run `docker buildx bake --load nemotron-rtservice` from Xamurai.
 The native build uses two compiler jobs to fit local Docker Desktop memory.
 The same image supports three startup configurations:
 

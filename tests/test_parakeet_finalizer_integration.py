@@ -13,7 +13,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def pipeline():
-    from finalizer_worker.parakeet import Parakeet
+    from parakeet_worker.pipeline import Parakeet
 
     model = Parakeet()
     yield model

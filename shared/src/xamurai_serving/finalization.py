@@ -1,10 +1,9 @@
-# finalizer_worker.py
+"""Model-independent recording download, final publication and replay handling."""
 import logging
 import os
 import re
 import tempfile
 import time
-from functools import partial
 from threading import Event
 from typing import Optional
 
@@ -46,7 +45,6 @@ TRACK_ID = os.getenv("FINALIZER_TRACK_ID", "whisperx").strip()
 if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", TRACK_ID):
     raise ValueError("FINALIZER_TRACK_ID must be a stable lowercase track ID")
 GROUP_ID = os.getenv("KAFKA_GROUP_ID_FINALIZER", f"finalizer.{TRACK_ID}")
-MODEL = os.getenv("WHISPERX_MODEL", "medium").strip() or "medium"
 
 # Recording storage backend
 RECORDING_STORAGE_BACKEND = os.getenv("RECORDING_STORAGE_BACKEND", "local").strip().lower()
@@ -333,7 +331,7 @@ def _produce_with_ack(
 # Main loop
 # --------------------------------------------------------------------------- #
 
-def main(transcribe=None, model=MODEL):
+def main(transcribe, *, model):
     """Consume selected recordings using a pipeline returning text and segment dictionaries."""
     setup_logging(default_level="INFO")
     # Initialize OTEL SDK (no-op if deps missing)
@@ -341,9 +339,6 @@ def main(transcribe=None, model=MODEL):
 
     logger.info("Starting finalizer_worker")
 
-    if transcribe is None:
-        from whisperx_worker.whisperx_worker import run_whisperx_diarized_words
-        transcribe = partial(run_whisperx_diarized_words, use_alignment=True)
     logger.info("Final pipeline ready: track=%s model=%s", TRACK_ID, model)
 
     consumer = make_consumer()
@@ -500,7 +495,3 @@ def main(transcribe=None, model=MODEL):
             producer.flush(2.0)
         except Exception:
             pass
-
-
-if __name__ == "__main__":
-    main()

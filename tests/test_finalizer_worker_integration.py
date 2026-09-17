@@ -91,7 +91,8 @@ def test_finalizer_worker_emits_event_without_sidecar(
 
     # -------------------- 3) Import real finalizer_worker -------------------- #
     import importlib
-    from finalizer_worker import finalizer_worker  # type: ignore
+    from xamurai_serving import finalization as finalizer_worker
+    from whisperx_worker import finalizer  # type: ignore
 
     importlib.reload(finalizer_worker)
 
@@ -103,7 +104,7 @@ def test_finalizer_worker_emits_event_without_sidecar(
 
     # -------------------- 4) Start the worker in background ------------------ #
     worker_thread = threading.Thread(
-        target=finalizer_worker.main,
+        target=finalizer.main,
         name="finalizer-worker-main",
         daemon=True,
     )
@@ -261,12 +262,13 @@ def test_finalizer_worker_s3_enrollment_speaker_labels(
 
     # Start worker
     import importlib
-    from finalizer_worker import finalizer_worker  # type: ignore
+    from xamurai_serving import finalization as finalizer_worker
+    from whisperx_worker import finalizer  # type: ignore
 
     importlib.reload(finalizer_worker)
 
     worker_thread = threading.Thread(
-        target=finalizer_worker.main,
+        target=finalizer.main,
         name="finalizer-worker-main-s3enroll",
         daemon=True,
     )

@@ -61,33 +61,18 @@ jobs:
       matrix:
         include:
           - image: rtservice
-            dockerfile: rtservice/Dockerfile
-            context: .
             ghcr_repo: xamurai-rtservice
           - image: whisperx-worker
-            dockerfile: whisperx_worker/Dockerfile
-            context: .
             ghcr_repo: xamurai-whisperx-worker
           - image: recorder-worker
-            dockerfile: recorder_worker/Dockerfile
-            context: .
             ghcr_repo: xamurai-recorder-worker
           - image: finalizer-worker
-            dockerfile: finalizer_worker/Dockerfile
-            context: .
             ghcr_repo: xamurai-finalizer-worker
           - image: qwen-rtservice
-            dockerfile: qwen_rtservice/Dockerfile
-            context: .
             ghcr_repo: xamurai-qwen-rtservice
           - image: nemotron-rtservice
-            dockerfile: nemotron_rtservice/Dockerfile
-            context: .
             ghcr_repo: xamurai-nemotron-rtservice
           - image: parakeet-finalizer
-            dockerfile: nemotron_rtservice/Dockerfile
-            target: parakeet-finalizer
-            context: .
             ghcr_repo: xamurai-parakeet-finalizer
 
     steps:
@@ -115,15 +100,12 @@ jobs:
 
       - name: Build and push image
         id: build
-        uses: docker/build-push-action@v7
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          target: ${{ matrix.target }}
-          provenance: mode=max
-          push: true
-          sbom: true
-          tags: ${{ steps.tags.outputs.image_uri }}
+        run: |
+          docker buildx bake "${{ matrix.image }}" --push --provenance=mode=max --sbom=true \
+            --set '${{ matrix.image }}.tags=${{ steps.tags.outputs.image_uri }}' \
+            --metadata-file build-metadata.json
+          digest=$(jq -er '.["${{ matrix.image }}"]["containerimage.digest"]' build-metadata.json)
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Export and validate SPDX SBOM
         env:

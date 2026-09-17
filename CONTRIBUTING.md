@@ -17,9 +17,9 @@ This repo builds multiple images (rtservice + workers). To validate locally:
 
 ```bash
 docker build -f rtservice/Dockerfile -t xamurai-rtservice:local .
-docker build -f whisperx_worker/Dockerfile -t xamurai-whisperx-worker:local .
+docker buildx bake --load whisperx-worker
 docker build -f recorder_worker/Dockerfile -t xamurai-recorder-worker:local .
-docker build -f finalizer_worker/Dockerfile -t xamurai-finalizer-worker:local .
+docker buildx bake --load finalizer-worker
 ```
 
 ## Security

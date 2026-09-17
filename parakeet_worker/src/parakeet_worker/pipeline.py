@@ -1,6 +1,5 @@
 """Offline Parakeet TDT with embedded Sortformer, using the pinned native C ABI."""
 import ctypes
-import logging
 
 import numpy as np
 import soundfile as sf
@@ -101,13 +100,3 @@ class Parakeet:
         if self.handle.value:
             self.library.nemo_speech_asr_destroy(self.handle)
             self.handle = ctypes.c_void_p()
-
-
-if __name__ == "__main__":
-    from finalizer_worker.finalizer_worker import main
-
-    pipeline = Parakeet()
-    try:
-        main(pipeline, model=MODEL_ID)
-    finally:
-        pipeline.close()
