@@ -14,7 +14,7 @@ MODEL_FILENAME = "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
 MODEL_REVISION = "1c8deaecc64b91f034d73e08dd8b64625eb3395d"
 MODEL_DIGEST = "sha256:a5c435f294eea8f88ce68dd27b8c3bfea7f777cb2fbba04fcd30eaa555f429ae"
 DEFAULT_ENDPOINTING_SILENCE_MS = 2000
-MAX_UTTERANCE_SECONDS = 30.0
+DEFAULT_MAX_UTTERANCE_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -52,8 +52,6 @@ class NativeSession:
         self._closed = False
         self._request_id = request_id.encode("utf-8")
         self._language = language.encode("ascii") if language else None
-        self._input_audio_s = 0.0
-        self._last_final_audio_s = 0.0
         self._diarization = diarization
         options = library.nemo_speech_asr_recognition_options_default()
         options.request_id = self._request_id
@@ -84,15 +82,7 @@ class NativeSession:
             ),
             "push audio",
         )
-        self._input_audio_s += samples.size / sample_rate
-        updates = self._drain()
-        if self._input_audio_s - self._last_final_audio_s >= MAX_UTTERANCE_SECONDS:
-            nemo.check(
-                self._library.nemo_speech_asr_stream_force_endpoint(self._handle),
-                "force endpoint",
-            )
-            updates += self._drain()
-        return updates
+        return self._drain()
 
     def finish(self) -> tuple[TranscriptUpdate, ...]:
         nemo.check(self._library.nemo_speech_asr_stream_finish(self._handle), "finish stream")
@@ -144,10 +134,6 @@ class NativeSession:
                     words=words,
                 )
                 updates.append(update)
-                if update.final:
-                    self._last_final_audio_s = max(
-                        self._last_final_audio_s, update.audio_processed_s
-                    )
             finally:
                 self._library.nemo_speech_asr_result_destroy(result)
         return tuple(updates)
@@ -167,7 +153,16 @@ class NativeNemotronBackend:
         self.diarization = diarization_from_env()
         self.endpointing_silence_ms = nemo.bounded_int(
             "NEMOTRON_ENDPOINTING_SILENCE_MS", DEFAULT_ENDPOINTING_SILENCE_MS,
-            1, int(MAX_UTTERANCE_SECONDS * 1000),
+            1, 30000,
+        )
+        self.max_utterance_seconds = nemo.bounded_int(
+            "NEMOTRON_MAX_UTTERANCE_SECONDS", DEFAULT_MAX_UTTERANCE_SECONDS, 2, 3600,
+        )
+        soft_after_seconds = nemo.bounded_int(
+            "NEMOTRON_ENDPOINTING_SOFT_AFTER_SECONDS", 90, 1, self.max_utterance_seconds - 1,
+        )
+        soft_silence_ms = nemo.bounded_int(
+            "NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS", 700, 1, 30000,
         )
         self._library = nemo.load_library()
 
@@ -202,6 +197,9 @@ class NativeNemotronBackend:
             enable=True,
             vad_based=True,
             stop_history_eou_ms=self.endpointing_silence_ms,
+            soft_after_ms=soft_after_seconds * 1000,
+            soft_silence_ms=soft_silence_ms,
+            max_utterance_ms=self.max_utterance_seconds * 1000,
         )
         vad = nemo.VadConfig(
             size=ctypes.sizeof(nemo.VadConfig),

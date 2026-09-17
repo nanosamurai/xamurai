@@ -35,6 +35,9 @@ def test_backend_passes_endpoint_silence_to_native_config(monkeypatch, configure
         endpointing = config.endpointing.contents
         captured.update(
             silence_ms=endpointing.stop_history_eou_ms,
+            soft_after_ms=endpointing.soft_after_ms,
+            soft_silence_ms=endpointing.soft_silence_ms,
+            max_utterance_ms=endpointing.max_utterance_ms,
             enabled=bool(endpointing.enable),
             vad_based=bool(endpointing.vad_based),
             vad=bool(config.vad),
@@ -54,6 +57,9 @@ def test_backend_passes_endpoint_silence_to_native_config(monkeypatch, configure
     try:
         assert captured == {
             "silence_ms": expected,
+            "soft_after_ms": 90000,
+            "soft_silence_ms": 700,
+            "max_utterance_ms": 120000,
             "enabled": True,
             "vad_based": True,
             "vad": True,
@@ -78,6 +84,23 @@ def test_invalid_endpoint_silence_fails_before_loading_native_runtime(monkeypatc
         native.NativeNemotronBackend(maximum_sessions=1)
 
     load_library.assert_not_called()
+
+
+@pytest.mark.parametrize("name,value", [
+    ("NEMOTRON_MAX_UTTERANCE_SECONDS", "1"),
+    ("NEMOTRON_MAX_UTTERANCE_SECONDS", "3601"),
+    ("NEMOTRON_ENDPOINTING_SOFT_AFTER_SECONDS", "120"),
+    ("NEMOTRON_ENDPOINTING_SOFT_AFTER_SECONDS", "0"),
+    ("NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS", "0"),
+    ("NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS", "700.5"),
+])
+def test_invalid_duration_policy_fails_before_loading_models(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    load = Mock()
+    monkeypatch.setattr(native.nemo, "load_library", load)
+    with pytest.raises(ValueError, match=name):
+        native.NativeNemotronBackend(1)
+    load.assert_not_called()
 
 
 class _FakeLibrary:

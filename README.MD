@@ -307,14 +307,17 @@ reaches the streaming recognizer. Set
 service containers to change the deployment default. A session can override it
 through `x-rt-settings: {"endpointing_silence_ms":800}` without a restart.
 Longer timeouts delay committed finals and speaker labels;
-streaming partials continue. A 30-second forced endpoint is the
-hard backstop for uninterrupted speech; this bounds replaceable partial text
+streaming partials continue. After 90 seconds of an utterance, native VAD accepts
+a 700 ms pause; 120 seconds is the emergency endpoint. Configure these at startup
+with `NEMOTRON_ENDPOINTING_SOFT_AFTER_SECONDS`,
+`NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS` and `NEMOTRON_MAX_UTTERANCE_SECONDS`.
+An already shorter session silence setting stays shorter. This bounds replaceable partial text
 without limiting the total stream duration. The adapter enables the native
 automatic-punctuation request gate so Nemotron 3.5's own punctuation and
 capitalization are retained; no separate PnC model is loaded.
 
 VAD avoids treating missing decoder tokens as silence; it does not add overlap
-or change native endpoint resets. The 30-second backstop can still split words.
+or change native endpoint resets. The emergency endpoint can still split words.
 See [native VAD validation](docs/nemotron-vad.md) for artifact pins and tests.
 
 Worker settings include:
