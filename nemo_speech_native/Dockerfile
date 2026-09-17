@@ -61,6 +61,23 @@ RUN cmake -G Ninja -S /work -B /work/build \
     && cmake --build /work/build --parallel 2 \
     && cmake --install /work/build --prefix /opt/nemo-speech
 
+# Convert the pinned, full-precision Silero checkpoint with the same upstream
+# source as the runtime. Only the GGUF and its license enter the runtime image.
+FROM native-builder AS vad-converter
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install --yes --no-install-recommends python3-venv \
+    && python3 -m venv /opt/vad-build \
+    && /opt/vad-build/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+      "torch==2.8.0+cpu" "torchaudio==2.8.0+cpu" \
+    && /opt/vad-build/bin/pip install --no-cache-dir \
+      "silero-vad==6.2.0" "gguf==0.19.0" "numpy==2.2.3" "PyYAML==6.0.2" \
+    && mkdir -p /opt/vad-model \
+    && /opt/vad-build/bin/python convert_model.py silero --outfile /opt/vad-model/silero-v6.2.0.gguf \
+    && cp /opt/vad-build/lib/python3.12/site-packages/silero_vad-6.2.0.dist-info/licenses/LICENSE /opt/vad-model/LICENSE
+
+RUN echo "83d702b11378ced4b1bbfcb53394bd00994f7382ff0b9a11b87605dd0898369d  /opt/vad-model/silero-v6.2.0.gguf" | sha256sum --check --strict
+
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867 AS native-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -105,6 +122,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 ENV PATH=/opt/venv/bin:${PATH}
 
 COPY --from=native-builder /opt/nemo-speech /opt/nemo-speech
+COPY --from=vad-converter /opt/vad-model /opt/nemo-speech/models
 COPY proto_gen /app/proto_gen
 COPY shared/src /app/shared/src
 COPY nemo_speech_native/src /app/nemo_speech_native/src

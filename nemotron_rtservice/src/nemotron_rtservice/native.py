@@ -200,8 +200,15 @@ class NativeNemotronBackend:
         endpointing = nemo.EndpointingConfig(
             size=ctypes.sizeof(nemo.EndpointingConfig),
             enable=True,
-            vad_based=False,
+            vad_based=True,
             stop_history_eou_ms=self.endpointing_silence_ms,
+        )
+        vad = nemo.VadConfig(
+            size=ctypes.sizeof(nemo.VadConfig),
+            model_path=b"/opt/nemo-speech/models/silero-v6.2.0.gguf",
+            enable_masking=False,
+            onset=0.5,
+            offset=0.3,
         )
         diar = None
         if self.diarization:
@@ -222,7 +229,7 @@ class NativeNemotronBackend:
             model=ctypes.pointer(model),
             streaming=ctypes.pointer(streaming),
             decoder=None,
-            vad=None,
+            vad=ctypes.pointer(vad),
             endpointing=ctypes.pointer(endpointing),
             postproc=None,
             diar=ctypes.pointer(diar) if diar is not None else None,

@@ -25,9 +25,9 @@ from nemo_speech_native import NEMO_SPEECH_REVISION, SORTFORMER_MODEL_REVISION
 
 logger = logging.getLogger(__name__)
 
-PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r1"
-DIARIZED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-q8-r2"
-ENROLLED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-enrolled-q8-r2"
+PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r2"
+DIARIZED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-q8-r3"
+ENROLLED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-enrolled-q8-r3"
 SAMPLE_RATE = 16_000
 MAX_CHUNK_BYTES = 1_048_576
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -103,7 +103,7 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             runtime=self._backend.runtime,
             model_revision=MODEL_REVISION,
             model_digest=MODEL_DIGEST,
-            implementation_revision=(f"nemo-speech-cpp:{NEMO_SPEECH_REVISION}"
+            implementation_revision=(f"nemo-speech-cpp:{NEMO_SPEECH_REVISION};silero:6.2.0"
                                      + (f";sortformer:{SORTFORMER_MODEL_REVISION}" if self._diarization else "")
                                      + (f";wespeaker:{EMBEDDING_MODEL_REVISION}" if self._enrollment is not None else "")),
             speaker_labels=self._diarization,
