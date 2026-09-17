@@ -308,7 +308,7 @@ service containers to change the deployment default. A session can override it
 through `x-rt-settings: {"endpointing_silence_ms":800}` without a restart.
 Longer timeouts delay committed finals and speaker labels;
 streaming partials continue. After 90 seconds of an utterance, native VAD accepts
-a 700 ms pause; 120 seconds is the emergency endpoint. Configure these at startup
+a 500 ms pause; 120 seconds is the emergency endpoint. Configure these at startup
 with `NEMOTRON_ENDPOINTING_SOFT_AFTER_SECONDS`,
 `NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS` and `NEMOTRON_MAX_UTTERANCE_SECONDS`.
 An already shorter session silence setting stays shorter. This bounds replaceable partial text

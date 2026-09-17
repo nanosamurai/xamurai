@@ -175,7 +175,7 @@ out-of-range values fail startup before the native runtime or models load.
 Use `800` for shorter pauses or `3000` for longer pauses, then recreate the
 service containers. A session can override the default via the existing
 `endpointing_silence_ms` setting in `x-rt-settings` metadata.
-After 90 seconds of an utterance, native endpointing accepts a 700 ms pause
+After 90 seconds of an utterance, native endpointing accepts a 500 ms pause
 (or the session timeout if shorter). At 120 seconds it forces an emergency
 endpoint. These instance defaults are configurable; see [native VAD](nemotron-vad.md).
 Each resulting final advances the public replacement

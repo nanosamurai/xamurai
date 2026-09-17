@@ -24,7 +24,7 @@ The duration policy runs in the native endpointer on the decoded audio clock:
 | Startup environment variable | Default | Valid integers |
 | --- | --- | --- |
 | `NEMOTRON_ENDPOINTING_SOFT_AFTER_SECONDS` | `90` | `1` through maximum minus one |
-| `NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS` | `700` | `1`–`30000` |
+| `NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS` | `500` | `1`–`30000` |
 | `NEMOTRON_MAX_UTTERANCE_SECONDS` | `120` | `2`–`3600` |
 
 Before the soft age, honor the normal session silence timeout. At or after it,
@@ -108,8 +108,9 @@ The fallback has not been weakened to guess word ownership. Endpoint boundary
 quality and this native metadata mismatch need separate investigation; these
 smokes establish integration, not the elimination of truncated words.
 
-The duration-policy follow-up passed six native GPU cases and 68 focused
-Nemotron regression tests on the same GPU. Rebuilt local Compose validation
+The initial duration-policy follow-up, using 700 ms soft silence, passed six
+native GPU cases and 68 focused Nemotron regression tests on the same GPU.
+Rebuilt local Compose validation
 passed Tier 1, finals from both realtime tracks at EOF, and the 20-second
 speaker-labelled silence smoke. A 99-second BFF
 stream, built from repeated synthetic speech with one-second pauses and a
@@ -117,3 +118,6 @@ stream, built from repeated synthetic speech with one-second pauses and a
 audio position 92.18 seconds before EOF. Continuous speech in the native test
 hit the emergency boundary at 120.66 seconds. These timings describe this fixture,
 not a guarantee of lossless words at the emergency boundary.
+
+The 500 ms default passed the two native duration-policy cases (90/120 and
+12/20 seconds, including reset) and all 68 focused regression tests.

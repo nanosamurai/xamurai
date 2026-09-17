@@ -162,7 +162,7 @@ class NativeNemotronBackend:
             "NEMOTRON_ENDPOINTING_SOFT_AFTER_SECONDS", 90, 1, self.max_utterance_seconds - 1,
         )
         soft_silence_ms = nemo.bounded_int(
-            "NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS", 700, 1, 30000,
+            "NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS", 500, 1, 30000,
         )
         self._library = nemo.load_library()
 

@@ -58,7 +58,7 @@ def test_backend_passes_endpoint_silence_to_native_config(monkeypatch, configure
         assert captured == {
             "silence_ms": expected,
             "soft_after_ms": 90000,
-            "soft_silence_ms": 700,
+            "soft_silence_ms": 500,
             "max_utterance_ms": 120000,
             "enabled": True,
             "vad_based": True,

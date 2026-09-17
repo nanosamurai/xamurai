@@ -25,7 +25,7 @@ def speech():
 
 
 @pytest.mark.parametrize("diarization,soft_after,soft_silence", [
-    (False, 90, 700), (True, 90, 700), (False, 1, 30000),
+    (False, 90, 500), (True, 90, 500), (False, 1, 30000),
 ])
 def test_native_vad_endpoints_before_eof_and_rearms(monkeypatch, diarization, soft_after, soft_silence, speech):
     monkeypatch.setenv("NEMOTRON_DIARIZATION", str(diarization).lower())
@@ -73,7 +73,7 @@ def test_duration_policy_keeps_short_pauses_then_relaxes_and_rearms(monkeypatch,
     monkeypatch.setenv("NEMOTRON_DIARIZATION", "true")
     monkeypatch.setenv("NEMOTRON_ENDPOINTING_SOFT_AFTER_SECONDS", str(soft_after))
     monkeypatch.setenv("NEMOTRON_MAX_UTTERANCE_SECONDS", str(maximum))
-    monkeypatch.setenv("NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS", "700")
+    monkeypatch.delenv("NEMOTRON_ENDPOINTING_SOFT_SILENCE_MS", raising=False)
     backend = NativeNemotronBackend(1)
     try:
         session = backend.open("duration-pause", "cs-CZ", endpointing_silence_ms=3000)
