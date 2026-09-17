@@ -8,6 +8,14 @@ from nemotron_rtservice.native import NativeSession, SpeakerWord
 from nemo_speech_native import RecognitionOptions
 
 
+def test_unpatched_native_runtime_is_rejected(monkeypatch):
+    library = Mock()
+    library.nemo_speech_asr_version.return_value = b"nemo-speech-asr 0.1.0"
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    with pytest.raises(RuntimeError, match="runtime version"):
+        native.nemo.load_library()
+
+
 @pytest.mark.parametrize("diarization", [False, True])
 @pytest.mark.parametrize("configured, expected", [
     (None, 2000), ("800", 800), ("3000", 3000), ("1", 1), ("30000", 30000),
@@ -19,7 +27,7 @@ def test_backend_passes_endpoint_silence_to_native_config(monkeypatch, configure
         monkeypatch.setenv("NEMOTRON_ENDPOINTING_SILENCE_MS", configured)
     monkeypatch.setenv("NEMOTRON_DIARIZATION", str(diarization).lower())
     library = Mock()
-    library.nemo_speech_asr_version.return_value = b"nemo-speech-asr 0.1.0"
+    library.nemo_speech_asr_version.return_value = f"nemo-speech-asr {native.nemo.NEMO_SPEECH_VERSION}".encode()
     captured = {}
 
     def create(config, handle):
