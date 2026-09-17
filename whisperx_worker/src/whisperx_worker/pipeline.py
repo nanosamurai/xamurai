@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, TypedDict
 
 import numpy as np

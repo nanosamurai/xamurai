@@ -1,5 +1,6 @@
 """Offline Parakeet TDT with embedded Sortformer, using the pinned native C ABI."""
 import ctypes
+import logging
 
 import numpy as np
 import soundfile as sf
