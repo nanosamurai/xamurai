@@ -1,27 +1,20 @@
 from __future__ import annotations
 
 import ctypes
-import hashlib
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import nemo_speech_native as nemo
 
 
 MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
 MODEL_FILENAME = "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
 MODEL_REVISION = "1c8deaecc64b91f034d73e08dd8b64625eb3395d"
 MODEL_DIGEST = "sha256:a5c435f294eea8f88ce68dd27b8c3bfea7f777cb2fbba04fcd30eaa555f429ae"
-NEMO_SPEECH_VERSION = "0.1.0"
-NEMO_SPEECH_REVISION = "4f9676226f667d14608487df744f375db87127f8"
 DEFAULT_ENDPOINTING_SILENCE_MS = 2000
 MAX_UTTERANCE_SECONDS = 30.0
-SORTFORMER_MODEL_ID = "nvidia/diar_streaming_sortformer_4spk-v2"
-SORTFORMER_MODEL_FILENAME = "diar_streaming_sortformer_4spk-v2.q8_0.gguf"
-SORTFORMER_MODEL_REVISION = "5240a64075176943f677d30fa2171c780229f341"
-SORTFORMER_MODEL_DIGEST = "sha256:0679cfeb1ce356d0dea9470b31274f4bfc7eb927497d82005483770666da998a"
 
 
 @dataclass(frozen=True)
@@ -41,206 +34,11 @@ class TranscriptUpdate:
     words: tuple[SpeakerWord, ...] = ()
 
 
-class NativeRuntimeError(RuntimeError):
-    """A deliberately detail-free native runtime failure."""
-
-
-class _BackendConfig(ctypes.Structure):
-    _fields_ = [("size", ctypes.c_size_t), ("gpu", ctypes.c_int32)]
-
-
-class _ModelConfig(ctypes.Structure):
-    _fields_ = [
-        ("size", ctypes.c_size_t),
-        ("path", ctypes.c_char_p),
-        ("name", ctypes.c_char_p),
-    ]
-
-
-class _StreamingConfig(ctypes.Structure):
-    _fields_ = [
-        ("size", ctypes.c_size_t),
-        ("chunk_size", ctypes.c_float),
-        ("ctc_left_padding", ctypes.c_float),
-        ("ctc_right_padding", ctypes.c_float),
-        ("rnnt_right_context", ctypes.c_int32),
-    ]
-
-
-class _BatchingConfig(ctypes.Structure):
-    _fields_ = [
-        ("size", ctypes.c_size_t),
-        ("enable", ctypes.c_bool),
-        ("max_batch_size", ctypes.c_int32),
-        ("max_queue_delay_us", ctypes.c_int32),
-        ("max_queue_depth", ctypes.c_int32),
-        ("ingress_cohort_delay_us", ctypes.c_int32),
-        ("state_arena_slots", ctypes.c_int32),
-    ]
-
-
-class _EndpointingConfig(ctypes.Structure):
-    _fields_ = [
-        ("size", ctypes.c_size_t),
-        ("enable", ctypes.c_bool),
-        ("vad_based", ctypes.c_bool),
-        ("stop_history_eou_ms", ctypes.c_int32),
-    ]
-
-
-class _DiarizationConfig(ctypes.Structure):
-    _fields_ = [
-        ("size", ctypes.c_size_t),
-        ("model_path", ctypes.c_char_p),
-        ("chunk_frames", ctypes.c_int32),
-        ("right_context_frames", ctypes.c_int32),
-        ("left_context_frames", ctypes.c_int32),
-        ("fifo_frames", ctypes.c_int32),
-        ("spkcache_frames", ctypes.c_int32),
-        ("update_period_frames", ctypes.c_int32),
-    ]
-
-
-class _RecognizerConfig(ctypes.Structure):
-    _fields_ = [
-        ("size", ctypes.c_size_t),
-        ("backend", ctypes.POINTER(_BackendConfig)),
-        ("model", ctypes.POINTER(_ModelConfig)),
-        ("streaming", ctypes.POINTER(_StreamingConfig)),
-        ("decoder", ctypes.c_void_p),
-        ("vad", ctypes.c_void_p),
-        ("endpointing", ctypes.POINTER(_EndpointingConfig)),
-        ("postproc", ctypes.c_void_p),
-        ("diar", ctypes.POINTER(_DiarizationConfig)),
-        ("batching", ctypes.POINTER(_BatchingConfig)),
-    ]
-
-
-class _RecognitionOptions(ctypes.Structure):
-    _fields_ = [
-        ("size", ctypes.c_size_t),
-        ("request_id", ctypes.c_char_p),
-        ("language_code", ctypes.c_char_p),
-        ("interim_results", ctypes.c_bool),
-        ("enable_word_time_offsets", ctypes.c_bool),
-        ("enable_automatic_punctuation", ctypes.c_bool),
-        ("verbatim_transcripts", ctypes.c_bool),
-        ("profanity_filter", ctypes.c_bool),
-        ("stop_history_eou_ms", ctypes.c_int32),
-        ("speech_contexts", ctypes.c_void_p),
-        ("speech_context_count", ctypes.c_size_t),
-        ("max_alternatives", ctypes.c_int32),
-        ("enable_speaker_diarization", ctypes.c_bool),
-        ("max_speaker_count", ctypes.c_int32),
-    ]
-
-
-def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer") from exc
-    if not minimum <= value <= maximum:
-        raise ValueError(f"{name} must be between {minimum} and {maximum}")
-    return value
-
-
 def diarization_from_env() -> bool:
     value = os.getenv("NEMOTRON_DIARIZATION", "false").strip().lower()
     if value not in ("true", "false"):
         raise ValueError("NEMOTRON_DIARIZATION must be true or false")
     return value == "true"
-
-
-def _verified_model_path(model_id: str = MODEL_ID, filename: str = MODEL_FILENAME,
-                         revision: str = MODEL_REVISION, expected_digest: str = MODEL_DIGEST) -> str:
-    """Download exactly one immutable GGUF artifact and verify its content."""
-    from huggingface_hub import hf_hub_download
-
-    path = Path(
-        hf_hub_download(
-            repo_id=model_id,
-            filename=filename,
-            revision=revision,
-        )
-    )
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
-            digest.update(block)
-    if f"sha256:{digest.hexdigest()}" != expected_digest:
-        raise RuntimeError("pinned speech model artifact digest does not match")
-    return str(path)
-
-
-def _configure_library(library: ctypes.CDLL) -> None:
-    handle_ptr = ctypes.POINTER(ctypes.c_void_p)
-    library.nemo_speech_asr_recognition_options_default.argtypes = []
-    library.nemo_speech_asr_recognition_options_default.restype = _RecognitionOptions
-    library.nemo_speech_asr_create.argtypes = [
-        ctypes.POINTER(_RecognizerConfig),
-        handle_ptr,
-    ]
-    library.nemo_speech_asr_create.restype = ctypes.c_int
-    library.nemo_speech_asr_destroy.argtypes = [ctypes.c_void_p]
-    library.nemo_speech_asr_streaming_recognize.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(_RecognitionOptions),
-        handle_ptr,
-    ]
-    library.nemo_speech_asr_streaming_recognize.restype = ctypes.c_int
-    library.nemo_speech_asr_stream_push_f32.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_float),
-        ctypes.c_size_t,
-        ctypes.c_int32,
-    ]
-    library.nemo_speech_asr_stream_push_f32.restype = ctypes.c_int
-    library.nemo_speech_asr_stream_next.argtypes = [ctypes.c_void_p, handle_ptr]
-    library.nemo_speech_asr_stream_next.restype = ctypes.c_int
-    library.nemo_speech_asr_stream_force_endpoint.argtypes = [ctypes.c_void_p]
-    library.nemo_speech_asr_stream_force_endpoint.restype = ctypes.c_int
-    library.nemo_speech_asr_stream_finish.argtypes = [ctypes.c_void_p]
-    library.nemo_speech_asr_stream_finish.restype = ctypes.c_int
-    library.nemo_speech_asr_stream_close.argtypes = [ctypes.c_void_p]
-    library.nemo_speech_asr_result_is_final.argtypes = [ctypes.c_void_p]
-    library.nemo_speech_asr_result_is_final.restype = ctypes.c_bool
-    library.nemo_speech_asr_result_audio_processed.argtypes = [ctypes.c_void_p]
-    library.nemo_speech_asr_result_audio_processed.restype = ctypes.c_float
-    library.nemo_speech_asr_result_alternative_count.argtypes = [ctypes.c_void_p]
-    library.nemo_speech_asr_result_alternative_count.restype = ctypes.c_size_t
-    library.nemo_speech_asr_result_transcript.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    library.nemo_speech_asr_result_transcript.restype = ctypes.c_char_p
-    library.nemo_speech_asr_result_word_count.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    library.nemo_speech_asr_result_word_count.restype = ctypes.c_size_t
-    for name, result_type in (
-        ("text", ctypes.c_char_p),
-        ("start_time", ctypes.c_int32),
-        ("end_time", ctypes.c_int32),
-        ("speaker_tag", ctypes.c_int32),
-    ):
-        function = getattr(library, f"nemo_speech_asr_result_word_{name}")
-        function.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
-        function.restype = result_type
-    library.nemo_speech_asr_result_language_count.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-    ]
-    library.nemo_speech_asr_result_language_count.restype = ctypes.c_size_t
-    library.nemo_speech_asr_result_language_code.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-    ]
-    library.nemo_speech_asr_result_language_code.restype = ctypes.c_char_p
-    library.nemo_speech_asr_result_destroy.argtypes = [ctypes.c_void_p]
-    library.nemo_speech_asr_version.argtypes = []
-    library.nemo_speech_asr_version.restype = ctypes.c_char_p
-
-
-def _check(status: int, operation: str) -> None:
-    if status != 0:
-        raise NativeRuntimeError(f"native ASR operation failed: {operation} ({status})")
 
 
 class NativeSession:
@@ -268,7 +66,7 @@ class NativeSession:
         options.enable_automatic_punctuation = True
         options.enable_word_time_offsets = diarization
         options.enable_speaker_diarization = diarization
-        _check(
+        nemo.check(
             library.nemo_speech_asr_streaming_recognize(
                 recognizer, ctypes.byref(options), ctypes.byref(self._handle)
             ),
@@ -280,7 +78,7 @@ class NativeSession:
         samples = np.ascontiguousarray(pcm16, dtype=np.float32)
         samples *= 1.0 / 32768.0
         pointer = samples.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        _check(
+        nemo.check(
             self._library.nemo_speech_asr_stream_push_f32(
                 self._handle, pointer, samples.size, sample_rate
             ),
@@ -289,7 +87,7 @@ class NativeSession:
         self._input_audio_s += samples.size / sample_rate
         updates = self._drain()
         if self._input_audio_s - self._last_final_audio_s >= MAX_UTTERANCE_SECONDS:
-            _check(
+            nemo.check(
                 self._library.nemo_speech_asr_stream_force_endpoint(self._handle),
                 "force endpoint",
             )
@@ -297,14 +95,14 @@ class NativeSession:
         return updates
 
     def finish(self) -> tuple[TranscriptUpdate, ...]:
-        _check(self._library.nemo_speech_asr_stream_finish(self._handle), "finish stream")
+        nemo.check(self._library.nemo_speech_asr_stream_finish(self._handle), "finish stream")
         return self._drain()
 
     def _drain(self) -> tuple[TranscriptUpdate, ...]:
         updates: list[TranscriptUpdate] = []
         while True:
             result = ctypes.c_void_p()
-            _check(
+            nemo.check(
                 self._library.nemo_speech_asr_stream_next(
                     self._handle, ctypes.byref(result)
                 ),
@@ -363,44 +161,35 @@ class NativeSession:
 class NativeNemotronBackend:
     """A shared NeMo-Speech.cpp recognizer with independent session streams."""
 
-    runtime = f"nemo-speech-cpp=={NEMO_SPEECH_VERSION}"
+    runtime = f"nemo-speech-cpp=={nemo.NEMO_SPEECH_VERSION}"
 
     def __init__(self, maximum_sessions: int) -> None:
         self.diarization = diarization_from_env()
-        self.endpointing_silence_ms = _bounded_int(
+        self.endpointing_silence_ms = nemo.bounded_int(
             "NEMOTRON_ENDPOINTING_SILENCE_MS", DEFAULT_ENDPOINTING_SILENCE_MS,
             1, int(MAX_UTTERANCE_SECONDS * 1000),
         )
-        library_path = os.getenv(
-            "NEMO_SPEECH_LIBRARY",
-            "/opt/nemo-speech/lib/libnemo_speech_asr_c.so",
-        )
-        self._library = ctypes.CDLL(library_path)
-        _configure_library(self._library)
-        reported_version = self._library.nemo_speech_asr_version()
-        version = reported_version.decode("ascii", errors="replace") if reported_version else ""
-        if version != f"nemo-speech-asr {NEMO_SPEECH_VERSION}":
-            raise RuntimeError("NeMo-Speech.cpp runtime version does not match the image profile")
+        self._library = nemo.load_library()
 
-        model_path_bytes = _verified_model_path().encode("utf-8")
-        backend = _BackendConfig(
-            size=ctypes.sizeof(_BackendConfig),
-            gpu=_bounded_int("NEMOTRON_GPU", 0, -1, 15),
+        model_path_bytes = nemo.verified_model_path(MODEL_ID, MODEL_FILENAME, MODEL_REVISION, MODEL_DIGEST).encode("utf-8")
+        backend = nemo.BackendConfig(
+            size=ctypes.sizeof(nemo.BackendConfig),
+            gpu=nemo.bounded_int("NEMOTRON_GPU", 0, -1, 15),
         )
-        model = _ModelConfig(
-            size=ctypes.sizeof(_ModelConfig),
+        model = nemo.ModelConfig(
+            size=ctypes.sizeof(nemo.ModelConfig),
             path=model_path_bytes,
             name=b"nemotron-3.5-asr-streaming-0.6b",
         )
-        streaming = _StreamingConfig(
-            size=ctypes.sizeof(_StreamingConfig),
+        streaming = nemo.StreamingConfig(
+            size=ctypes.sizeof(nemo.StreamingConfig),
             chunk_size=0.16,
             ctc_left_padding=1.92,
             ctc_right_padding=1.92,
-            rnnt_right_context=_bounded_int("NEMOTRON_RNNT_RIGHT_CONTEXT", 1, -1, 8),
+            rnnt_right_context=nemo.bounded_int("NEMOTRON_RNNT_RIGHT_CONTEXT", 1, -1, 8),
         )
-        batching = _BatchingConfig(
-            size=ctypes.sizeof(_BatchingConfig),
+        batching = nemo.BatchingConfig(
+            size=ctypes.sizeof(nemo.BatchingConfig),
             enable=maximum_sessions > 1,
             max_batch_size=maximum_sessions,
             max_queue_delay_us=2_000,
@@ -408,27 +197,27 @@ class NativeNemotronBackend:
             ingress_cohort_delay_us=1_000,
             state_arena_slots=maximum_sessions,
         )
-        endpointing = _EndpointingConfig(
-            size=ctypes.sizeof(_EndpointingConfig),
+        endpointing = nemo.EndpointingConfig(
+            size=ctypes.sizeof(nemo.EndpointingConfig),
             enable=True,
             vad_based=False,
             stop_history_eou_ms=self.endpointing_silence_ms,
         )
         diar = None
         if self.diarization:
-            diar_path = _verified_model_path(
-                SORTFORMER_MODEL_ID, SORTFORMER_MODEL_FILENAME,
-                SORTFORMER_MODEL_REVISION, SORTFORMER_MODEL_DIGEST,
+            diar_path = nemo.verified_model_path(
+                nemo.SORTFORMER_MODEL_ID, nemo.SORTFORMER_MODEL_FILENAME,
+                nemo.SORTFORMER_MODEL_REVISION, nemo.SORTFORMER_MODEL_DIGEST,
             ).encode("utf-8")
             # Retain the pinned runtime's streaming geometry. Zero is a valid
             # left context, so only that field needs the default sentinel.
-            diar = _DiarizationConfig(
-                size=ctypes.sizeof(_DiarizationConfig),
+            diar = nemo.DiarizationConfig(
+                size=ctypes.sizeof(nemo.DiarizationConfig),
                 model_path=diar_path,
                 left_context_frames=-1,
             )
-        config = _RecognizerConfig(
-            size=ctypes.sizeof(_RecognizerConfig),
+        config = nemo.RecognizerConfig(
+            size=ctypes.sizeof(nemo.RecognizerConfig),
             backend=ctypes.pointer(backend),
             model=ctypes.pointer(model),
             streaming=ctypes.pointer(streaming),
@@ -440,7 +229,7 @@ class NativeNemotronBackend:
             batching=ctypes.pointer(batching),
         )
         self._recognizer = ctypes.c_void_p()
-        _check(
+        nemo.check(
             self._library.nemo_speech_asr_create(
                 ctypes.byref(config), ctypes.byref(self._recognizer)
             ),

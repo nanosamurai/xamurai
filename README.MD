@@ -30,6 +30,8 @@ do not live in this service repository.
   with Parakeet TDT 0.6B v3 and embedded Sortformer, including word timestamps
   and up to four anonymous speakers. Build the `parakeet-finalizer` target in
   `nemotron_rtservice/Dockerfile`; no additional inference service is required.
+- `nemo_speech_native` provides the shared NeMo-Speech.cpp bindings, runtime
+  checks and verified model downloads used by Nemotron and Parakeet.
 - `shared` contains the compatibility package `drsynth_common`, including
   Kafka tracing, enrollment, logging, and stream-control helpers. The import
   name is retained to avoid breaking downstream consumers.

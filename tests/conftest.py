@@ -22,6 +22,7 @@ for rel in [
     "shared/src",
     "qwen_rtservice/src",
     "nemotron_rtservice/src",
+    "nemo_speech_native/src",
 ]:
     p = (_REPO_ROOT / rel).resolve()
     if p.exists() and str(p) not in sys.path:

@@ -5,7 +5,7 @@ import logging
 import numpy as np
 import soundfile as sf
 
-from nemotron_rtservice import native
+import nemo_speech_native as native
 
 MODEL_ID = "nvidia/parakeet-tdt-0.6b-v3"
 MODEL_REVISION = "541d1f99c6b0c3cd0b11a95167540bb8edefd82b"
@@ -17,40 +17,31 @@ class Parakeet:
     """Keep one ASR/diarization model pair warm; recognize recordings sequentially."""
 
     def __init__(self):
-        self.library = ctypes.CDLL("/opt/nemo-speech/lib/libnemo_speech_asr_c.so")
-        native._configure_library(self.library)
-        if self.library.nemo_speech_asr_version() != b"nemo-speech-asr 0.1.0":
-            raise RuntimeError("Parakeet requires the pinned NeMo-Speech.cpp runtime")
-        self.library.nemo_speech_asr_recognize_f32.argtypes = [
-            ctypes.c_void_p, ctypes.POINTER(native._RecognitionOptions),
-            ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_int32,
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        self.library.nemo_speech_asr_recognize_f32.restype = ctypes.c_int
-        model_path = native._verified_model_path(
+        self.library = native.load_library()
+        model_path = native.verified_model_path(
             MODEL_ID, MODEL_FILENAME, MODEL_REVISION, MODEL_DIGEST,
         ).encode()
-        diar_path = native._verified_model_path(
+        diar_path = native.verified_model_path(
             native.SORTFORMER_MODEL_ID, native.SORTFORMER_MODEL_FILENAME,
             native.SORTFORMER_MODEL_REVISION, native.SORTFORMER_MODEL_DIGEST,
         ).encode()
-        backend = native._BackendConfig(
-            size=ctypes.sizeof(native._BackendConfig),
-            gpu=native._bounded_int("PARAKEET_GPU", 0, -1, 15),
+        backend = native.BackendConfig(
+            size=ctypes.sizeof(native.BackendConfig),
+            gpu=native.bounded_int("PARAKEET_GPU", 0, -1, 15),
         )
-        model = native._ModelConfig(
-            size=ctypes.sizeof(native._ModelConfig), path=model_path, name=MODEL_ID.encode(),
+        model = native.ModelConfig(
+            size=ctypes.sizeof(native.ModelConfig), path=model_path, name=MODEL_ID.encode(),
         )
-        diar = native._DiarizationConfig(
-            size=ctypes.sizeof(native._DiarizationConfig), model_path=diar_path,
+        diar = native.DiarizationConfig(
+            size=ctypes.sizeof(native.DiarizationConfig), model_path=diar_path,
             left_context_frames=-1,
         )
-        config = native._RecognizerConfig(
-            size=ctypes.sizeof(native._RecognizerConfig), backend=ctypes.pointer(backend),
+        config = native.RecognizerConfig(
+            size=ctypes.sizeof(native.RecognizerConfig), backend=ctypes.pointer(backend),
             model=ctypes.pointer(model), diar=ctypes.pointer(diar),
         )
         self.handle = ctypes.c_void_p()
-        native._check(self.library.nemo_speech_asr_create(
+        native.check(self.library.nemo_speech_asr_create(
             ctypes.byref(config), ctypes.byref(self.handle)), "create Parakeet recognizer")
 
     def __call__(self, path, *, tenant=None, lang=None):
@@ -70,7 +61,7 @@ class Parakeet:
         # TDT detects language itself; tenant/lang never select artifacts or speaker identities.
         result = ctypes.c_void_p()
         try:
-            native._check(self.library.nemo_speech_asr_recognize_f32(
+            native.check(self.library.nemo_speech_asr_recognize_f32(
                 self.handle, ctypes.byref(options),
                 samples.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), samples.size, 16000,
                 ctypes.byref(result)), "recognize recording")

@@ -4,7 +4,8 @@ from unittest.mock import Mock
 import pytest
 
 from nemotron_rtservice import native
-from nemotron_rtservice.native import NativeSession, SpeakerWord, _RecognitionOptions
+from nemotron_rtservice.native import NativeSession, SpeakerWord
+from nemo_speech_native import RecognitionOptions
 
 
 @pytest.mark.parametrize("diarization", [False, True])
@@ -22,7 +23,7 @@ def test_backend_passes_endpoint_silence_to_native_config(monkeypatch, configure
     captured = {}
 
     def create(config, handle):
-        config = ctypes.cast(config, ctypes.POINTER(native._RecognizerConfig)).contents
+        config = ctypes.cast(config, ctypes.POINTER(native.nemo.RecognizerConfig)).contents
         endpointing = config.endpointing.contents
         captured.update(
             silence_ms=endpointing.stop_history_eou_ms,
@@ -36,7 +37,7 @@ def test_backend_passes_endpoint_silence_to_native_config(monkeypatch, configure
 
     library.nemo_speech_asr_create.side_effect = create
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    monkeypatch.setattr(native, "_verified_model_path", lambda *args: "model.gguf")
+    monkeypatch.setattr(native.nemo, "verified_model_path", lambda *args: "model.gguf")
     backend = native.NativeNemotronBackend(maximum_sessions=1)
     try:
         assert captured == {
@@ -68,12 +69,12 @@ class _FakeLibrary:
         self.options = None
 
     def nemo_speech_asr_recognition_options_default(self):
-        options = _RecognitionOptions()
-        options.size = ctypes.sizeof(_RecognitionOptions)
+        options = RecognitionOptions()
+        options.size = ctypes.sizeof(RecognitionOptions)
         return options
 
     def nemo_speech_asr_streaming_recognize(self, _recognizer, options, handle):
-        captured = ctypes.cast(options, ctypes.POINTER(_RecognitionOptions)).contents
+        captured = ctypes.cast(options, ctypes.POINTER(RecognitionOptions)).contents
         self.options = {
             "stop_history_eou_ms": captured.stop_history_eou_ms,
             "interim_results": bool(captured.interim_results),

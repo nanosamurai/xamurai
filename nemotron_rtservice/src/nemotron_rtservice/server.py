@@ -14,14 +14,13 @@ from nemotron_rtservice.native import (
     DEFAULT_ENDPOINTING_SILENCE_MS,
     MODEL_DIGEST,
     MODEL_REVISION,
-    NEMO_SPEECH_REVISION,
-    SORTFORMER_MODEL_REVISION,
     NativeNemotronBackend,
     TranscriptUpdate,
 )
 from nemotron_rtservice.speakers import EMBEDDING_MODEL_REVISION, IDENTIFIER, enrollment_from_env, speaker_turns
 from proto_gen import stream_pb2, stream_pb2_grpc
 from xamurai_serving import SessionSlots, max_sessions_from_env, serving_instance_id
+from nemo_speech_native import NEMO_SPEECH_REVISION, SORTFORMER_MODEL_REVISION
 
 
 logger = logging.getLogger(__name__)

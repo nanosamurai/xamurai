@@ -68,7 +68,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH=/app:/app/shared/src:/app/nemotron_rtservice/src \
+    PYTHONPATH=/app:/app/shared/src:/app/nemotron_rtservice/src:/app/nemo_speech_native/src \
     LD_LIBRARY_PATH=/opt/nemo-speech/lib \
     HF_HOME=/data/huggingface \
     HF_HUB_DISABLE_TELEMETRY=1 \
@@ -108,6 +108,7 @@ COPY --from=native-builder /opt/nemo-speech /opt/nemo-speech
 COPY proto_gen /app/proto_gen
 COPY shared/src /app/shared/src
 COPY nemotron_rtservice/src /app/nemotron_rtservice/src
+COPY nemo_speech_native/src /app/nemo_speech_native/src
 
 RUN useradd --create-home --uid 10003 rtservice \
     && mkdir -p /data/huggingface \
@@ -124,7 +125,7 @@ RUN /opt/venv/bin/pip install \
       "opentelemetry-exporter-otlp==1.36.0" \
     && /opt/venv/bin/pip check
 COPY finalizer_worker/src /app/finalizer_worker/src
-ENV PYTHONPATH=/app:/app/shared/src:/app/nemotron_rtservice/src:/app/finalizer_worker/src \
+ENV PYTHONPATH=/app:/app/shared/src:/app/nemotron_rtservice/src:/app/nemo_speech_native/src:/app/finalizer_worker/src \
     FINALIZER_TRACK_ID=parakeet
 USER 10003
 ENTRYPOINT []

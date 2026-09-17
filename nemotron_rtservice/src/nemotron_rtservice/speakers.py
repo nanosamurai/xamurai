@@ -15,7 +15,8 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from drsynth_common.enrollment.models import SpeakerManifest
-from nemotron_rtservice.native import SpeakerWord, _verified_model_path
+from nemotron_rtservice.native import SpeakerWord
+from nemo_speech_native import verified_model_path
 
 
 logger = logging.getLogger(__name__)
@@ -93,7 +94,7 @@ class SpeakerEmbedding:
     def __init__(self):
         import onnxruntime as ort
 
-        path = _verified_model_path(
+        path = verified_model_path(
             EMBEDDING_MODEL_ID, EMBEDDING_MODEL_FILENAME,
             EMBEDDING_MODEL_REVISION, EMBEDDING_MODEL_DIGEST,
         )
