@@ -3,3 +3,4 @@ numpy==2.2.3
 soundfile==0.13.1
 protobuf==6.33.0
 grpcio==1.76.0
+confluent-kafka==2.12.0

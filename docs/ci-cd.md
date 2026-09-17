@@ -30,6 +30,9 @@ They:
 - scan the complete Git history for committed secrets without injecting any
   repository secret into pull request jobs
 
+The WhisperX refinement publication tests import the pinned Kafka client from
+`requirements.ci.txt` and use a fake producer. They do not start a Kafka broker.
+
 Separate integration workflows cover the two ML dependency stacks:
 
 - `integration-fastwhisper.yml` validates realtime gRPC behavior
