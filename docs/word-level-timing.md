@@ -6,7 +6,7 @@ This document describes how **word-level timestamps** are produced and carried t
 
 ### Kafka (`transcripts.final`)
 
-The `finalizer_worker` publishes a `SessionTranscript` protobuf message to the `transcripts.final` topic.
+Each finalizer publishes a `SessionTranscript` protobuf message to `transcripts.final`.
 
 Each transcript segment can optionally contain word-level timing:
 
@@ -26,11 +26,13 @@ message WordAlignment {
 }
 ```
 
-`words[]` is produced when WhisperX alignment succeeds; otherwise it may be empty.
+WhisperX fills `words[]` when alignment succeeds; otherwise it may be empty.
+Parakeet fills it from native word timestamps.
 
-### Sidecar JSON artifact (next to WAV)
+### Stored transcript
 
-For `file://...` recordings, `finalizer_worker` writes a JSON transcript next to the WAV. The JSON mirrors the protobuf shape.
+SamuraiPersistor stores transcript segments in Postgres. Finalizers do not write
+JSON sidecars next to recordings.
 
 Example segment:
 

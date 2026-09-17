@@ -1,4 +1,4 @@
-"""Small serving primitives shared by realtime Xamurai providers."""
+"""Small serving primitives shared by Xamurai providers."""
 
 from .admission import SessionSlots, max_sessions_from_env, serving_instance_id
 

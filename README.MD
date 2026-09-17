@@ -20,12 +20,18 @@ do not live in this service repository.
 - `nemotron_rtservice` exposes the same API using Nemotron 3.5 ASR's
   cache-aware streaming graph through the stable NeMo-Speech.cpp C ABI, with
   optional native Sortformer diarization and tenant-specific S3 speaker matching.
-- `whisperx_worker` consumes `audio.raw` and emits window-based
-  `transcripts.refined` events.
-- `recorder_worker` consumes `audio.raw`, stores session audio, and emits
-  `recordings.finished`.
-- `finalizer_worker` consumes `recordings.finished`, produces the canonical
-  session transcript, and emits `transcripts.final`.
+- `whisperx_worker` contains one WhisperX pipeline and two entrypoints:
+  `whisperx_worker.refinement` reads audio windows from `audio.raw` and emits
+  `transcripts.refined`; `whisperx_worker.finalizer` reads completed recordings
+  and emits `transcripts.final`. Both use pyannote and optional enrolled names.
+- `parakeet_worker` contains the Parakeet TDT 0.6B v3 pipeline and
+  `parakeet_worker.finalizer`, with embedded Sortformer and native word timing.
+  It supports up to four anonymous speakers. It has no refinement entrypoint yet.
+- `nemo_speech_native` contains the shared NeMo-Speech.cpp bindings, runtime
+  checks, verified model downloads and native Docker base for Nemotron and Parakeet.
+- `recorder_worker` stores session audio and emits `recordings.finished`.
+- `xamurai_serving.finalization` contains the shared recording download,
+  track selection, publication and replay loop. Each finalizer supplies its pipeline.
 - `shared` contains the compatibility package `drsynth_common`, including
   Kafka tracing, enrollment, logging, and stream-control helpers. The import
   name is retained to avoid breaking downstream consumers.
@@ -101,8 +107,9 @@ fallbacks, and resource bounds.
 | `rtservice` | Realtime gRPC | Fixed `Systran/faster-whisper-medium` profile through Faster-Whisper/CTranslate2 | `pyannote/speaker-diarization-3.1`; optional `pyannote/embedding` enrollment mapping and Silero VAD | Replaceable partials; contextual, timestamp-owned, speaker-labelled finals |
 | `qwen_rtservice` | Realtime gRPC | Fixed `Qwen/Qwen3-ASR-0.6B` plus `Qwen/Qwen3-ForcedAligner-0.6B` | Fixed `pyannote/speaker-diarization-3.1` pipeline | Native-streaming partials; aligned and diarized epoch finals for supported alignment languages, with a coarse speakerless fallback |
 | `nemotron_rtservice` | Realtime gRPC | Fixed `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF through NeMo-Speech.cpp | Optional Sortformer v2 Q8; WeSpeaker ONNX for S3 enrollment | Native partials; optionally timed, speaker-labelled finals; no public word-timestamp claim |
-| `whisperx_worker` | Kafka refinement | WhisperX `medium` by default (`WHISPERX_MODEL` is operator-configurable) plus its language-specific alignment model | `pyannote/speaker-diarization-3.1` by default; optional `pyannote/embedding` enrollment mapping | Speaker-aware refined windows while the session is in progress |
-| `finalizer_worker` | Kafka completed-recording pipeline | Reuses the WhisperX ASR and language-alignment pipeline | Reuses the pyannote diarization and optional enrollment pipeline | Canonical full-session transcript with word timing where alignment succeeds |
+| `whisperx_worker.refinement` | Kafka refinement | WhisperX `medium` by default (`WHISPERX_MODEL` is operator-configurable) plus its language-specific alignment model | `pyannote/speaker-diarization-3.1` by default; optional `pyannote/embedding` enrollment mapping | Speaker-aware refined windows while the session is in progress |
+| `whisperx_worker.finalizer` | Kafka completed-recording pipeline | Reuses the WhisperX ASR and language-alignment pipeline | Reuses the pyannote diarization and optional enrollment pipeline | Canonical full-session transcript with word timing where alignment succeeds |
+| `parakeet_worker.finalizer` | Kafka completed-recording pipeline | Parakeet TDT 0.6B v3 Q8 through NeMo-Speech.cpp; native word timing | Embedded Sortformer v2 Q8 | Independent final track with up to four anonymous speakers |
 | `recorder_worker` | Kafka and object storage | None | None | Model-free session WAV assembly and completion notification |
 
 Realtime clients select configured track IDs, not arbitrary model names,
@@ -116,11 +123,11 @@ endpoint with SamuraiBFF.
    out to each configured realtime service.
 2. Each realtime service streams track-labelled `AsrEvent` updates back over
    the common gRPC contract.
-3. `whisperx_worker` buffers configurable windows and publishes
+3. `whisperx_worker.refinement` buffers configurable windows and publishes
    `RefinedEvent` messages to `transcripts.refined`.
 4. `recorder_worker` finalizes the session recording and publishes
    `RecordingFinished` to `recordings.finished`.
-5. `finalizer_worker` transcribes the completed recording and publishes
+5. Each selected finalizer transcribes the completed recording and publishes
    `SessionTranscript` to `transcripts.final`.
 
 Kafka messages propagate W3C `traceparent` headers. Services also attach the
@@ -132,10 +139,11 @@ session and tenant identifiers needed for correlation and isolation.
 - `rtservice/`: realtime gRPC service
 - `qwen_rtservice/`: isolated Qwen3-ASR/vLLM realtime service
 - `nemotron_rtservice/`: isolated Nemotron/NeMo-Speech.cpp realtime service
-- `whisperx_worker/`: near-realtime refinement worker
+- `whisperx_worker/`: shared WhisperX pipeline, refinement and finalizer entrypoints
 - `recorder_worker/`: session recording worker
-- `finalizer_worker/`: full-session finalization worker
-- `shared/`: shared Python package
+- `parakeet_worker/`: Parakeet pipeline and finalizer entrypoint
+- `nemo_speech_native/`: shared native bindings and Docker base
+- `shared/`: common serving, finalization, Kafka, tracing and enrollment code
 - `tests/`: unit and integration tests
 - `utilities/`: service-level development and diagnostic helpers
 - `docs/`: service behavior, performance, and interface documentation
@@ -149,7 +157,6 @@ conda env create -f environment.yml
 conda env create -f rtservice/environment.yml
 conda env create -f whisperx_worker/environment.yml
 conda env create -f recorder_worker/environment.yml
-conda env create -f finalizer_worker/environment.yml
 ```
 
 Heavy ML tests require the environment matching the service under test.
@@ -214,16 +221,21 @@ End-to-end stack smoke tests live with their owning environments:
 
 ## Build service images
 
-Each service has a standalone Dockerfile:
+Use Docker Buildx Bake from this repository. It builds the shared bases before
+their consumers:
 
 ```bash
-docker build -t xamurai-rtservice:dev -f rtservice/Dockerfile .
-docker build -t xamurai-whisperx-worker:dev -f whisperx_worker/Dockerfile .
-docker build -t xamurai-recorder-worker:dev -f recorder_worker/Dockerfile .
-docker build -t xamurai-finalizer-worker:dev -f finalizer_worker/Dockerfile .
-docker build -t xamurai-qwen-rtservice:dev -f qwen_rtservice/Dockerfile .
-docker build -t xamurai-nemotron-rtservice:dev -f nemotron_rtservice/Dockerfile .
+docker buildx bake --load whisperx-worker finalizer-worker nemotron-rtservice parakeet-finalizer
+docker buildx bake --load rtservice recorder-worker qwen-rtservice
 ```
+
+Images use the `local` tag by default; set `TAG` to select another tag.
+WhisperX has `Dockerfile.refinement` and `Dockerfile.finalizer`. Parakeet has
+`Dockerfile.finalizer`. The finalizer and Nemotron Dockerfiles use named build
+contexts supplied by Bake or the Compose build configuration.
+The existing `xamurai-whisperx-worker` and `xamurai-finalizer-worker` image names
+remain compatible with deployment image pins. These are separate processes;
+sharing code and Docker layers does not share loaded GPU weights.
 
 The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 
@@ -233,6 +245,7 @@ The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
 - `ghcr.io/nanosamurai/xamurai-qwen-rtservice`
 - `ghcr.io/nanosamurai/xamurai-nemotron-rtservice`
+- `ghcr.io/nanosamurai/xamurai-parakeet-finalizer`
 
 ## Configuration
 

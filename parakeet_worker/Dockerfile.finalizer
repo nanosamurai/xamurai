@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+FROM nemo-speech-native
+USER root
+RUN /opt/venv/bin/pip install \
+      "confluent-kafka==2.12.0" \
+      "opentelemetry-api==1.36.0" \
+      "opentelemetry-sdk==1.36.0" \
+      "opentelemetry-exporter-otlp==1.36.0" \
+    && /opt/venv/bin/pip check
+COPY parakeet_worker/src /app/parakeet_worker/src
+ENV PYTHONPATH=/app:/app/shared/src:/app/nemo_speech_native/src:/app/parakeet_worker/src \
+    FINALIZER_TRACK_ID=parakeet
+USER 10003
+ENTRYPOINT []
+CMD ["python", "-m", "parakeet_worker.finalizer"]

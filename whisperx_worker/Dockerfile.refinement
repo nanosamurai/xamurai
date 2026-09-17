@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH"
 
-ENV PYTHONPATH=/app:/app/shared/src:/app/rtservice/src:/app/whisperx_worker/src:/app/recorder_worker/src:/app/finalizer_worker/src
+ENV PYTHONPATH=/app:/app/shared/src:/app/whisperx_worker/src
 
 WORKDIR /app
 
@@ -44,10 +44,12 @@ RUN pip install \
       opentelemetry-sdk \
       opentelemetry-exporter-otlp
 
-COPY . /app
+COPY proto_gen /app/proto_gen
+COPY shared/src /app/shared/src
+COPY whisperx_worker/src /app/whisperx_worker/src
 
 RUN useradd -m -u 10001 appuser \
-    && mkdir -p /data/hf_cache \
+    && mkdir -p /data/hf_cache /data/recordings \
     && chown -R 10001:10001 /app /data
 USER 10001
 
@@ -55,4 +57,4 @@ USER 10001
 # - KAFKA_BOOTSTRAP, KAFKA_TOPIC_AUDIO, KAFKA_TOPIC_REFINED
 # - WHISPERX_SLICE_SECONDS, WHISPERX_IDLE_SECONDS, WHISPERX_COMPUTE_TYPE
 # - KAFKA_GROUP_ID
-CMD ["python", "-m", "whisperx_worker.whisperx_worker"]
+CMD ["python", "-m", "whisperx_worker.refinement"]
