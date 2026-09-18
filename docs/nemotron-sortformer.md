@@ -43,9 +43,10 @@ settings. Partials continue during the longer utterance. Consecutive words
 with the same speaker are grouped without checking silence gaps, so a pause
 that no longer triggers an endpoint can fall inside one displayed segment.
 The service loads the baked Silero v6.2.0 GGUF with audio masking disabled;
-the 30-second forced ASR endpoint remains in place. See
+the duration policy accepts shorter pauses after 90 seconds and enforces a
+120-second emergency endpoint by default. See
 [native VAD](nemotron-vad.md) for pins and streaming tests. The VAD profiles are
-`sortformer-q8-r3` and `sortformer-enrolled-q8-r3` (with the usual Nemotron prefix).
+`sortformer-q8-r4` and `sortformer-enrolled-q8-r4` (with the usual Nemotron prefix).
 
 Word ends are clipped at the next speaker's onset so late RNNT punctuation
 cannot include the next turn in enrollment audio.
@@ -125,8 +126,9 @@ tracking and is not implemented.
 - Manifests are limited to 64 KiB, samples to 4 MiB and 30 seconds of mono/stereo
   WAV at 8–48 kHz. Embedding uses at most ten seconds, with a minimum of 1.5
   seconds; resampling is local. Enrollment-enabled streams retain at most
-  64 seconds of PCM16 (2 MiB), covering the 30-second native utterance backstop
-  plus the maximum ingress chunk. The buffer is released on stream teardown.
+  `NEMOTRON_MAX_UTTERANCE_SECONDS` of PCM16 plus the maximum 1 MiB ingress
+  chunk (about 4.7 MiB at the 120-second default). This preserves early speaker
+  audio in longer utterances. The buffer is released on stream teardown.
 - Tenant identifiers are fixed by the first audio chunk and must agree with
   `x-tenant-id` when supplied. Invalid tenant identifiers cannot reach S3.
   Only samples in the configured bucket and the manifest's own tenant/speaker
