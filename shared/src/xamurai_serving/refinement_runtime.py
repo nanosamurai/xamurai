@@ -37,9 +37,9 @@ def run_decoupled(*, consumer, topic_audio, slice_seconds, sample_rate,
     committed = {}
     caught_up = set()
     paused = set()
-    queue_limit = max(1, int(os.getenv("WHISPERX_READY_QUEUE_MAX", "256")))
+    queue_limit = max(1, int(os.getenv("REFINEMENT_READY_QUEUE_MAX", os.getenv("WHISPERX_READY_QUEUE_MAX", "256"))))
     running = None
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisperx.inference")
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"refinement.{track_id}")
 
     def revoke(_consumer, partitions):
         """Invalidate revoked buffers and completions without advancing offsets."""

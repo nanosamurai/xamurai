@@ -8,7 +8,9 @@ import pytest
 # Unit tests can run without whisperx installed.
 # We will stub the lazy import mechanism.
 
-from whisperx_worker import pipeline as whisperx_worker, refinement
+from whisperx_worker import pipeline as whisperx_worker
+from whisperx_worker.refinement import transcribe
+from xamurai_serving import refinement
 
 
 class _DummyProducer:
@@ -309,14 +311,6 @@ def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch
         raising=False,
     )
 
-    # Avoid creating/cleaning a real tmp wav.
-    monkeypatch.setattr(whisperx_worker.sf, "write", lambda *_a, **_kw: None, raising=False)
-    monkeypatch.setattr(whisperx_worker.os, "unlink", lambda *_a, **_kw: None, raising=False)
-
-    # Avoid trace context complications.
-    monkeypatch.setattr(refinement, "extracted_context_from_headers", lambda _h: __import__("contextlib").nullcontext())
-    monkeypatch.setattr(refinement, "with_current_trace_context", lambda: [])
-
     producer = _DummyProducer()
 
     job = {
@@ -335,9 +329,9 @@ def test_run_inference_and_publish_emits_single_refined_window_event(monkeypatch
     if not publish_ok:
         monkeypatch.setattr(producer, "flush", lambda _timeout: 1)
         with pytest.raises(RuntimeError, match="not acknowledged"):
-            refinement._run_inference_and_publish(job=job, producer=producer)
+            refinement._run_inference_and_publish(job=job, producer=producer, transcribe=transcribe, model="medium")
         return
-    refinement._run_inference_and_publish(job=job, producer=producer)
+    refinement._run_inference_and_publish(job=job, producer=producer, transcribe=transcribe, model="medium")
 
     assert len(producer.produced) == 1
     msg = producer.produced[0]

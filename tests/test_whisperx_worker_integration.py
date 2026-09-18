@@ -80,12 +80,14 @@ def test_whisperx_worker_end_to_end_real(kafka_bootstrap):
     from whisperx_worker import refinement as whisperx_worker  # adjust if package name differs
 
     importlib.reload(whisperx_worker.pipeline)
+    from xamurai_serving import refinement
+    importlib.reload(refinement)
     importlib.reload(whisperx_worker)
 
     # Sanity: log which topics the worker thinks it uses
     print(
-        f"[test] worker topics: audio={whisperx_worker.TOPIC_AUDIO}, "
-        f"refined={whisperx_worker.TOPIC_REFINED}, bootstrap={whisperx_worker.KAFKA_BOOTSTRAP}"
+        f"[test] worker topics: audio={refinement.TOPIC_AUDIO}, "
+        f"refined={refinement.TOPIC_REFINED}, bootstrap={refinement.KAFKA_BOOTSTRAP}"
     )
 
     # ------------------------------------------------------------------ #
@@ -263,6 +265,8 @@ def test_whisperx_worker_diarization_and_enrollment_on_test_wav(kafka_bootstrap,
     from whisperx_worker import refinement as whisperx_worker
 
     importlib.reload(whisperx_worker.pipeline)
+    from xamurai_serving import refinement
+    importlib.reload(refinement)
     importlib.reload(whisperx_worker)
 
     worker_thread = threading.Thread(
@@ -430,6 +434,8 @@ def test_whisperx_worker_diarization_and_s3_enrollment_on_test_wav(
     from whisperx_worker import refinement as whisperx_worker
 
     importlib.reload(whisperx_worker.pipeline)
+    from xamurai_serving import refinement
+    importlib.reload(refinement)
     importlib.reload(whisperx_worker)
 
     worker_thread = threading.Thread(
