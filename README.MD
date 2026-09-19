@@ -36,7 +36,7 @@ do not live in this service repository.
 - `xamurai_serving.finalization` contains the shared recording download,
   track selection, publication and replay loop. Each finalizer supplies its pipeline.
 - `xamurai_serving.refinement` and `refinement_runtime` share window buffering,
-  inference publication and replay handling between WhisperX and Parakeet.
+  inference publication and replay handling between WhisperX, Parakeet and Qwen.
 - `shared` contains the compatibility package `drsynth_common`, including
   Kafka tracing, enrollment, logging, and stream-control helpers. The import
   name is retained to avoid breaking downstream consumers.
