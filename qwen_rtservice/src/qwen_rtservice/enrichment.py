@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import importlib.metadata
-import hashlib
 import logging
 import math
-import os
 import time
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -17,53 +13,8 @@ from drsynth_common.diarization_assign import (
     TimeSegment,
     assign_speaker_by_overlap,
 )
-from drsynth_common.pyannote_telemetry import disable_pyannote_telemetry
-
-
-disable_pyannote_telemetry()
 
 logger = logging.getLogger(__name__)
-
-DIARIZATION_MODEL_ID = "pyannote/speaker-diarization-3.1"
-DIARIZATION_MODEL_REVISION = "84fd25912480287da0247647c3d2b4853cb3ee5d"
-DIARIZATION_CONFIG_DIGEST = (
-    "sha256:04ad9cd59a93c3a7c754200ecc9e1c4ba87bf1657ef8a4debf7555e711daeeda"
-)
-SEGMENTATION_MODEL_ID = "pyannote/segmentation-3.0"
-SEGMENTATION_MODEL_REVISION = "e66f3d3b9eb0873085418a7b813d3b369bf160bb"
-SEGMENTATION_MODEL_DIGEST = (
-    "sha256:da85c29829d4002daedd676e012936488234d9255e65e86dfab9bec6b1729298"
-)
-EMBEDDING_MODEL_ID = "pyannote/wespeaker-voxceleb-resnet34-LM"
-EMBEDDING_MODEL_REVISION = "837717ddb9ff5507820346191109dc79c958d614"
-EMBEDDING_MODEL_DIGEST = "sha256:366edf44f4c80889a3eb7a9d7bdf02c4aede3127f7dd15e274dcdb826b143c56"
-
-
-def _verified_hf_file(
-    repo_id: str,
-    revision: str,
-    filename: str,
-    expected_digest: str,
-    token: str,
-) -> str:
-    """Download and verify one immutable Hugging Face artifact."""
-    from huggingface_hub import hf_hub_download
-
-    path = Path(
-        hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            revision=revision,
-            token=token,
-        )
-    )
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
-            digest.update(block)
-    if f"sha256:{digest.hexdigest()}" != expected_digest:
-        raise RuntimeError(f"pinned model artifact digest does not match: {repo_id}/{filename}")
-    return str(path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,93 +60,6 @@ class FinalEnricher(Protocol):
         *,
         epoch_number: int,
     ) -> tuple[EnrichedSegment, ...]: ...
-
-
-class PyannoteDiarizer:
-    """Load the fixed pyannote pipeline and diarize one bounded Qwen epoch."""
-
-    def __init__(self) -> None:
-        import torch
-        import yaml
-        from pyannote.audio import Pipeline
-
-        token = os.getenv("HF_TOKEN", "").strip()
-        if not token:
-            raise RuntimeError("Set HF_TOKEN for the fixed pyannote diarization profile")
-        if not torch.cuda.is_available():
-            raise RuntimeError("Qwen realtime diarization requires an NVIDIA CUDA device")
-
-        config_path = _verified_hf_file(
-            DIARIZATION_MODEL_ID,
-            DIARIZATION_MODEL_REVISION,
-            "config.yaml",
-            DIARIZATION_CONFIG_DIGEST,
-            token,
-        )
-        segmentation_path = _verified_hf_file(
-            SEGMENTATION_MODEL_ID,
-            SEGMENTATION_MODEL_REVISION,
-            "pytorch_model.bin",
-            SEGMENTATION_MODEL_DIGEST,
-            token,
-        )
-        embedding_path = _verified_hf_file(
-            EMBEDDING_MODEL_ID,
-            EMBEDDING_MODEL_REVISION,
-            "pytorch_model.bin",
-            EMBEDDING_MODEL_DIGEST,
-            token,
-        )
-        with Path(config_path).open("r", encoding="utf-8") as source:
-            config = yaml.safe_load(source)
-        pipeline_params = config.get("pipeline", {}).get("params", {})
-        if pipeline_params.get("segmentation") != SEGMENTATION_MODEL_ID:
-            raise RuntimeError("pinned pyannote pipeline has an unexpected segmentation model")
-        if pipeline_params.get("embedding") != EMBEDDING_MODEL_ID:
-            raise RuntimeError("pinned pyannote pipeline has an unexpected embedding model")
-        pipeline_params["segmentation"] = {"checkpoint": segmentation_path}
-        pipeline_params["embedding"] = embedding_path
-        pipeline = Pipeline.from_pretrained(config, token=token)
-        if pipeline is None:
-            raise RuntimeError("pinned pyannote diarization pipeline could not be loaded")
-        pipeline.to(torch.device("cuda"))
-        self._pipeline = pipeline
-        self.runtime = f"pyannote-audio=={importlib.metadata.version('pyannote-audio')}"
-
-    def diarize(self, pcm16: np.ndarray) -> tuple[DiarizationSegment, ...]:
-        import torch
-
-        wave = pcm16.astype(np.float32) / 32768.0
-        started = time.monotonic()
-        output = self._pipeline(
-            {
-                "waveform": torch.from_numpy(wave.copy()).unsqueeze(0),
-                "sample_rate": 16000,
-            }
-        )
-        annotation = getattr(output, "speaker_diarization", output)
-        if not hasattr(annotation, "itertracks"):
-            raise RuntimeError("pyannote returned no speaker annotation")
-        turns = tuple(
-            sorted(
-                (
-                    DiarizationSegment(
-                        start_s=float(turn.start),
-                        end_s=float(turn.end),
-                        speaker=str(speaker),
-                    )
-                    for turn, _, speaker in annotation.itertracks(yield_label=True)
-                    if float(turn.end) > float(turn.start) and str(speaker).strip()
-                ),
-                key=lambda turn: (turn.start_s, turn.end_s, turn.speaker),
-            )
-        )
-        logger.info(
-            "Qwen epoch diarization completed turns=%d elapsed_seconds=%.3f",
-            len(turns),
-            time.monotonic() - started,
-        )
-        return turns
 
 
 class QwenEpochEnricher:
