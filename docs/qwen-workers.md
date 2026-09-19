@@ -66,9 +66,12 @@ empty/silent input and invalid WAV rejection. Nanosamurai owns the full Compose
 smoke through BFF, recorder, Kafka, Postgres, live refinement and HTTP playback.
 
 On 2026-09-19, both real GPU integration tests and 28 realtime/shared-worker
-regression checks passed. Rebuilt finalizer/refinement images also passed the
+regression checks passed. Both ASR and forced-aligner multi-crop calls were observed.
+Rebuilt finalizer/refinement images also passed the
 full [Nanosamurai Compose smoke](https://github.com/nanosamurai/nanosamurai/blob/master/docs/qwen-workers.md),
-including replay, stage selection, silence and tenant rejection.
+including word timing/text preservation, replay, stage selection, silence and
+tenant rejection. A browser check rendered all 55 persisted final words and
+verified that clicking two words sought playback and activated their highlights.
 
 Images retain the realtime model revisions/hashes and run as UID 10002. Model
 repository code is disabled, telemetry is disabled, transcript content is not
