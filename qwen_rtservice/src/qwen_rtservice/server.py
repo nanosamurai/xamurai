@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import importlib.metadata
 import logging
 import math
 import os
 from concurrent import futures
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional, Protocol
 
 import grpc
@@ -17,57 +15,20 @@ from proto_gen import stream_pb2, stream_pb2_grpc
 from qwen_rtservice.enrichment import (
     EnrichmentFailure,
     FinalEnricher,
-    PyannoteDiarizer,
     QwenEpochEnricher,
 )
 from xamurai_serving import SessionSlots, max_sessions_from_env, serving_instance_id
+from xamurai_serving.qwen import (
+    MODEL_ID, MODEL_REVISION, MODEL_DIGEST, ALIGNMENT_MODEL_ID,
+    ALIGNMENT_MODEL_REVISION, ALIGNMENT_MODEL_DIGEST, SAMPLE_RATE,
+    AUDIO_TOKENS_PER_SECOND, KV_CACHE_BYTES_PER_TOKEN, QWEN_LANGUAGE_CODES,
+    QWEN_LANGUAGE_NAMES, PyannoteDiarizer, bounded_int as _bounded_int, load_model,
+)
 
 
 logger = logging.getLogger(__name__)
 
 PROFILE_ID = "qwen3-asr-0.6b-vllm-aligned-diarized-r3"
-MODEL_ID = "Qwen/Qwen3-ASR-0.6B"
-MODEL_REVISION = "c4468bdb552ddc559e464f6081e22dd4034f2e68"
-MODEL_DIGEST = "sha256:79d6cbd4c98c7bbffe9db2edac07f56cd6637d0d5944b27f6c2b8353840323ea"
-ALIGNMENT_MODEL_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
-ALIGNMENT_MODEL_REVISION = "c7cbfc2048c462b0d63a45797104fc9db3ad62b7"
-ALIGNMENT_MODEL_DIGEST = "sha256:47831d0e82f96b20e9034dba01a075ee06436654719f6a68289e49f1b65ce0e7"
-SAMPLE_RATE = 16000
-AUDIO_TOKENS_PER_SECOND = 13
-KV_CACHE_BYTES_PER_TOKEN = 114688
-QWEN_LANGUAGE_CODES = {
-    "Chinese": "zh",
-    "English": "en",
-    "Cantonese": "yue",
-    "Arabic": "ar",
-    "German": "de",
-    "French": "fr",
-    "Spanish": "es",
-    "Portuguese": "pt",
-    "Indonesian": "id",
-    "Italian": "it",
-    "Korean": "ko",
-    "Russian": "ru",
-    "Thai": "th",
-    "Vietnamese": "vi",
-    "Japanese": "ja",
-    "Turkish": "tr",
-    "Hindi": "hi",
-    "Malay": "ms",
-    "Dutch": "nl",
-    "Swedish": "sv",
-    "Danish": "da",
-    "Finnish": "fi",
-    "Polish": "pl",
-    "Czech": "cs",
-    "Filipino": "fil",
-    "Persian": "fa",
-    "Greek": "el",
-    "Romanian": "ro",
-    "Hungarian": "hu",
-    "Macedonian": "mk",
-}
-QWEN_LANGUAGE_NAMES = {code: name for name, code in QWEN_LANGUAGE_CODES.items()}
 
 
 class _InvalidRequest(ValueError):
@@ -100,59 +61,14 @@ class QwenBackend(Protocol):
     def align(self, pcm16: np.ndarray, text: str, language: str): ...
 
 
-def _verified_snapshot(repo_id: str, revision: str, expected_digest: str) -> str:
-    """Download one immutable model snapshot and verify its safetensors payload."""
-    from huggingface_hub import snapshot_download
-
-    model_path = snapshot_download(repo_id=repo_id, revision=revision)
-    weights = Path(model_path) / "model.safetensors"
-    if not weights.is_file():
-        raise RuntimeError(f"pinned model artifact is incomplete: {repo_id}")
-    digest = hashlib.sha256()
-    with weights.open("rb") as source:
-        for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
-            digest.update(block)
-    if f"sha256:{digest.hexdigest()}" != expected_digest:
-        raise RuntimeError(
-            f"pinned model artifact digest does not match the service profile: {repo_id}"
-        )
-    return model_path
-
-
 class QwenVllmBackend:
     """Exact-revision Qwen3-ASR runtime using its native vLLM streaming API."""
 
     def __init__(self, config: QwenRuntimeConfig) -> None:
-        import torch
-        from qwen_asr import Qwen3ASRModel
-
-        if not torch.cuda.is_available():
-            raise RuntimeError("Qwen realtime service requires an NVIDIA CUDA device")
-
-        model_path = _verified_snapshot(MODEL_ID, MODEL_REVISION, MODEL_DIGEST)
-        aligner_path = _verified_snapshot(
-            ALIGNMENT_MODEL_ID,
-            ALIGNMENT_MODEL_REVISION,
-            ALIGNMENT_MODEL_DIGEST,
-        )
-
         self._chunk_size_sec = config.stream_chunk_seconds
-        self._model = Qwen3ASRModel.LLM(
-            model=model_path,
-            max_new_tokens=config.max_new_tokens,
-            max_model_len=config.max_model_len,
-            kv_cache_memory_bytes=config.kv_cache_mib * 1024 * 1024,
-            max_num_seqs=1,
-            limit_mm_per_prompt={"audio": 1},
-            tensor_parallel_size=1,
-            trust_remote_code=False,
-            disable_log_stats=True,
-            forced_aligner=aligner_path,
-            forced_aligner_kwargs={
-                "dtype": torch.bfloat16,
-                "device_map": "cuda:0",
-                "trust_remote_code": False,
-            },
+        self._model = load_model(
+            max_new_tokens=config.max_new_tokens, max_model_len=config.max_model_len,
+            kv_cache_mib=config.kv_cache_mib, align=True,
         )
         self.supported_languages = tuple(self._model.get_supported_languages())
         forced_aligner = getattr(self._model, "forced_aligner", None)
@@ -204,16 +120,6 @@ def _bounded_float(name: str, default: float, minimum: float, maximum: float) ->
         value = float(os.getenv(name, str(default)))
     except ValueError as exc:
         raise ValueError(f"{name} must be a number") from exc
-    if not minimum <= value <= maximum:
-        raise ValueError(f"{name} must be between {minimum} and {maximum}")
-    return value
-
-
-def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer") from exc
     if not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value

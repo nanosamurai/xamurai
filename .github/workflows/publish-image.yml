@@ -70,6 +70,10 @@ jobs:
             ghcr_repo: xamurai-finalizer-worker
           - image: qwen-rtservice
             ghcr_repo: xamurai-qwen-rtservice
+          - image: qwen-finalizer
+            ghcr_repo: xamurai-qwen-finalizer
+          - image: qwen-refinement
+            ghcr_repo: xamurai-qwen-refinement
           - image: nemotron-rtservice
             ghcr_repo: xamurai-nemotron-rtservice
           - image: parakeet-finalizer
