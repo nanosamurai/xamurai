@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1
+FROM qwen-rtservice
+USER root
+RUN pip install --no-cache-dir "confluent-kafka==2.12.0" "boto3==1.40.0" \
+    && pip check
+COPY --chown=10002:10002 qwen_worker/src /app/qwen_worker/src
+ENV PYTHONPATH=/app:/app/shared/src:/app/qwen_worker/src \
+    FINALIZER_TRACK_ID=qwen
+USER 10002
+HEALTHCHECK NONE
+CMD ["python", "-m", "qwen_worker.finalizer"]

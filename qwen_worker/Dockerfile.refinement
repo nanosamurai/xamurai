@@ -1,0 +1,3 @@
+FROM qwen-finalizer
+ENV REFINEMENT_TRACK_ID=qwen
+CMD ["python", "-m", "qwen_worker.refinement"]

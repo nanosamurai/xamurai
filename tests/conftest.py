@@ -21,6 +21,7 @@ for rel in [
     "parakeet_worker/src",
     "shared/src",
     "qwen_rtservice/src",
+    "qwen_worker/src",
     "nemotron_rtservice/src",
     "nemo_speech_native/src",
 ]:

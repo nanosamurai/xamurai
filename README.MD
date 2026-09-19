@@ -17,6 +17,8 @@ do not live in this service repository.
 - `qwen_rtservice` exposes the same `RealtimeASR` API using Qwen3-ASR's native
   vLLM streaming implementation, then forced-aligns and pyannote-diarizes each
   bounded final epoch when the detected language is supported.
+- `qwen_worker` provides batched vLLM finalization and refinement with pyannote
+  speaker turns, sharing model loading with realtime. See [Qwen workers](docs/qwen-workers.md).
 - `nemotron_rtservice` exposes the same API using Nemotron 3.5 ASR's
   cache-aware streaming graph through the stable NeMo-Speech.cpp C ABI, with
   optional native Sortformer diarization and tenant-specific S3 speaker matching.
@@ -113,6 +115,7 @@ fallbacks, and resource bounds.
 | `whisperx_worker.refinement` | Kafka refinement | WhisperX `medium` by default (`WHISPERX_MODEL` is operator-configurable) plus its language-specific alignment model | `pyannote/speaker-diarization-3.1` by default; optional `pyannote/embedding` enrollment mapping | Speaker-aware refined windows while the session is in progress |
 | `whisperx_worker.finalizer` | Kafka completed-recording pipeline | Reuses the WhisperX ASR and language-alignment pipeline | Reuses the pyannote diarization and optional enrollment pipeline | Canonical full-session transcript with word timing where alignment succeeds |
 | `parakeet_worker.finalizer` | Kafka completed-recording pipeline | Parakeet TDT 0.6B v3 Q8 through NeMo-Speech.cpp; native word timing | Embedded Sortformer v2 Q8 | Independent final track with up to four anonymous speakers |
+| `qwen_worker.refinement` / `qwen_worker.finalizer` | Kafka audio windows / completed recordings | Pinned Qwen3-ASR-0.6B through vLLM, batched speaker-turn crops | Shared pinned pyannote pipeline | Anonymous speaker-labelled segments with crop timing; no word timing |
 | `recorder_worker` | Kafka and object storage | None | None | Model-free session WAV assembly and completion notification |
 
 Realtime clients select configured track IDs, not arbitrary model names,
@@ -141,6 +144,7 @@ session and tenant identifiers needed for correlation and isolation.
 - `proto/` and `proto_gen/`: protobuf contract and generated Python bindings
 - `rtservice/`: realtime gRPC service
 - `qwen_rtservice/`: isolated Qwen3-ASR/vLLM realtime service
+- `qwen_worker/`: batched Qwen pipeline and refinement/finalizer entrypoints
 - `nemotron_rtservice/`: isolated Nemotron/NeMo-Speech.cpp realtime service
 - `whisperx_worker/`: shared WhisperX pipeline, refinement and finalizer entrypoints
 - `recorder_worker/`: session recording worker
@@ -229,7 +233,7 @@ their consumers:
 
 ```bash
 docker buildx bake --load whisperx-worker finalizer-worker nemotron-rtservice parakeet-finalizer
-docker buildx bake --load rtservice recorder-worker qwen-rtservice
+docker buildx bake --load rtservice recorder-worker qwen-rtservice qwen-finalizer qwen-refinement
 ```
 
 Images use the `local` tag by default; set `TAG` to select another tag.
@@ -247,6 +251,8 @@ The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 - `ghcr.io/nanosamurai/xamurai-recorder-worker`
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
 - `ghcr.io/nanosamurai/xamurai-qwen-rtservice`
+- `ghcr.io/nanosamurai/xamurai-qwen-finalizer`
+- `ghcr.io/nanosamurai/xamurai-qwen-refinement`
 - `ghcr.io/nanosamurai/xamurai-nemotron-rtservice`
 - `ghcr.io/nanosamurai/xamurai-parakeet-finalizer`
 
