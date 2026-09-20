@@ -34,6 +34,8 @@ do not live in this service repository.
 - `nemo_speech_native` contains the shared NeMo-Speech.cpp bindings, runtime
   checks, verified model downloads and native Docker base for Nemotron and Parakeet.
 - `recorder_worker` stores session audio and emits `recordings.finished`.
+  [Ordered audio completion](docs/ordered-audio-end.md) finalizes normal Stop
+  immediately; the 30-second idle timeout remains an interruption fallback.
 - `xamurai_serving.finalization` contains the shared recording download,
   track selection, publication and replay loop. Each finalizer supplies its pipeline.
 - `xamurai_serving.refinement` and `refinement_runtime` share window buffering,
