@@ -30,6 +30,18 @@ target "qwen-rtservice" {
   tags = ["xamurai-qwen-rtservice:${TAG}"]
 }
 
+target "qwen-finalizer" {
+  dockerfile = "qwen_worker/Dockerfile.finalizer"
+  contexts = { qwen-rtservice = "target:qwen-rtservice" }
+  tags = ["xamurai-qwen-finalizer:${TAG}"]
+}
+
+target "qwen-refinement" {
+  dockerfile = "qwen_worker/Dockerfile.refinement"
+  contexts = { qwen-finalizer = "target:qwen-finalizer" }
+  tags = ["xamurai-qwen-refinement:${TAG}"]
+}
+
 target "nemotron-rtservice" {
   dockerfile = "nemotron_rtservice/Dockerfile"
   contexts = { nemo-speech-native = "target:nemo-speech-native" }

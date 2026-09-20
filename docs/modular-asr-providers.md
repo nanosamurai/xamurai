@@ -256,6 +256,10 @@ explicit stream teardown continue to release the whole state.
 
 ## Qwen/vLLM lifecycle
 
+Pinned model loading and pyannote diarization are shared in
+`xamurai_serving.qwen`. Realtime retains its native streaming state and epoch
+enrichment; offline workers can use the same artifacts with vLLM batching.
+
 The Qwen container starts only `python -m qwen_rtservice.server`. That process
 constructs `Qwen3ASRModel.LLM(...)`; the `qwen-asr` adapter initializes and
 owns vLLM in-process. There is no separate `vllm serve` command or sidecar.
