@@ -75,7 +75,7 @@ S3_PREFIX = os.getenv("S3_PREFIX", os.getenv("RECORDING_S3_PREFIX", "")).strip()
 if not S3_BUCKET:
     S3_BUCKET = os.getenv("RECORDING_S3_BUCKET", "").strip()
 
-# Idle timeout (seconds) after which we consider the session finished
+# Fallback for interrupted streams or producers without an ordered end marker.
 SESSION_IDLE_SEC = float(os.getenv("RECORDER_IDLE_SECONDS", "30.0"))
 
 DEFAULT_SR = 16000
@@ -478,6 +478,15 @@ def main():
                     tenant_id = getattr(audio_chunk, "tenant_id", "") or "default"
 
                     rec = sessions.get(session_id)
+                    if dict(msg.headers() or ()).get("x-audio-end") == b"true":
+                        if (rec is not None and not audio_chunk.pcm16_le
+                                and msg.key() == session_id.encode("utf-8")
+                                and tenant_id == rec.tenant_id):
+                            logger.info("Ordered audio end received for session %s", session_id)
+                            finalize_session(session_id, rec, producer)
+                            del sessions[session_id]
+                        consumer.commit(msg, asynchronous=True)
+                        continue
                     if rec is None:
                         writer = make_writer_for_session(session_id, tenant_id, sr)
                         rec = SessionRecording(

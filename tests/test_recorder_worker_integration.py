@@ -1,162 +1,87 @@
-# tests/test_recorder_worker_integration.py
-
+"""Exercise the recorder process against real Kafka, including ordered completion."""
 import os
-import threading
+import subprocess
+import sys
 import time
-from pathlib import Path
-from typing import List
+import uuid
+import wave
 
-import numpy as np
 import pytest
-from confluent_kafka import Producer, Consumer
+from confluent_kafka import Consumer, Producer
 
+from proto_gen import stream_pb2 as pb
 from tests.conftest import _ensure_topics
 
-from proto_gen import stream_pb2  # or from proto import stream_pb2 if that's your layout
 
-SR = 16000  # must match AudioChunk.sample_rate your system uses
-
-
-def _make_producer(bootstrap: str) -> Producer:
-    return Producer(
-        {
-            "bootstrap.servers": bootstrap,
-            "client.id": "test-recorder-producer",
-            "compression.type": "none",
-            "linger.ms": 0,
-        }
-    )
-
-
-@pytest.mark.timeout(300)
 @pytest.mark.integration
-def test_recorder_worker_records_wav_and_emits_finished(kafka_bootstrap: str):
-    """
-    End-to-end-ish test for recorder_worker:
-
-    - Uses real Kafka (kafka_bootstrap fixture).
-    - Configures recorder_worker to use 'fs' backend.
-    - Starts recorder_worker.main() in a background thread.
-    - Produces one AudioChunk to the audio topic.
-    - Asserts that a .wav file appears in the default 'recordings/' directory.
-    """
-
-    # --------------------- 1) Configure env & paths --------------------- #
-    # IMPORTANT: keep recorder tests isolated from whisperx tests.
-    # whisperx integration tests also use kafka_bootstrap and consume audio from
-    # their own topic(s). Using a shared topic causes cross-test interference
-    # (e.g. whisperx consuming silence and crashing on VAD=0 segments).
-    topic_audio = "audio.raw.test.recorder"
-    topic_finished = "recordings.finished.test"
-
-    os.environ["KAFKA_BOOTSTRAP"] = kafka_bootstrap
-    os.environ["KAFKA_TOPIC_AUDIO"] = topic_audio
-    os.environ["KAFKA_TOPIC_RECORDING_FINISHED"] = topic_finished
-
-    # Force local backend (your worker already logs "backend=local")
-    os.environ["RECORDER_STORAGE_BACKEND"] = "fs"
-
-    # The worker clearly uses a default 'recordings/' directory.
-    # We'll align the test with that instead of trying to override it.
-    output_dir = Path("recordings")
-    output_dir.mkdir(exist_ok=True)
-
-    session_id = "recorder-integration-1"
-
-    # Clean old files for this session so we don't pick up stale ones
-    for f in output_dir.glob(f"{session_id}_*.wav"):
+@pytest.mark.timeout(90)
+@pytest.mark.parametrize("end_marker", [True, False])
+def test_recorder_completion(kafka_bootstrap, tmp_path, end_marker):
+    token = uuid.uuid4().hex
+    topic, finished_topic = f"audio.recorder.{token}", f"finished.recorder.{token}"
+    _ensure_topics(kafka_bootstrap, [topic, finished_topic])
+    env = dict(os.environ, KAFKA_BOOTSTRAP=kafka_bootstrap, KAFKA_TOPIC_AUDIO=topic,
+               KAFKA_TOPIC_RECORDING_FINISHED=finished_topic, KAFKA_GROUP_ID_RECORDER=token,
+               RECORDING_STORAGE_BACKEND="local", RECORDING_DIR=str(tmp_path),
+               RECORDER_IDLE_SECONDS="30" if end_marker else "3",
+               PYTHONPATH=os.pathsep.join(sys.path), OTEL_SDK_DISABLED="true")
+    consumer = Consumer({"bootstrap.servers": kafka_bootstrap, "group.id": token,
+                         "auto.offset.reset": "earliest", "enable.auto.commit": False})
+    consumer.subscribe([finished_topic])
+    producer = Producer({"bootstrap.servers": kafka_bootstrap, "enable.idempotence": True})
+    pcm = bytes(range(256)) * 125
+    chunk = pb.AudioChunk(session_id=token, tenant_id="tenant", sample_rate=16000, lang="en")
+    headers = [("x-final-tracks", b"qwen"), ("x-store-recording", b"false")]
+    with (tmp_path / "worker.log").open("w") as log:
+        worker = subprocess.Popen([sys.executable, "-m", "recorder_worker.recorder_worker"],
+                                  env=env, stdout=log, stderr=log)
         try:
-            f.unlink()
-        except OSError:
-            pass
-
-    # --------------------- 2) Ensure topics exist ------------------------- #
-    _ensure_topics(kafka_bootstrap, [topic_audio, topic_finished])
-
-    # --------------------- 3) Import & start worker ---------------------- #
-    import importlib
-    from recorder_worker import recorder_worker  # type: ignore
-
-    importlib.reload(recorder_worker)
-
-    worker_thread = threading.Thread(
-        target=recorder_worker.main,
-        name="recorder-worker-main",
-        daemon=True,
-    )
-    worker_thread.start()
-
-    # Give the worker a moment to connect & subscribe
-    time.sleep(2.0)
-
-    # --------------------- 3) Produce one AudioChunk --------------------- #
-    # 0.5 s of silence at 16kHz
-    n_samples = int(0.5 * SR)
-    pcm = np.zeros(n_samples, dtype="<i2")
-
-    chunk = stream_pb2.AudioChunk(
-        session_id=session_id,
-        t0_ns=0,
-        pcm16_le=pcm.tobytes(),
-        sample_rate=SR,
-        lang="en",
-    )
-
-    producer = _make_producer(kafka_bootstrap)
-    producer.produce(
-        topic=topic_audio,
-        key=session_id.encode("utf-8"),
-        value=chunk.SerializeToString(),
-    )
-    producer.flush(10_000)
-
-    # --------------------- 4) Wait for recorder & assert WAV -------------- #
-    deadline = time.time() + 20.0
-
-    wav_files: List[Path] = []
-    while time.time() < deadline:
-        wav_files = list(output_dir.glob(f"{session_id}_*.wav"))
-        if wav_files:
-            break
-        time.sleep(1.5)
-
-    assert wav_files, "Recorder worker did not produce any .wav files in 'recordings/'"
-
-    out_path = wav_files[0]
-    assert out_path.stat().st_size > 0, "Recorded WAV file is empty"
-
-    # --------------------- 5) Assert RecordingFinished event -------------- #
-    consumer = Consumer(
-        {
-            "bootstrap.servers": kafka_bootstrap,
-            "group.id": "test-recorder-finished-consumer",
-            "auto.offset.reset": "earliest",
-            "enable.auto.commit": True,
-        }
-    )
-    consumer.subscribe([topic_finished])
-
-    finished: stream_pb2.RecordingFinished | None = None
-    deadline2 = time.time() + 30.0
-
-    try:
-        while time.time() < deadline2:
-            msg = consumer.poll(2.0)
-            if msg is None:
-                continue
-            if msg.error():
-                continue
-            ev = stream_pb2.RecordingFinished()
-            ev.ParseFromString(msg.value())
-            if ev.session_id != session_id:
-                continue
-            finished = ev
-            break
-    finally:
-        consumer.close()
-
-    assert finished is not None, "Did not receive RecordingFinished for this session"
-    assert finished.session_id == session_id
-    assert finished.recording_url.startswith("file://")
-    assert finished.sample_rate == SR
-    assert finished.duration_s > 0.0
+            for start in range(0, len(pcm), 6400):
+                chunk.pcm16_le = pcm[start:start + 6400]
+                producer.produce(topic, key=token, value=chunk.SerializeToString(), headers=headers)
+                if start == 0 and end_marker:
+                    invalid = pb.AudioChunk(session_id=token, tenant_id="foreign", sample_rate=16000)
+                    producer.produce(topic, key=token, value=invalid.SerializeToString(),
+                                     headers=headers + [("x-audio-end", b"true")])
+                    invalid.tenant_id = "tenant"
+                    producer.produce(topic, key="wrong-key", value=invalid.SerializeToString(),
+                                     headers=headers + [("x-audio-end", b"true")])
+            chunk.pcm16_le = b""
+            marker = chunk.SerializeToString()
+            if end_marker:
+                producer.produce(topic, key=token, value=marker,
+                                 headers=headers + [("x-audio-end", b"true")])
+            assert producer.flush(10) == 0
+            sent = time.monotonic()
+            deadline = sent + (15 if end_marker else 20)
+            message = None
+            while time.monotonic() < deadline:
+                assert worker.poll() is None, (tmp_path / "worker.log").read_text()
+                message = consumer.poll(.1)
+                if message is not None:
+                    assert not message.error(), message.error()
+                    break
+            assert message is not None, (tmp_path / "worker.log").read_text()
+            elapsed = time.monotonic() - sent
+            if not end_marker:
+                assert elapsed >= 3
+            event = pb.RecordingFinished.FromString(message.value())
+            assert event.session_id == token and message.key() == token.encode()
+            assert (event.sample_rate, event.duration_s, event.tenant_id) == (16000, 1, "tenant")
+            assert dict(message.headers())["x-final-tracks"] == b"qwen"
+            assert dict(message.headers())["x-store-recording"] == b"false"
+            with wave.open(str(next(tmp_path.glob("*.wav"))), "rb") as wav:
+                assert wav.readframes(wav.getnframes()) == pcm
+            if end_marker:
+                # Repeated markers and markers for an empty session must create no recording.
+                producer.produce(topic, key=token, value=marker, headers=[("x-audio-end", b"true")])
+                chunk.session_id = "empty-" + token
+                producer.produce(topic, key=chunk.session_id, value=chunk.SerializeToString(),
+                                 headers=[("x-audio-end", b"true")])
+                assert producer.flush(10) == 0
+                assert consumer.poll(2) is None
+                assert len(list(tmp_path.glob("*.wav"))) == 1
+        finally:
+            worker.terminate()
+            worker.wait(timeout=10)
+            consumer.close()

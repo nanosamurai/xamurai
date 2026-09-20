@@ -157,7 +157,8 @@ def kafka_bootstrap() -> str:
 
     external = os.getenv("KAFKA_BOOTSTRAP")
     if external:
-        return _normalize_bootstrap(external)
+        yield _normalize_bootstrap(external)
+        return
 
     try:
         from testcontainers.kafka import KafkaContainer
