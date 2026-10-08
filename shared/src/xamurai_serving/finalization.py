@@ -458,12 +458,15 @@ def main(transcribe, *, model, decoupled=False, stop_event=None, on_poll=None, i
     producer = make_producer()
     logger.info("Final pipeline ready: track=%s model=%s", TRACK_ID, model)
     process = lambda msg: process_message(msg, producer=producer, transcribe=transcribe, model=model)
+    def selected(msg):
+        controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
+        return controls.want_final and TRACK_ID in controls.final_tracks
     try:
         if decoupled:
             from xamurai_serving.finalization_runtime import run_decoupled
             run_decoupled(consumer=consumer, topic=TOPIC_RECORDING_FINISHED,
                           process=process, cleanup=_delete_recording_url,
-                          stop_event=stop_event, on_poll=on_poll)
+                          stop_event=stop_event, on_poll=on_poll, selected=selected)
         else:
             consumer.subscribe([TOPIC_RECORDING_FINISHED])
             while stop_event is None or not stop_event.is_set():

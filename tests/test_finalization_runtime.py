@@ -72,3 +72,13 @@ def test_failure_never_deletes_recording(failure):
                       cleanup=deleted.append, stop_event=stop)
     assert consumer.commits == []
     assert deleted == []
+
+
+def test_unselected_message_skips_processing_without_pausing():
+    stop = Event()
+    consumer = Consumer(stop)
+    run_decoupled(consumer=consumer, topic="recordings", selected=lambda _m: False,
+                  process=lambda _m: pytest.fail("unselected inference"),
+                  cleanup=lambda _url: pytest.fail("unselected deletion"), stop_event=stop)
+    assert consumer.commits == [4]
+    assert not consumer.paused

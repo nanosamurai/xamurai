@@ -5,7 +5,8 @@ from threading import Event
 from confluent_kafka import KafkaException, TopicPartition
 
 
-def run_decoupled(*, consumer, topic, process, cleanup, stop_event=None, on_poll=None):
+def run_decoupled(*, consumer, topic, process, cleanup, stop_event=None, on_poll=None,
+                  selected=None):
     stop_event = stop_event or Event()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="finalization")
     running = None
@@ -42,6 +43,9 @@ def run_decoupled(*, consumer, topic, process, cleanup, stop_event=None, on_poll
                     # next pause. Rewind it; never skip or commit that record.
                     consumer.seek(TopicPartition(msg.topic(), msg.partition(), msg.offset()))
                 else:
+                    if selected is not None and not selected(msg):
+                        consumer.commit(msg, asynchronous=False)
+                        continue
                     key = (msg.topic(), msg.partition())
                     running = (msg, epochs.get(key, 0), executor.submit(process, msg))
             if running and running[2].done():

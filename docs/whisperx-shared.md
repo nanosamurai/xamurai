@@ -41,7 +41,9 @@ track is opt-in: selection must name `whisperx-shared` for the desired stage.
 No existing `whisperx` or `kserve-whisperx` offsets or sessions are migrated.
 
 Finalization keeps polling while inference and output acknowledgment happen on
-a processing thread. The poll thread commits only after acknowledgment, then
+a processing thread. Unselected records are skipped on the poll thread without
+pausing intake or occupying the processing slot. The poll thread commits selected
+records only after acknowledgment, then
 performs optional recording deletion. Revocation/loss invalidates completion
 ownership even if the same partition is assigned again. Replay can duplicate
 publication; existing persistence remains idempotent. Refinement retains its
@@ -83,3 +85,10 @@ and partial batches, language isolation, long-finalization fairness, nested mode
 operations, owner failure, polling during inference and commit/deletion fencing.
 Nanodeploy owns the optional Compose overlay and the real shared-track smoke.
 Use its `docs/whisperx-shared.md` for GPU execution and deployment choices.
+
+For native/shared ASR parity, run
+`WHISPERX_SHARED_GPU_TEST=1 pytest -q tests/test_whisperx_shared_integration.py`
+inside the pinned GPU worker image with this checkout and model cache mounted.
+The test compares text/chunk timestamps against native WhisperX using the same
+model, proves a mixed batch, and checks that results stay with their request.
+Stop the idle combined worker during this test to avoid loading an extra bundle.
