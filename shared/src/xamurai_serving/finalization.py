@@ -331,167 +331,155 @@ def _produce_with_ack(
 # Main loop
 # --------------------------------------------------------------------------- #
 
-def main(transcribe, *, model):
-    """Consume selected recordings using a pipeline returning text and segment dictionaries."""
-    setup_logging(default_level="INFO")
-    # Initialize OTEL SDK (no-op if deps missing)
-    setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "finalizer-worker"))
+def process_message(msg, *, producer, transcribe, model):
+    """Publish a final transcript and defer recording deletion until commit."""
+    # Extract upstream trace context from recordings.finished.
+    with extracted_context_from_headers(msg.headers()):
+        span_cm = None
+        if trace is not None:
+            tracer = trace.get_tracer("finalizer_worker")
+            span_cm = tracer.start_as_current_span("finalizer.session")
+            span_cm.__enter__()
 
-    logger.info("Starting finalizer_worker")
+        wav_path = None
+        try:
+            rf = stream_pb2.RecordingFinished()
+            rf.ParseFromString(msg.value())
 
-    logger.info("Final pipeline ready: track=%s model=%s", TRACK_ID, model)
+            controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
+            if not controls.want_final or TRACK_ID not in controls.final_tracks:
+                logger.info("Skipping unselected final track: session=%s track=%s", rf.session_id, TRACK_ID)
+                return None
+            if len(controls.final_tracks) > 1 and not controls.store_recording:
+                raise ValueError("Multiple final tracks require store_recording=true")
 
+            logger.info(
+                "Processing RecordingFinished: session=%s url=%s dur=%.2fs sr=%d lang=%s tenant=%s",
+                rf.session_id,
+                rf.recording_url,
+                rf.duration_s,
+                rf.sample_rate,
+                rf.lang,
+                rf.tenant_id,
+            )
+
+            # Add consistent attributes for Tempo/Grafana filtering.
+            if trace is not None:
+                try:
+                    span = trace.get_current_span()
+                    if hasattr(span, "set_attribute"):
+                        span.set_attribute("nanosamurai.session_id", rf.session_id)
+                        if rf.tenant_id:
+                            span.set_attribute("nanosamurai.tenant_id", rf.tenant_id)
+                        span.set_attribute("nanosamurai.duration_s", float(rf.duration_s))
+                        span.set_attribute("nanosamurai.sample_rate", int(rf.sample_rate))
+                        if rf.lang:
+                            span.set_attribute("nanosamurai.lang", rf.lang)
+                except Exception:
+                    pass
+
+            wav_path = _load_local_wav_from_url(rf.recording_url)
+
+            full_text, segments = transcribe(
+                wav_path,
+                tenant=(rf.tenant_id or None),
+                lang=(rf.lang or None),
+            )
+
+            transcript = stream_pb2.SessionTranscript(
+                session_id=rf.session_id,
+                recording_url=rf.recording_url,
+                lang=rf.lang,
+                duration_s=rf.duration_s,
+                full_text=full_text,
+                tenant_id=rf.tenant_id,
+                created_at_ns=rf.created_at_ns,
+                track_id=TRACK_ID,
+            )
+
+            for seg_in in segments:
+                seg = transcript.segments.add()
+                seg.start_s = float(seg_in.get("start_s", 0.0))
+                seg.end_s = float(seg_in.get("end_s", 0.0))
+                seg.text = str(seg_in.get("text", "") or "")
+                seg.speaker = str(seg_in.get("speaker", "") or "")
+                for w_in in (seg_in.get("words") or []):
+                    w = seg.words.add()
+                    w.start_s = float(w_in.get("start_s", 0.0))
+                    w.end_s = float(w_in.get("end_s", 0.0))
+                    w.text = str(w_in.get("text", "") or "")
+
+            # Publish to Kafka; transcript storage belongs to Persistor/Postgres.
+            # IMPORTANT: commit the input offset only after Kafka acked this publish.
+            try:
+                if trace is not None:
+                    try:
+                        span = trace.get_current_span()
+                        if hasattr(span, "add_event"):
+                            span.add_event("kafka.produce transcripts.final")
+                    except Exception:
+                        pass
+                _produce_with_ack(
+                    producer,
+                    topic=TOPIC_TRANSCRIPTS_FINAL,
+                    key=rf.session_id.encode("utf-8"),
+                    value=transcript.SerializeToString(),
+                    headers=with_current_trace_context([("model", model.encode("utf-8"))]),
+                    timeout_s=FINALIZER_PRODUCE_ACK_TIMEOUT_S,
+                    retries=FINALIZER_PRODUCE_RETRIES,
+                    base_backoff_s=FINALIZER_PRODUCE_RETRY_BACKOFF_S,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to publish final transcript for session=%s; will NOT commit input offset.",
+                    rf.session_id,
+                )
+                # Restart from the last committed input; never commit past this failure.
+                raise
+
+            return rf.recording_url if not controls.store_recording else None
+
+        finally:
+            if wav_path and rf.recording_url.startswith("s3://"):
+                try:
+                    os.unlink(wav_path)
+                except OSError:
+                    logger.warning("Failed to remove temporary recording download", exc_info=True)
+            if span_cm is not None:
+                span_cm.__exit__(None, None, None)
+
+
+def main(transcribe, *, model, decoupled=False, stop_event=None, on_poll=None, initialize=True):
+    """Standalone processing or poll-responsive shared-worker mode."""
+    if initialize:
+        setup_logging(default_level="INFO")
+        setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", "finalizer-worker"))
     consumer = make_consumer()
     producer = make_producer()
-    consumer.subscribe([TOPIC_RECORDING_FINISHED])
-
+    logger.info("Final pipeline ready: track=%s model=%s", TRACK_ID, model)
+    process = lambda msg: process_message(msg, producer=producer, transcribe=transcribe, model=model)
     try:
-        while True:
-            msg = consumer.poll(1.0)
-            if msg is None:
-                continue
-            if msg.error():
-                logger.error("Kafka error: %s", msg.error())
-                raise KafkaException(msg.error())
-
-            # Extract upstream trace context from recordings.finished.
-            with extracted_context_from_headers(msg.headers()):
-                span_cm = None
-                if trace is not None:
-                    tracer = trace.get_tracer("finalizer_worker")
-                    span_cm = tracer.start_as_current_span("finalizer.session")
-                    span_cm.__enter__()
-
-                wav_path = None
-                try:
-                    rf = stream_pb2.RecordingFinished()
-                    rf.ParseFromString(msg.value())
-
-                    controls = parse_stream_controls_from_kafka_headers(msg.headers() or None)
-                    if not controls.want_final or TRACK_ID not in controls.final_tracks:
-                        logger.info("Skipping unselected final track: session=%s track=%s", rf.session_id, TRACK_ID)
-                        consumer.commit(msg, asynchronous=False)
-                        continue
-                    if len(controls.final_tracks) > 1 and not controls.store_recording:
-                        raise ValueError("Multiple final tracks require store_recording=true")
-
-                    logger.info(
-                        "Processing RecordingFinished: session=%s url=%s dur=%.2fs sr=%d lang=%s tenant=%s",
-                        rf.session_id,
-                        rf.recording_url,
-                        rf.duration_s,
-                        rf.sample_rate,
-                        rf.lang,
-                        rf.tenant_id,
-                    )
-
-                    # Add consistent attributes for Tempo/Grafana filtering.
-                    if trace is not None:
-                        try:
-                            span = trace.get_current_span()
-                            if hasattr(span, "set_attribute"):
-                                span.set_attribute("nanosamurai.session_id", rf.session_id)
-                                if rf.tenant_id:
-                                    span.set_attribute("nanosamurai.tenant_id", rf.tenant_id)
-                                span.set_attribute("nanosamurai.duration_s", float(rf.duration_s))
-                                span.set_attribute("nanosamurai.sample_rate", int(rf.sample_rate))
-                                if rf.lang:
-                                    span.set_attribute("nanosamurai.lang", rf.lang)
-                        except Exception:
-                            pass
-
-                    wav_path = _load_local_wav_from_url(rf.recording_url)
-
-                    full_text, segments = transcribe(
-                        wav_path,
-                        tenant=(rf.tenant_id or None),
-                        lang=(rf.lang or None),
-                    )
-
-                    transcript = stream_pb2.SessionTranscript(
-                        session_id=rf.session_id,
-                        recording_url=rf.recording_url,
-                        lang=rf.lang,
-                        duration_s=rf.duration_s,
-                        full_text=full_text,
-                        tenant_id=rf.tenant_id,
-                        created_at_ns=rf.created_at_ns,
-                        track_id=TRACK_ID,
-                    )
-
-                    for seg_in in segments:
-                        seg = transcript.segments.add()
-                        seg.start_s = float(seg_in.get("start_s", 0.0))
-                        seg.end_s = float(seg_in.get("end_s", 0.0))
-                        seg.text = str(seg_in.get("text", "") or "")
-                        seg.speaker = str(seg_in.get("speaker", "") or "")
-                        for w_in in (seg_in.get("words") or []):
-                            w = seg.words.add()
-                            w.start_s = float(w_in.get("start_s", 0.0))
-                            w.end_s = float(w_in.get("end_s", 0.0))
-                            w.text = str(w_in.get("text", "") or "")
-
-                    # Publish to Kafka; transcript storage belongs to Persistor/Postgres.
-                    # IMPORTANT: commit the input offset only after Kafka acked this publish.
-                    try:
-                        if trace is not None:
-                            try:
-                                span = trace.get_current_span()
-                                if hasattr(span, "add_event"):
-                                    span.add_event("kafka.produce transcripts.final")
-                            except Exception:
-                                pass
-                        _produce_with_ack(
-                            producer,
-                            topic=TOPIC_TRANSCRIPTS_FINAL,
-                            key=rf.session_id.encode("utf-8"),
-                            value=transcript.SerializeToString(),
-                            headers=with_current_trace_context([("model", model.encode("utf-8"))]),
-                            timeout_s=FINALIZER_PRODUCE_ACK_TIMEOUT_S,
-                            retries=FINALIZER_PRODUCE_RETRIES,
-                            base_backoff_s=FINALIZER_PRODUCE_RETRY_BACKOFF_S,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Failed to publish final transcript for session=%s; will NOT commit input offset.",
-                            rf.session_id,
-                        )
-                        # Restart from the last committed input; never commit past this failure.
-                        raise
-
-                    # If commit fails, we may reprocess (at-least-once). That's preferred over
-                    # committing before the output exists.
-                    try:
-                        consumer.commit(msg, asynchronous=False)
-                    except Exception:
-                        logger.exception(
-                            "Offset commit failed after successful publish (session=%s). "
-                            "Worker may reprocess this RecordingFinished.",
-                            rf.session_id,
-                        )
-                        raise
-
-                    # Best-effort deletion after successful publish + commit.
-                    if not controls.store_recording:
-                        _delete_recording_url(rf.recording_url)
-
-                finally:
-                    if wav_path and rf.recording_url.startswith("s3://"):
-                        try:
-                            os.unlink(wav_path)
-                        except OSError:
-                            logger.warning("Failed to remove temporary recording download", exc_info=True)
-                    if span_cm is not None:
-                        span_cm.__exit__(None, None, None)
-
+        if decoupled:
+            from xamurai_serving.finalization_runtime import run_decoupled
+            run_decoupled(consumer=consumer, topic=TOPIC_RECORDING_FINISHED,
+                          process=process, cleanup=_delete_recording_url,
+                          stop_event=stop_event, on_poll=on_poll)
+        else:
+            consumer.subscribe([TOPIC_RECORDING_FINISHED])
+            while stop_event is None or not stop_event.is_set():
+                msg = consumer.poll(1.0)
+                if on_poll:
+                    on_poll()
+                if msg is None:
+                    continue
+                if msg.error():
+                    raise KafkaException(msg.error())
+                delete_url = process(msg)
+                consumer.commit(msg, asynchronous=False)
+                if delete_url:
+                    _delete_recording_url(delete_url)
     except KeyboardInterrupt:
-        logger.info("Stopping finalizer_worker (KeyboardInterrupt)")
+        logger.info("Stopping finalizer_worker")
     finally:
-        try:
-            consumer.close()
-        except Exception:
-            pass
-        try:
-            producer.flush(2.0)
-        except Exception:
-            pass
+        consumer.close()
+        producer.flush(2.0)

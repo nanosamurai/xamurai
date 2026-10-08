@@ -123,10 +123,11 @@ def make_producer():
     return Producer(cfg)
 
 
-def main(transcribe, *, model):
+def main(transcribe, *, model, stop_event=None, on_poll=None, initialize=True):
     """Consume selected audio using a warm pipeline returning text and segment dictionaries."""
-    setup_logging(default_level="INFO")
-    setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", f"{TRACK_ID}-refinement"))
+    if initialize:
+        setup_logging(default_level="INFO")
+        setup_otel(service_name=os.getenv("OTEL_SERVICE_NAME", f"{TRACK_ID}-refinement"))
     logger.info("Refinement pipeline ready: track=%s model=%s", TRACK_ID, model)
     producer = make_producer()
     run_decoupled(
@@ -135,4 +136,5 @@ def main(transcribe, *, model):
         parse_audio_chunk=stream_pb2.AudioChunk.FromString,
         run_inference_and_publish=lambda job: _run_inference_and_publish(
             job=job, producer=producer, transcribe=transcribe, model=model),
+        stop_event=stop_event, on_poll=on_poll,
     )

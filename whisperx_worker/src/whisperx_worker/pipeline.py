@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, TypedDict
 
 import numpy as np
 import soundfile as sf
+from whisperx_worker.execution import model_operation, transcribe as execute_transcribe
 
 
 # NOTE: torch is not installed in lightweight unit-test environments.
@@ -195,6 +196,7 @@ def _resample_linear(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     return np.interp(t_new, t_old, x).astype(np.float32)
 
 
+@model_operation
 def _init_diarization_models() -> None:
     """Best-effort initialization of diarization + embedding models."""
 
@@ -413,6 +415,7 @@ def _init_diarization_models() -> None:
             logger.info("Legacy enrollment loaded: %s", ", ".join(sorted(_LEGACY_ENROLLED.keys())))
 
 
+@model_operation
 def _embed_wave(wave: np.ndarray) -> Optional[np.ndarray]:
     if _EMBED_INFER is None or wave.size < int(0.25 * SR):
         return None
@@ -434,6 +437,7 @@ def _embed_wave(wave: np.ndarray) -> Optional[np.ndarray]:
         return None
 
 
+@model_operation
 def _get_enrolled_embeddings_for_tenant(tenant: Optional[str]) -> Dict[str, np.ndarray]:
     t = (tenant or "default").strip() or "default"
     if _ENROLL_CACHE is not None and t:
@@ -475,6 +479,7 @@ def _map_embedding_to_enrolled_label(emb: np.ndarray, enrolled: Dict[str, np.nda
     return ""
 
 
+@model_operation
 def _diarize_audio(audio: np.ndarray) -> List[DiarizationSegment]:
     if _DIAR_PIPE is None:
         return []
@@ -571,9 +576,9 @@ def _transcribe_audio_array(
 
     try:
         if lang:
-            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
+            result = execute_transcribe(_WHISPERX_MODEL, audio, batch_size=16, language=lang)
         else:
-            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
+            result = execute_transcribe(_WHISPERX_MODEL, audio, batch_size=16)
     except IndexError:
         # WhisperX raises IndexError when no speech is detected in some versions.
         return "", []
@@ -830,13 +835,13 @@ def run_whisperx_words(
 
     if lang:
         try:
-            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16, language=lang)
+            result = execute_transcribe(_WHISPERX_MODEL, audio, batch_size=16, language=lang)
         except IndexError:
             logger.info("WhisperX: no active speech detected (lang=%s)", lang)
             return "", []
     else:
         try:
-            result = _WHISPERX_MODEL.transcribe(audio, batch_size=16)
+            result = execute_transcribe(_WHISPERX_MODEL, audio, batch_size=16)
         except IndexError:
             logger.info("WhisperX: no active speech detected")
             return "", []
@@ -869,15 +874,7 @@ def run_whisperx_words(
         return from_asr_segments()
 
     try:
-        _ensure_align_model(detected_lang)
-        aligned = whisperx.align(
-            asr_segments,
-            _ALIGN_MODEL,
-            _ALIGN_METADATA,
-            audio,
-            _WHISPERX_DEVICE,
-            return_char_alignments=False,
-        )
+        aligned = _align_segments(asr_segments, audio, detected_lang)
 
         aligned_segments = aligned.get("segments", []) or []
 
@@ -1050,6 +1047,7 @@ def _ensure_whisperx_imported() -> None:
     whisperx = importlib.import_module("whisperx")
 
 
+@model_operation
 def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     if torch is None:
         raise RuntimeError("torch is required for whisperx_worker inference but is not installed")
@@ -1097,6 +1095,13 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     _ALIGN_METADATA = None
 
     logger.info("WhisperX ASR model initialized successfully on %s", _WHISPERX_DEVICE)
+
+
+@model_operation
+def _align_segments(segments, audio, language):
+    _ensure_align_model(language)
+    return whisperx.align(segments, _ALIGN_MODEL, _ALIGN_METADATA, audio,
+                          _WHISPERX_DEVICE, return_char_alignments=False)
 
 
 def _ensure_align_model(language_code: str) -> None:
