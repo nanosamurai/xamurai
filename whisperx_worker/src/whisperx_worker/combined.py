@@ -30,11 +30,17 @@ def main():
     stop = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stop.set())
-    # Warm common models once before either consumer starts.
+    alignment_language = os.getenv("WHISPERX_SHARED_ALIGNMENT_LANGUAGE", "en").strip().lower()
+    if not alignment_language:
+        raise ValueError("WHISPERX_SHARED_ALIGNMENT_LANGUAGE must name a language")
+    # Warm models before consumers or readiness; the first finalization must not
+    # download the configured aligner while holding the shared model executor.
     pipeline._init_whisperx()
     pipeline._init_diarization_models()
     if pipeline._ENABLE_DIARIZATION and pipeline._DIAR_PIPE is None:
         raise RuntimeError("Shared WhisperX diarization did not initialize")
+    pipeline._ensure_align_model(alignment_language)
+    logger.info("Shared WhisperX startup models ready: alignment_language=%s", alignment_language)
     owner = ModelOwner(WhisperXBackend(pipeline._WHISPERX_MODEL),
                        batch_size=int(os.getenv("WHISPERX_SHARED_BATCH_SIZE", "16")),
                        wait_ms=float(os.getenv("WHISPERX_SHARED_BATCH_WAIT_MS", "20")))

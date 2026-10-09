@@ -69,6 +69,7 @@ for independent scaling and failure isolation.
 | `KAFKA_GROUP_ID_FINALIZER` | `finalizer.<track>` | Finalization consumer group |
 | `WHISPERX_SHARED_BATCH_SIZE` | `16` | Maximum ASR chunks per call, 1–16 |
 | `WHISPERX_SHARED_BATCH_WAIT_MS` | `20` | Partial-batch collection interval, 0–1000 ms |
+| `WHISPERX_SHARED_ALIGNMENT_LANGUAGE` | `en` | Alignment model loaded before readiness and consumers start |
 | `WHISPERX_SHARED_OPERATION_TIMEOUT_S` | `1800` | Maximum running model-operation time |
 | `WHISPERX_SHARED_DRAIN_SECONDS` | `30` | Shutdown drain limit |
 | `WHISPERX_SHARED_HEALTH_FILE` | `/tmp/whisperx-shared.json` | Local supervisor heartbeat and batch counts |
@@ -78,11 +79,21 @@ are reused. Combined mode requires configured diarization to initialize before
 starting consumers; `WHISPERX_ENABLE_DIARIZATION=false` explicitly disables it.
 Batch logs contain counts and stages, not audio or transcript content.
 
+Combined mode also loads the configured alignment model during startup. Its
+download and initialization finish before consumers or the health heartbeat
+start; failure leaves the worker unready. This removes the first-use download
+from jobs using that language. Other languages remain lazy and replace the
+single resident aligner. Standalone entrypoints keep their existing behavior.
+Set `TORCH_HOME` to a persistent cache directory to retain Torch checkpoints
+across container recreation; the shared Nanodeploy overlay configures this.
+
 ## Validation
 
 Run `pytest -q -m 'not integration'` for lightweight regressions, including mixed
 and partial batches, language isolation, long-finalization fairness, nested model
 operations, owner failure, polling during inference and commit/deletion fencing.
+Startup tests verify that alignment loading blocks consumers/readiness and that
+a failed download prevents serving.
 Nanodeploy owns the optional Compose overlay and the real shared-track smoke.
 Use its `docs/whisperx-shared.md` for GPU execution and deployment choices.
 
