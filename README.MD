@@ -23,10 +23,12 @@ do not live in this service repository.
 - `nemotron_rtservice` exposes the same API using Nemotron 3.5 ASR's
   cache-aware streaming graph through the stable NeMo-Speech.cpp C ABI, with
   optional native Sortformer diarization and tenant-specific S3 speaker matching.
-- `whisperx_worker` contains one WhisperX pipeline and two entrypoints:
+- `whisperx_worker` contains one WhisperX pipeline with separate or combined workers:
   `whisperx_worker.refinement` reads audio windows from `audio.raw` and emits
   `transcripts.refined`; `whisperx_worker.finalizer` reads completed recordings
-  and emits `transcripts.final`. Both use pyannote and optional enrolled names.
+  and emits `transcripts.final`. The optional `whisperx-shared` track runs both
+  stages in one process, sharing model memory and ASR batches. All use pyannote
+  and optional enrolled names. See [WhisperX tracks and setup](docs/whisperx-shared.md).
 - `parakeet_worker` contains the Parakeet TDT 0.6B v3 pipeline and
   refinement/finalizer entrypoints, with embedded Sortformer and native word timing.
   It supports up to four anonymous speakers per window or recording. See
@@ -117,6 +119,7 @@ fallbacks, and resource bounds.
 | `nemotron_rtservice` | Realtime gRPC | Fixed `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF through NeMo-Speech.cpp | Optional Sortformer v2 Q8; WeSpeaker ONNX for S3 enrollment | Native partials; optionally timed, speaker-labelled finals; no public word-timestamp claim |
 | `whisperx_worker.refinement` | Kafka refinement | WhisperX `medium` by default (`WHISPERX_MODEL` is operator-configurable) plus its language-specific alignment model | `pyannote/speaker-diarization-3.1` by default; optional `pyannote/embedding` enrollment mapping | Speaker-aware refined windows while the session is in progress |
 | `whisperx_worker.finalizer` | Kafka completed-recording pipeline | Reuses the WhisperX ASR and language-alignment pipeline | Reuses the pyannote diarization and optional enrollment pipeline | Canonical full-session transcript with word timing where alignment succeeds |
+| `whisperx_worker.combined` | Kafka refinement and finalization (`whisperx-shared`) | One shared Whisper ASR model; preloaded language aligners can run concurrently | Shared pyannote diarization and optional enrollment pipeline | Same outputs as the separate WhisperX workers, with shared memory, batching and capacity |
 | `parakeet_worker.finalizer` | Kafka completed-recording pipeline | Parakeet TDT 0.6B v3 Q8 through NeMo-Speech.cpp; native word timing | Embedded Sortformer v2 Q8 | Independent final track with up to four anonymous speakers |
 | `qwen_worker.refinement` / `qwen_worker.finalizer` | Kafka audio windows / completed recordings | Pinned Qwen3-ASR-0.6B through vLLM plus Qwen forced alignment, batched speaker-turn crops | Shared pinned pyannote pipeline | Speaker-labelled segments and aligned words for final playback highlighting |
 | `recorder_worker` | Kafka and object storage | None | None | Model-free session WAV assembly and completion notification |
