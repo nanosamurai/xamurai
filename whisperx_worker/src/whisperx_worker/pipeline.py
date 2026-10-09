@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, TypedDict
 
 import numpy as np
 import soundfile as sf
-from whisperx_worker.execution import model_operation, transcribe as execute_transcribe
+from whisperx_worker.execution import alignment_operation, model_operation, transcribe as execute_transcribe
 
 
 # NOTE: torch is not installed in lightweight unit-test environments.
@@ -1097,7 +1097,7 @@ def _init_whisperx(lang_hint: Optional[str] = None) -> None:
     logger.info("WhisperX ASR model initialized successfully on %s", _WHISPERX_DEVICE)
 
 
-@model_operation
+@alignment_operation
 def _align_segments(segments, audio, language):
     _ensure_align_model(language)
     return whisperx.align(segments, _ALIGN_MODEL, _ALIGN_METADATA, audio,

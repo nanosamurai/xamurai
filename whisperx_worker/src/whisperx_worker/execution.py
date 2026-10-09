@@ -7,8 +7,8 @@ _execution = ContextVar("whisperx_execution", default=None)
 
 
 @contextmanager
-def shared_execution(owner, stage):
-    token = _execution.set((owner, stage))
+def shared_execution(owner, stage, alignment=None):
+    token = _execution.set((owner, stage, alignment))
     try:
         yield
     finally:
@@ -26,9 +26,20 @@ def model_operation(fn):
     return run
 
 
+def alignment_operation(fn):
+    standalone = model_operation(fn)
+    @wraps(fn)
+    def run(*args, **kwargs):
+        execution = _execution.get()
+        if execution is not None and execution[2] is not None:
+            return execution[2].align(*args, **kwargs)
+        return standalone(*args, **kwargs)
+    return run
+
+
 def transcribe(model, audio, **kwargs):
     execution = _execution.get()
     if execution is None:
         return model.transcribe(audio, **kwargs)
-    owner, stage = execution
+    owner, stage, _alignment = execution
     return owner.transcribe(audio, stage=stage, language=kwargs.get("language"))

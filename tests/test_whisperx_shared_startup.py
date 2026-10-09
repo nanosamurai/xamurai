@@ -23,26 +23,31 @@ def startup(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "_init_diarization_models", lambda: None)
     monkeypatch.setattr(pipeline, "_ENABLE_DIARIZATION", False)
     monkeypatch.delenv("WHISPERX_SHARED_ALIGNMENT_LANGUAGE", raising=False)
+    monkeypatch.delenv("WHISPERX_SHARED_ALIGNMENT_LANGUAGES", raising=False)
     for runtime in (refinement, finalization):
         monkeypatch.setattr(runtime, "make_consumer", lambda: pytest.fail("consumer started before alignment"))
     return health
 
 
-@pytest.mark.parametrize("configured,expected", [(None, "en"), (" de ", "de")])
-def test_alignment_blocks_serving_until_loaded(startup, monkeypatch, configured, expected):
+@pytest.mark.parametrize("setting,configured,expected", [
+    ("WHISPERX_SHARED_ALIGNMENT_LANGUAGES", None, ("en",)),
+    ("WHISPERX_SHARED_ALIGNMENT_LANGUAGES", " de, en,cs,de ", ("de", "en", "cs")),
+    ("WHISPERX_SHARED_ALIGNMENT_LANGUAGE", " de ", ("de",)),
+])
+def test_alignment_blocks_serving_until_loaded(startup, monkeypatch, setting, configured, expected):
     if configured is not None:
-        monkeypatch.setenv("WHISPERX_SHARED_ALIGNMENT_LANGUAGE", configured)
+        monkeypatch.setenv(setting, configured)
     loading, release, owner_started = Event(), Event(), Event()
     errors = []
-    def load(language):
-        assert language == expected
+    def load(languages, _device):
+        assert languages == expected
         assert not startup.exists()
         loading.set()
         assert release.wait(5)
     def backend(_model):
         owner_started.set()
         raise ModelsReady()
-    monkeypatch.setattr(pipeline, "_ensure_align_model", load)
+    monkeypatch.setattr(combined, "WhisperXAlignmentBackend", load)
     monkeypatch.setattr(batch_backend, "WhisperXBackend", backend)
     def run():
         try:
@@ -64,9 +69,9 @@ def test_alignment_blocks_serving_until_loaded(startup, monkeypatch, configured,
 
 
 def test_alignment_failure_prevents_readiness_and_consumption(startup, monkeypatch):
-    def fail(_language):
+    def fail(_languages, _device):
         raise RuntimeError("alignment download failed")
-    monkeypatch.setattr(pipeline, "_ensure_align_model", fail)
+    monkeypatch.setattr(combined, "WhisperXAlignmentBackend", fail)
     monkeypatch.setattr(batch_backend, "WhisperXBackend", lambda _model: pytest.fail("owner started"))
     with pytest.raises(RuntimeError, match="alignment download failed"):
         combined.main()
