@@ -449,7 +449,8 @@ def process_message(msg, *, producer, transcribe, model):
                 span_cm.__exit__(None, None, None)
 
 
-def main(transcribe, *, model, decoupled=False, stop_event=None, on_poll=None, initialize=True):
+def main(transcribe, *, model, decoupled=False, stop_event=None, on_poll=None, initialize=True,
+         max_inflight=1):
     """Standalone processing or poll-responsive shared-worker mode."""
     if initialize:
         setup_logging(default_level="INFO")
@@ -466,7 +467,8 @@ def main(transcribe, *, model, decoupled=False, stop_event=None, on_poll=None, i
             from xamurai_serving.finalization_runtime import run_decoupled
             run_decoupled(consumer=consumer, topic=TOPIC_RECORDING_FINISHED,
                           process=process, cleanup=_delete_recording_url,
-                          stop_event=stop_event, on_poll=on_poll, selected=selected)
+                          stop_event=stop_event, on_poll=on_poll, selected=selected,
+                          max_inflight=max_inflight)
         else:
             consumer.subscribe([TOPIC_RECORDING_FINISHED])
             while stop_event is None or not stop_event.is_set():
