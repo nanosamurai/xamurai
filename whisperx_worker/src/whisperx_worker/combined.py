@@ -31,8 +31,7 @@ def main():
     stop = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stop.set())
-    languages = configured_languages(os.getenv("WHISPERX_SHARED_ALIGNMENT_LANGUAGES",
-                                     os.getenv("WHISPERX_SHARED_ALIGNMENT_LANGUAGE", "en")))
+    languages = configured_languages(os.getenv("WHISPERX_SHARED_ALIGNMENT_LANGUAGE", "en"))
     alignment_concurrency = int(os.getenv("WHISPERX_SHARED_ALIGNMENT_CONCURRENCY", "2"))
     finalization_concurrency = int(os.getenv("WHISPERX_SHARED_FINALIZATION_CONCURRENCY", "2"))
     if not 1 <= alignment_concurrency <= 8 or not 1 <= finalization_concurrency <= 8:

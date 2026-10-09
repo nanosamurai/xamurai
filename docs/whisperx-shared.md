@@ -97,7 +97,7 @@ state and trace context remain separate for each request.
 | `KAFKA_GROUP_ID_FINALIZER` | `finalizer.<track>` | Finalization consumer group |
 | `WHISPERX_SHARED_BATCH_SIZE` | `16` | Maximum ASR chunks per batch, 1–16 |
 | `WHISPERX_SHARED_BATCH_WAIT_MS` | `20` | Partial-batch collection wait, 0–1000 ms |
-| `WHISPERX_SHARED_ALIGNMENT_LANGUAGES` | `en` | Languages to preload, for example `en,de,cs` |
+| `WHISPERX_SHARED_ALIGNMENT_LANGUAGE` | `en` | Comma-separated languages to preload, for example `en,de,cs` |
 | `WHISPERX_SHARED_ALIGNMENT_CONCURRENCY` | `2` | Concurrent alignment calls, 1–8 and at most one per language |
 | `WHISPERX_SHARED_FINALIZATION_CONCURRENCY` | `2` | Admitted finalization jobs per process, 1–8 |
 | `WHISPERX_SHARED_OPERATION_TIMEOUT_S` | `1800` | Time limit used to detect a stuck model or alignment operation |
@@ -110,10 +110,9 @@ the available host memory. Health checks run `python -m whisperx_worker.health`
 and do not open a network port.
 
 Alignment language codes are normalized and duplicates removed. Use `cs` for
-Czech. An unsupported model language fails startup. The older singular
-`WHISPERX_SHARED_ALIGNMENT_LANGUAGE` is accepted only when the plural setting is
-absent. All configured aligners and sentence tokenizers load before consumers
-start and the worker becomes ready. A failed preload prevents serving.
+Czech. An unsupported model language fails startup. All configured aligners and
+sentence tokenizers load before consumers start and the worker becomes ready.
+A failed preload prevents serving.
 
 Requests in a language outside this set keep the existing fallback: text and
 segments without aligned word timestamps. They cannot trigger a new model

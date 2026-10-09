@@ -23,20 +23,19 @@ def startup(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "_init_diarization_models", lambda: None)
     monkeypatch.setattr(pipeline, "_ENABLE_DIARIZATION", False)
     monkeypatch.delenv("WHISPERX_SHARED_ALIGNMENT_LANGUAGE", raising=False)
-    monkeypatch.delenv("WHISPERX_SHARED_ALIGNMENT_LANGUAGES", raising=False)
     for runtime in (refinement, finalization):
         monkeypatch.setattr(runtime, "make_consumer", lambda: pytest.fail("consumer started before alignment"))
     return health
 
 
-@pytest.mark.parametrize("setting,configured,expected", [
-    ("WHISPERX_SHARED_ALIGNMENT_LANGUAGES", None, ("en",)),
-    ("WHISPERX_SHARED_ALIGNMENT_LANGUAGES", " de, en,cs,de ", ("de", "en", "cs")),
-    ("WHISPERX_SHARED_ALIGNMENT_LANGUAGE", " de ", ("de",)),
+@pytest.mark.parametrize("configured,expected", [
+    (None, ("en",)),
+    (" de, en,cs,de ", ("de", "en", "cs")),
+    (" de ", ("de",)),
 ])
-def test_alignment_blocks_serving_until_loaded(startup, monkeypatch, setting, configured, expected):
+def test_alignment_blocks_serving_until_loaded(startup, monkeypatch, configured, expected):
     if configured is not None:
-        monkeypatch.setenv(setting, configured)
+        monkeypatch.setenv("WHISPERX_SHARED_ALIGNMENT_LANGUAGE", configured)
     loading, release, owner_started = Event(), Event(), Event()
     errors = []
     def load(languages, _device):
