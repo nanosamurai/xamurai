@@ -48,4 +48,10 @@ jobs:
             tests/test_nemotron_native_unit.py \
             tests/test_nemotron_speakers_unit.py \
             tests/test_whisperx_worker_unit.py \
+            tests/test_whisperx_shared.py \
+            tests/test_whisperx_shared_startup.py \
+            tests/test_whisperx_alignment.py \
+            tests/test_finalization_runtime.py \
+            tests/test_finalization_concurrency.py \
+            tests/test_finalization_publication.py \
             tests/test_stream_controls_unit.py

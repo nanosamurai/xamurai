@@ -10,6 +10,7 @@ import os
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import numpy as np
 from confluent_kafka import KafkaError, KafkaException, TopicPartition
@@ -24,13 +25,14 @@ logger = logging.getLogger(__name__)
 
 def run_decoupled(*, consumer, topic_audio, slice_seconds, sample_rate,
                   session_idle_sec, track_id, parse_audio_chunk,
-                  run_inference_and_publish):
+                  run_inference_and_publish, stop_event=None, on_poll=None):
     """Run the existing audio-to-refinement loop with replay-safe commits.
 
     The inference callback must return only after Kafka acknowledges its event.
     Exceptions stop this worker without committing its unfinished session audio.
     Revocation discards local buffers; the next owner rebuilds them from Kafka.
     """
+    stop_event = stop_event or Event()
     sessions = {}
     ready = deque()
     consumed = {}
@@ -79,7 +81,7 @@ def run_decoupled(*, consumer, topic_audio, slice_seconds, sample_rate,
     consumer.subscribe([topic_audio], on_revoke=revoke, on_lost=revoke)
     logger.info("Refinement worker started: track=%s", track_id)
     try:
-        while True:
+        while not stop_event.is_set():
             if running and running[1].done():
                 state, future = running
                 # A revoked owner may finish publishing, but can never commit.
@@ -126,6 +128,8 @@ def run_decoupled(*, consumer, topic_audio, slice_seconds, sample_rate,
                 paused.clear()
 
             msg = consumer.poll(0.1)
+            if on_poll:
+                on_poll()
             if msg is None:
                 continue
             partition = (msg.topic(), msg.partition())
