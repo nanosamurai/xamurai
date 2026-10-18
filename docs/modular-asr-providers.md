@@ -130,14 +130,15 @@ sharing stream cache rows.
 | --- | --- | --- | --- |
 | `faster-whisper` | `faster-whisper-medium-ctranslate2-r2` | `Systran/faster-whisper-medium`; Faster-Whisper 1.2 / CTranslate2 4.6; `pyannote/speaker-diarization-3.1`; contextual windowed realtime with optional Silero VAD and enrollment mapping | Text-only greedy drafts; internal absolute FINAL word timestamps with deterministic seam ownership; public coalesced speaker segments |
 | `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `Qwen/Qwen3-ASR-0.6B`; `Qwen/Qwen3-ForcedAligner-0.6B`; `pyannote/speaker-diarization-3.1`; `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session by default | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
-| `nemotron` | `nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r2` | `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF; `nemo-speech-cpp==0.1.0`; cache-aware RNNT streaming; native Silero VAD; one concurrent session per replica by default | Native partials and finals with processed-audio duration; no segment, word, or speaker-label claim |
+| `nemotron` | `nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r3` | `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF; `nemo-speech-cpp==0.1.0+xamurai.1`; cache-aware RNNT streaming; native Silero VAD; one concurrent session per replica by default | Native partials and finals with processed-audio duration; no segment, word, or speaker-label claim |
 
 The Nemotron profile pins the model repository at revision
 `1c8deaecc64b91f034d73e08dd8b64625eb3395d` and accepts only
 `nemotron-3.5-asr-streaming-0.6b.q8_0.gguf`, whose SHA-256 is
 `a5c435f294eea8f88ce68dd27b8c3bfea7f777cb2fbba04fcd30eaa555f429ae`.
 It also builds NeMo-Speech.cpp 0.1.0 at commit
-`4f9676226f667d14608487df744f375db87127f8`. The runtime downloads no code
+`4f9676226f667d14608487df744f375db87127f8` with the local duration-endpointing
+patch (`0.1.0+xamurai.1`). The runtime downloads no code
 from the model repository and exposes no client-controlled model path,
 revision, or decoding option. Deployment requires accepting NVIDIA's Open
 Model Development and Weights License 1.1 for the model artifact.
@@ -174,8 +175,10 @@ out-of-range values fail startup before the native runtime or models load.
 Use `800` for shorter pauses or `3000` for longer pauses, then recreate the
 service containers. A session can override the default via the existing
 `endpointing_silence_ms` setting in `x-rt-settings` metadata.
-The adapter also requests a native endpoint after 30 seconds
-of uninterrupted speech. Each resulting final advances the public replacement
+After 90 seconds of an utterance, native endpointing accepts a 500 ms pause
+(or the session timeout if shorter). At 120 seconds it forces an emergency
+endpoint. These instance defaults are configurable; see [native VAD](nemotron-vad.md).
+Each resulting final advances the public replacement
 window, so partial payloads remain bounded while one gRPC stream can continue
 for an arbitrarily long recording. Each native request also enables automatic
 punctuation, which preserves Nemotron 3.5's built-in casing and punctuation

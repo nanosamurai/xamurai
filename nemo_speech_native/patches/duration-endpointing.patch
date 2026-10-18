@@ -1,0 +1,102 @@
+--- a/include/nemo_speech/asr.h
++++ b/include/nemo_speech/asr.h
+@@ -105,6 +105,10 @@
+     bool enable;
+     bool vad_based;
+     int32_t stop_history_eou_ms;
++    // Xamurai duration policy; zero keeps the upstream silence-only behavior.
++    int32_t soft_after_ms;
++    int32_t soft_silence_ms;
++    int32_t max_utterance_ms;
+ } nemo_speech_asr_endpointing_config;
+ 
+ typedef struct nemo_speech_asr_postproc_config {
+--- a/src/asr/c_api.cpp
++++ b/src/asr/c_api.cpp
+@@ -134,6 +134,12 @@
+         if (HAS_FIELD(e, nemo_speech_asr_endpointing_config, stop_history_eou_ms) &&
+             e->stop_history_eou_ms > 0)
+             cfg.endpointing.stop_history_eou_ms = e->stop_history_eou_ms;
++        if (HAS_FIELD(e, nemo_speech_asr_endpointing_config, soft_after_ms))
++            cfg.endpointing.soft_after_ms = e->soft_after_ms;
++        if (HAS_FIELD(e, nemo_speech_asr_endpointing_config, soft_silence_ms))
++            cfg.endpointing.soft_silence_ms = e->soft_silence_ms;
++        if (HAS_FIELD(e, nemo_speech_asr_endpointing_config, max_utterance_ms))
++            cfg.endpointing.max_utterance_ms = e->max_utterance_ms;
+     }
+     if (HAS_FIELD(c, nemo_speech_asr_recognizer_config, postproc) && c->postproc) {
+         const auto* p = c->postproc;
+@@ -696,7 +702,7 @@
+ #endif
+ const char*
+ nemo_speech_asr_version(void) {
+-    return "nemo-speech-asr " NEMO_SPEECH_VERSION_STR;
++    return "nemo-speech-asr " NEMO_SPEECH_VERSION_STR "+xamurai.1";
+ }
+ 
+ }  // extern "C"
+--- a/src/asr/vad/vad_endpointer.h
++++ b/src/asr/vad/vad_endpointer.h
+@@ -18,6 +18,10 @@
+     // speech/silence timeline.
+     bool vad_based = false;
+     float stop_history_eou_ms = 800.0f;  // matches riva RNNTPostprocessor::Config
++    // Optional duration policy, configured through the C ABI.
++    float soft_after_ms = 0.0f;
++    float soft_silence_ms = 0.0f;
++    float max_utterance_ms = 0.0f;
+ 
+     void Register(common::ParameterParser& p) {
+         // bool fields take bare-flag CLI semantics (--endpointing, --vad-based-eou).
+@@ -70,6 +74,7 @@
+    private:
+     VadEndpointerCfg cfg_;
+     float override_ms_ = -1.0f;    // <= 0 = no per-request override
++    double utterance_start_ms_ = 0.0;
+     double last_speech_ms_ = 0.0;  // max last_speech_ms observed
+     bool armed_ = false;           // speech seen since the last fire
+     bool forced_ = false;          // force() pending
+--- a/src/asr/vad/vad_endpointer.cpp
++++ b/src/asr/vad/vad_endpointer.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ // SPDX-License-Identifier: Apache-2.0
+ #include "vad_endpointer.h"
++
++#include <algorithm>
+ 
+ namespace nemo_speech::asr {
+ 
+@@ -9,6 +11,9 @@
+     // Speech advanced since the last poll -> (re)arm so the next silence run
+     // can fire again. This is the latch that limits a long pause to one EOU.
+     if (last_speech_ms > last_speech_ms_) {
++        // Start at speech onset, not stream creation or the preceding pause.
++        if (!armed_)
++            utterance_start_ms_ = now_ms;
+         last_speech_ms_ = last_speech_ms;
+         armed_ = true;
+     }
+@@ -19,7 +24,13 @@
+     }
+     if (!cfg_.enable || !armed_)
+         return false;
+-    if (now_ms - last_speech_ms_ >= stop_history_eou_ms()) {
++    const double duration_ms = now_ms - utterance_start_ms_;
++    float silence_ms = stop_history_eou_ms();
++    if (cfg_.soft_after_ms > 0 && cfg_.soft_silence_ms > 0 &&
++        duration_ms >= cfg_.soft_after_ms)
++        silence_ms = std::min(silence_ms, cfg_.soft_silence_ms);
++    if ((cfg_.max_utterance_ms > 0 && duration_ms >= cfg_.max_utterance_ms) ||
++        now_ms - last_speech_ms_ >= silence_ms) {
+         armed_ = false;  // latch until speech resumes
+         return true;
+     }
+@@ -28,6 +39,7 @@
+ 
+ void
+ VadEndpointer::reset() {
++    utterance_start_ms_ = 0.0;
+     last_speech_ms_ = 0.0;
+     armed_ = false;
+     forced_ = false;
