@@ -39,6 +39,7 @@ jobs:
           pytest -q -m "not integration" \
             tests/test_diarization_assign_unit.py \
             tests/test_enrollment_cache_unit.py \
+            tests/test_model_artifact_security.py \
             tests/test_rtservice_decode_config_unit.py \
             tests/test_rtservice_final_segmentation_unit.py \
             tests/test_rtservice_session_isolation_unit.py \
@@ -55,3 +56,22 @@ jobs:
             tests/test_finalization_concurrency.py \
             tests/test_finalization_publication.py \
             tests/test_stream_controls_unit.py
+
+  recorder-integration:
+    name: Recorder Kafka and S3 integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Fixtures remove their own containers. Avoid Ryuk's wildcard host binding.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install integration dependencies
+        run: |
+          python -m pip install -r requirements.integration.txt
+          python -m pip check
+      - name: Check recording completion and storage
+        run: pytest -q -m integration tests/test_recorder_worker_integration.py

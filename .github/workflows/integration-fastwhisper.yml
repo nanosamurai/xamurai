@@ -21,6 +21,8 @@ jobs:
     name: rtservice integration (faster-whisper + pyannote)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
 
     steps:
       - name: Checkout
@@ -29,7 +31,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install system dependencies (ffmpeg, libsndfile)
         run: |
@@ -47,6 +49,10 @@ jobs:
       - name: Install integration deps (fast-whisper)
         run: |
           pip install -r requirements.integration.fastwhisper.txt
+          pip check
+
+      - name: Check checkpoint integrity and safe loading
+        run: pytest -q tests/test_model_artifact_security.py
 
       - name: Run integration tests (fast-whisper)
         env:
