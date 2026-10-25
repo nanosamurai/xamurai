@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.13-slim
+FROM python:3.13.17-slim-trixie@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962 AS dependencies
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -14,24 +14,32 @@ ENV PYTHONPATH=/app:/app/shared/src:/app/rtservice/src:/app/whisperx_worker/src:
 WORKDIR /app
 
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
-        libsndfile1 \
-        libgomp1 \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python -m venv /opt/venv \
-    && pip install --upgrade pip setuptools wheel
+COPY constraints.active-speech.txt /opt/constraints.active-speech.txt
 
-RUN pip install \
+RUN python -m venv /opt/venv \
+    && pip install --upgrade -c /opt/constraints.active-speech.txt pip==26.2.2 setuptools wheel
+
+RUN pip install -c /opt/constraints.active-speech.txt \
       numpy \
-      soundfile \
       confluent-kafka \
       protobuf \
       boto3 \
       opentelemetry-api \
       opentelemetry-sdk \
-      opentelemetry-exporter-otlp
+      opentelemetry-exporter-otlp \
+    && pip check
+
+FROM dependencies AS runtime
+
+# Installers and their vendored copies are not needed by the worker.
+RUN /opt/venv/bin/python -m pip uninstall -y pip wheel \
+    && /usr/local/bin/python -m pip uninstall -y pip \
+    && rm -rf /usr/local/lib/python3.13/ensurepip
 
 COPY . /app
 

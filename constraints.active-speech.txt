@@ -1,0 +1,15 @@
+# Shared security patch levels for the recorder, Faster-Whisper and WhisperX.
+# Other model families have separate compatibility requirements.
+certifi==2026.10.23
+setuptools==84.2.1
+urllib3==2.8.0
+filelock==4.2.4
+pillow==13.0.0
+msgpack==1.2.3
+aiohttp==3.14.5
+protobuf==6.33.5
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-exporter-otlp==1.45.1
+opentelemetry-exporter-otlp-proto-grpc==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1

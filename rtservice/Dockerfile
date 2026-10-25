@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.13-slim
+FROM python:3.13.17-slim-trixie@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962 AS dependencies
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -16,6 +16,7 @@ WORKDIR /app
 
 # System deps required by rtservice stack (audio + ML)
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         ffmpeg \
         libsndfile1 \
@@ -23,37 +24,47 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+COPY constraints.active-speech.txt /opt/constraints.active-speech.txt
+
 RUN python -m venv /opt/venv \
-    && pip install --upgrade pip setuptools wheel
+    && pip install --upgrade -c /opt/constraints.active-speech.txt pip==26.2.2 setuptools wheel
 
 # Install deps. Torch wheels are CUDA-enabled when available.
 # NOTE: if CUDA wheels for py3.13 are unavailable, this layer will fail.
 # 1) Install torch from the PyTorch CUDA index
 # Keep torch pinned to reduce resolver conflicts across services.
-RUN pip install \
+RUN pip install --no-deps \
       "torch==2.8.0+cu128" \
       "torchaudio==2.8.0+cu128" \
       --index-url https://download.pytorch.org/whl/cu128
 
-# 2) Install the rest from PyPI
+# 2) Resolve Torch's dependencies and the application packages from PyPI.
+# The CUDA index is used only for the two explicitly selected Torch wheels.
 # NOTE: pyannote-audio depends on omegaconf/hydra for some checkpoint configs.
-RUN pip install \
+RUN pip install -c /opt/constraints.active-speech.txt \
       numpy \
       scipy \
       soundfile \
       confluent-kafka \
       protobuf \
       grpcio \
-      grpcio-tools \
       "faster-whisper==1.2.0" \
-      pyannote-audio \
+      "silero-vad==6.2.3" \
+      pyannote-audio==4.0.7 \
       omegaconf \
       hydra-core \
       boto3 \
       prometheus-client \
       opentelemetry-api \
       opentelemetry-sdk \
-      opentelemetry-exporter-otlp-proto-grpc
+      opentelemetry-exporter-otlp-proto-grpc \
+    && pip check
+
+FROM dependencies AS runtime
+
+RUN /opt/venv/bin/python -m pip uninstall -y pip wheel \
+    && /usr/local/bin/python -m pip uninstall -y pip \
+    && rm -rf /usr/local/lib/python3.13/ensurepip
 
 # Copy monorepo
 COPY . /app
