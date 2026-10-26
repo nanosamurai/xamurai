@@ -52,6 +52,7 @@ trusted post-merge, manually dispatched, or scheduled runs.
 Both ML lanes use Python 3.13 and the active-image security constraints.
 They use Ubuntu 24.04 runners so system FFmpeg stays within TorchCodec 0.7's
 supported major versions (4–7). Revisit this runner pin when upgrading TorchCodec.
+System packages come from Ubuntu's official HTTPS archive with APT signature checks.
 WhisperX integration uses the same 3.8.6 API and Torch 2.8 family as its image.
 Checkpoint integrity, safe-loading and native audio-decoder compatibility tests run in both lanes; see
 [model artifacts](model-artifacts.md). The `dependencies` Docker build target
