@@ -6,6 +6,7 @@ import os
 import pickle
 import subprocess
 import sys
+import wave
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -133,3 +134,20 @@ def test_torch_rejects_pickle_execution_after_service_imports(tmp_path, service_
         with pytest.raises(pickle.UnpicklingError):
             torch.load(checkpoint, **kwargs)
         assert not marker.exists()
+
+
+@pytest.mark.integration
+def test_native_audio_decoder_matches_torch_runtime(tmp_path):
+    """Keep the operator-provided local-file path usable after dependency updates."""
+    torch = pytest.importorskip("torch")
+    from torchcodec.decoders import AudioDecoder
+
+    path = tmp_path / "generated-pcm.wav"
+    with wave.open(str(path), "wb") as target:
+        target.setnchannels(1)
+        target.setsampwidth(2)
+        target.setframerate(16000)
+        target.writeframes(b"\x00\x40" * 160)
+    samples = AudioDecoder(str(path)).get_all_samples()
+    assert samples.sample_rate == 16000
+    torch.testing.assert_close(samples.data, torch.full((1, 160), 0.5))

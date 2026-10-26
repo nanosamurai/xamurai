@@ -50,6 +50,7 @@ RUN pip install -c /opt/constraints.active-speech.txt \
       grpcio \
       "faster-whisper==1.2.0" \
       "silero-vad==6.2.3" \
+      "torchcodec==0.7.0" \
       pyannote-audio==4.0.7 \
       omegaconf \
       hydra-core \

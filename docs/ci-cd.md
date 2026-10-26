@@ -51,7 +51,7 @@ trusted post-merge, manually dispatched, or scheduled runs.
 
 Both ML lanes use Python 3.13 and the active-image security constraints.
 WhisperX integration uses the same 3.8.6 API and Torch 2.8 family as its image.
-Checkpoint integrity and safe-loading regressions run in both lanes; see
+Checkpoint integrity, safe-loading and native audio-decoder compatibility tests run in both lanes; see
 [model artifacts](model-artifacts.md). The `dependencies` Docker build target
 retains installers for local test setup. Released runtime targets remove pip,
 ensurepip and wheel after dependency checks; install test tools in a separate
