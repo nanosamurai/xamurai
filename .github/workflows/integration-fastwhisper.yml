@@ -19,7 +19,8 @@ concurrency:
 jobs:
   python-integration-fastwhisper:
     name: rtservice integration (faster-whisper + pyannote)
-    runs-on: ubuntu-latest
+    # TorchCodec 0.7 requires FFmpeg 4–7; Ubuntu 26.04 provides FFmpeg 8.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"

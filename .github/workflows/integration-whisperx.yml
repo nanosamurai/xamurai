@@ -17,7 +17,8 @@ concurrency:
 jobs:
   python-integration-whisperx:
     name: whisperx integration (WhisperX + pyannote)
-    runs-on: ubuntu-latest
+    # TorchCodec 0.7 requires FFmpeg 4–7; Ubuntu 26.04 provides FFmpeg 8.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
