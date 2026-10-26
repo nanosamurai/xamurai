@@ -266,13 +266,9 @@ def _init_diarization_models() -> None:
                 raise RuntimeError(f"Unknown ENROLL_BACKEND={backend}")
 
             def _embed_bytes(sample_bytes: bytes) -> np.ndarray:
-                import io
+                from drsynth_common.enrollment.audio import decode_enrollment_pcm
 
-                b = io.BytesIO(sample_bytes)
-                x, sr = sf.read(b, dtype="float32")
-                if isinstance(x, np.ndarray) and x.ndim > 1:
-                    x = x.mean(axis=1)
-                x = np.asarray(x, dtype=np.float32).reshape(-1)
+                x, sr = decode_enrollment_pcm(sample_bytes)
                 if int(sr) != SR:
                     x = _resample_linear(x, int(sr), SR)
                 emb = _embed_wave(x)

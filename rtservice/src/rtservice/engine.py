@@ -1,4 +1,3 @@
-import io
 import logging
 import math
 import os
@@ -10,7 +9,6 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-import soundfile as sf
 
 from proto_gen import stream_pb2
 from drsynth_common.diarization_assign import (
@@ -1141,12 +1139,9 @@ class RealtimeModelBundle:
             raise RuntimeError(f"Unknown ENROLL_BACKEND={backend}")
 
         def _embed_bytes(sample_bytes: bytes) -> np.ndarray:
-            # decode audio bytes to mono float32
-            b = io.BytesIO(sample_bytes)
-            x, sr = sf.read(b, dtype="float32")
-            if isinstance(x, np.ndarray) and x.ndim > 1:
-                x = x.mean(axis=1)
-            x = np.asarray(x, dtype=np.float32).reshape(-1)
+            from drsynth_common.enrollment.audio import decode_enrollment_pcm
+
+            x, sr = decode_enrollment_pcm(sample_bytes)
             if int(sr) != self._cfg.sr:
                 x = _resample_linear(x, int(sr), self._cfg.sr)
             emb = self._embed_wave(x)
