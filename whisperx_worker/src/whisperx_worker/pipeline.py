@@ -25,76 +25,6 @@ from drsynth_common.pyannote_telemetry import disable_pyannote_telemetry
 disable_pyannote_telemetry()
 
 
-# -------------------- PyTorch checkpoint loading compatibility --------------------
-#
-# Recent PyTorch versions (2.6+) introduced safer defaults for torch.load() that can
-# break loading some third-party checkpoints (including WhisperX -> pyannote VAD).
-#
-# In our dev stack we trust the upstream model checkpoints (HF/pyannote), so we:
-# 1) allowlist OmegaConf classes for weights_only=True code paths
-# 2) also monkeypatch torch.load to default to weights_only=False (more robust)
-#
-# NOTE: weights_only=False can load arbitrary pickled code. Do not use this with
-# untrusted checkpoints.
-
-if torch is not None:
-    try:
-        from omegaconf import DictConfig, ListConfig
-        from omegaconf.base import ContainerMetadata
-
-        # Nodes show up in some serialized OmegaConf objects.
-        try:
-            from omegaconf.nodes import (
-                AnyNode,
-                BooleanNode,
-                BytesNode,
-                EnumNode,
-                FloatNode,
-                IntegerNode,
-                PathNode,
-                StringNode,
-            )
-        except Exception:
-            AnyNode = BooleanNode = BytesNode = EnumNode = FloatNode = IntegerNode = PathNode = StringNode = None
-
-        safe = [
-            DictConfig,
-            ListConfig,
-            ContainerMetadata,
-            AnyNode,
-            BooleanNode,
-            BytesNode,
-            EnumNode,
-            FloatNode,
-            IntegerNode,
-            PathNode,
-            StringNode,
-        ]
-        torch.serialization.add_safe_globals([c for c in safe if c is not None])
-    except Exception:
-        pass
-
-if torch is not None:
-    try:
-        # Make this idempotent across module reloads (tests do importlib.reload).
-        # Store the original unwrapped torch.load on the torch module.
-        if not hasattr(torch, "_drsynth_orig_load"):
-            torch._drsynth_orig_load = torch.load  # type: ignore[attr-defined]
-
-        if getattr(torch.load, "__name__", "") != "_torch_load_weights_only_false_default":
-            _orig_torch_load = torch._drsynth_orig_load  # type: ignore[attr-defined]
-
-            def _torch_load_weights_only_false_default(*args, **kwargs):
-                # Force weights_only=False even if a caller explicitly passes True.
-                # This is required for some Lightning/pyannote checkpoints containing
-                # objects outside the default safe allowlist.
-                kwargs["weights_only"] = False
-                return _orig_torch_load(*args, **kwargs)
-
-            torch.load = _torch_load_weights_only_false_default
-    except Exception:
-        pass
-
 # NOTE: whisperx is heavy and is not installed in every service environment.
 # Import lazily inside functions so unit tests can still import this module.
 whisperx = None
@@ -245,7 +175,7 @@ def _init_diarization_models() -> None:
 
     # Lazy imports
     try:
-        from pyannote.audio import Pipeline, Model
+        from drsynth_common.pyannote_models import load_diarization_pipeline, load_enrollment_model
         from pyannote.audio import Inference as EmbeddingInference
     except Exception:
         logger.warning("pyannote not available; WhisperX diarization disabled", exc_info=True)
@@ -261,10 +191,7 @@ def _init_diarization_models() -> None:
     def _load_diar(mid: str):
         logger.info("Loading diarization pipeline (%s) on %s", mid, _DIAR_DEVICE)
 
-        try:
-            pipe = Pipeline.from_pretrained(mid, token=hf_token)
-        except TypeError:
-            pipe = Pipeline.from_pretrained(mid, use_auth_token=hf_token)
+        pipe = load_diarization_pipeline(mid, token=hf_token)
 
         pipe.to(torch.device(_DIAR_DEVICE))
         return pipe
@@ -293,10 +220,7 @@ def _init_diarization_models() -> None:
 
     try:
         logger.info("Loading embedding model (pyannote/embedding) on %s", _DIAR_DEVICE)
-        try:
-            emb_model = Model.from_pretrained("pyannote/embedding", token=hf_token)
-        except TypeError:
-            emb_model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token)
+        emb_model = load_enrollment_model(token=hf_token)
         _EMBED_INFER = EmbeddingInference(emb_model, window="whole")
     except Exception:
         logger.warning("Failed to init embedding model; enrollment mapping disabled", exc_info=True)
@@ -342,13 +266,9 @@ def _init_diarization_models() -> None:
                 raise RuntimeError(f"Unknown ENROLL_BACKEND={backend}")
 
             def _embed_bytes(sample_bytes: bytes) -> np.ndarray:
-                import io
+                from drsynth_common.enrollment.audio import decode_enrollment_pcm
 
-                b = io.BytesIO(sample_bytes)
-                x, sr = sf.read(b, dtype="float32")
-                if isinstance(x, np.ndarray) and x.ndim > 1:
-                    x = x.mean(axis=1)
-                x = np.asarray(x, dtype=np.float32).reshape(-1)
+                x, sr = decode_enrollment_pcm(sample_bytes)
                 if int(sr) != SR:
                     x = _resample_linear(x, int(sr), SR)
                 emb = _embed_wave(x)

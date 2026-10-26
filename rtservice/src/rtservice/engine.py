@@ -1,4 +1,3 @@
-import io
 import logging
 import math
 import os
@@ -10,7 +9,6 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-import soundfile as sf
 
 from proto_gen import stream_pb2
 from drsynth_common.diarization_assign import (
@@ -27,75 +25,6 @@ from rtservice.providers import (
     WindowRequest,
     registry_from_env,
 )
-
-# -------------------- PyTorch checkpoint loading compatibility --------------------
-#
-# Recent PyTorch versions (2.6+) introduced safer defaults for torch.load() that can
-# break loading some third-party checkpoints (notably pyannote/lightning models)
-# due to `weights_only=True` restrictions.
-#
-# In our stack we trust upstream model checkpoints (HF/pyannote), so we:
-# 1) allowlist OmegaConf classes for weights_only=True code paths
-# 2) monkeypatch torch.load to default to weights_only=False (more robust)
-#
-# NOTE: weights_only=False can load arbitrary pickled code. Do not use this with
-# untrusted checkpoints.
-
-try:
-    import torch
-
-    try:
-        from omegaconf import DictConfig, ListConfig
-        from omegaconf.base import ContainerMetadata
-
-        try:
-            from omegaconf.nodes import (
-                AnyNode,
-                BooleanNode,
-                BytesNode,
-                EnumNode,
-                FloatNode,
-                IntegerNode,
-                PathNode,
-                StringNode,
-            )
-        except Exception:
-            AnyNode = BooleanNode = BytesNode = EnumNode = FloatNode = IntegerNode = PathNode = StringNode = None
-
-        safe = [
-            DictConfig,
-            ListConfig,
-            ContainerMetadata,
-            AnyNode,
-            BooleanNode,
-            BytesNode,
-            EnumNode,
-            FloatNode,
-            IntegerNode,
-            PathNode,
-            StringNode,
-        ]
-        torch.serialization.add_safe_globals([c for c in safe if c is not None])
-    except Exception:
-        pass
-
-    try:
-        if not hasattr(torch, "_drsynth_orig_load"):
-            torch._drsynth_orig_load = torch.load  # type: ignore[attr-defined]
-
-        if getattr(torch.load, "__name__", "") != "_torch_load_weights_only_false_default":
-            _orig_torch_load = torch._drsynth_orig_load  # type: ignore[attr-defined]
-
-            def _torch_load_weights_only_false_default(*args, **kwargs):
-                kwargs["weights_only"] = False
-                return _orig_torch_load(*args, **kwargs)
-
-            torch.load = _torch_load_weights_only_false_default
-    except Exception:
-        pass
-except Exception:
-    # torch not installed in lightweight unit test envs
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -927,7 +856,7 @@ class RealtimeModelBundle:
             raise RuntimeError("Set HF_TOKEN environment variable for pyannote.")
 
         import torch
-        from pyannote.audio import Pipeline, Model
+        from drsynth_common.pyannote_models import load_diarization_pipeline, load_enrollment_model
         from pyannote.audio import Inference as EmbeddingInference
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -954,7 +883,7 @@ class RealtimeModelBundle:
         def _load_pipe(mid: str):
             logger.info("Initializing diarization pipeline (%s) on %s", mid, device)
             # pyannote.audio 4.x uses `token=` (not `use_auth_token=`)
-            pipe = Pipeline.from_pretrained(mid, token=hf_token)
+            pipe = load_diarization_pipeline(mid, token=hf_token)
             pipe.to(torch.device(device))
             return pipe
 
@@ -979,14 +908,9 @@ class RealtimeModelBundle:
         if USE_SILERO_VAD:
             try:
                 logger.info("Initializing Silero VAD…")
-                _vad_model, _vad_utils = torch.hub.load(
-                    repo_or_dir="snakers4/silero-vad",
-                    model="silero_vad",
-                    force_reload=False,
-                    onnx=bool(RT_SILERO_VAD_ONNX),
-                    trust_repo=True,
-                )
-                (get_speech_timestamps, _save_audio, _read_audio, _VADIterator, _collect_chunks) = _vad_utils
+                from silero_vad import load_silero_vad, get_speech_timestamps
+
+                _vad_model = load_silero_vad(onnx=bool(RT_SILERO_VAD_ONNX))
                 self._vad_model = _vad_model
                 self._get_speech_timestamps = get_speech_timestamps
 
@@ -1005,7 +929,7 @@ class RealtimeModelBundle:
         if USE_SPEAKER_ENROLLMENT:
             try:
                 logger.info("Initializing pyannote/embedding for enrollment on %s", device)
-                emb_model = Model.from_pretrained("pyannote/embedding", token=hf_token)
+                emb_model = load_enrollment_model(token=hf_token)
                 self._embedding_infer = EmbeddingInference(emb_model, window="whole")
             except Exception as e:
                 logger.warning("Failed to load embedding model: %s", e)
@@ -1215,12 +1139,9 @@ class RealtimeModelBundle:
             raise RuntimeError(f"Unknown ENROLL_BACKEND={backend}")
 
         def _embed_bytes(sample_bytes: bytes) -> np.ndarray:
-            # decode audio bytes to mono float32
-            b = io.BytesIO(sample_bytes)
-            x, sr = sf.read(b, dtype="float32")
-            if isinstance(x, np.ndarray) and x.ndim > 1:
-                x = x.mean(axis=1)
-            x = np.asarray(x, dtype=np.float32).reshape(-1)
+            from drsynth_common.enrollment.audio import decode_enrollment_pcm
+
+            x, sr = decode_enrollment_pcm(sample_bytes)
             if int(sr) != self._cfg.sr:
                 x = _resample_linear(x, int(sr), self._cfg.sr)
             emb = self._embed_wave(x)

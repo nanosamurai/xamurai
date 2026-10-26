@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import os
 import threading
+from importlib.metadata import PackageNotFoundError, version
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
 
@@ -154,6 +155,17 @@ def _decode_config() -> tuple[tuple[float, ...], float]:
     return temperatures, compression
 
 
+def _installed_asr_runtime() -> str:
+    packages = []
+    for name in ("faster-whisper", "ctranslate2"):
+        try:
+            installed = version(name)
+        except PackageNotFoundError:
+            installed = "not-installed"
+        packages.append(f"{name}=={installed}")
+    return ";".join(packages)
+
+
 class LocalFasterWhisperProvider:
     """Pinned in-process compatibility provider for the existing default path."""
 
@@ -176,7 +188,7 @@ class LocalFasterWhisperProvider:
     )
     provenance = ProviderProvenance(
         profile_id=profile_id,
-        runtime="faster-whisper==1.2.0;ctranslate2==4.6.0",
+        runtime=_installed_asr_runtime(),
         model_revision=model_revision,
         model_digest=model_digest,
         implementation_revision="xamurai-window-provider-v2",

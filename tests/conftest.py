@@ -108,6 +108,7 @@ def localstack_s3():
     with (
         LocalStackContainer(localstack_image)
         .with_services("s3")
+        .with_bind_ports(4566, ("127.0.0.1", None))
         # LocalStack may require acknowledging account requirements even for local/CI usage.
         .with_env("LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT", "1")
     ) as ls:
@@ -167,6 +168,6 @@ def kafka_bootstrap() -> str:
         raise
 
     # NOTE: avoid pinning too aggressively; choose a common CP Kafka image.
-    with KafkaContainer("confluentinc/cp-kafka:7.6.1") as kafka:
+    with KafkaContainer("confluentinc/cp-kafka:7.6.1").with_bind_ports(9093, ("127.0.0.1", None)) as kafka:
         bs = _normalize_bootstrap(kafka.get_bootstrap_server())
         yield bs

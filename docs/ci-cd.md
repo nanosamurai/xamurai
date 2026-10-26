@@ -1,6 +1,6 @@
 # Xamurai CI and image publication
 
-Xamurai owns validation and container-image publication for its five speech
+Xamurai owns validation and container-image publication for its ten speech
 services. Full-stack orchestration, infrastructure provisioning, and
 environment-specific release configuration are intentionally outside this
 repository.
@@ -33,6 +33,11 @@ They:
 The WhisperX refinement publication tests import the pinned Kafka client from
 `requirements.ci.txt` and use a fake producer. They do not start a Kafka broker.
 
+The CI workflow also runs recorder integration tests against Kafka and LocalStack
+without model credentials. They verify WAV bytes, tenant/session checks, ordered
+completion and idle expiry with local and S3 storage. Test services bind to
+loopback; fixtures clean up their containers without a wildcard-bound Ryuk port.
+
 Separate integration workflows cover the two ML dependency stacks:
 
 - `integration-fastwhisper.yml` validates realtime gRPC behavior
@@ -43,6 +48,14 @@ The integration workflows disable pyannote telemetry and use constrained model
 settings suitable for CI. They do not run for pull requests. Gated model access
 is provided through the minimum required `HF_TOKEN` repository secret only on
 trusted post-merge, manually dispatched, or scheduled runs.
+
+Both ML lanes use Python 3.13 and the active-image security constraints.
+WhisperX integration uses the same 3.8.6 API and Torch 2.8 family as its image.
+Checkpoint integrity, safe-loading and native audio-decoder compatibility tests run in both lanes; see
+[model artifacts](model-artifacts.md). The `dependencies` Docker build target
+retains installers for local test setup. Released runtime targets remove pip,
+ensurepip and wheel after dependency checks; install test tools in a separate
+test image rather than changing a deployed worker.
 
 The repository ruleset for `master` must require these successful checks before
 merge:
@@ -72,6 +85,11 @@ publish an immutable `sha-<git-sha>` tag:
 - `ghcr.io/nanosamurai/xamurai-recorder-worker`
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
 - `ghcr.io/nanosamurai/xamurai-qwen-rtservice`
+- `ghcr.io/nanosamurai/xamurai-qwen-finalizer`
+- `ghcr.io/nanosamurai/xamurai-qwen-refinement`
+- `ghcr.io/nanosamurai/xamurai-nemotron-rtservice`
+- `ghcr.io/nanosamurai/xamurai-parakeet-finalizer`
+- `ghcr.io/nanosamurai/xamurai-parakeet-refinement`
 
 The publication job grants `contents: read`, `packages: write`, and the GitHub
 attestation permissions. Authentication uses the workflow-scoped
@@ -79,7 +97,7 @@ attestation permissions. Authentication uses the workflow-scoped
 
 `packages: write` is limited to the image publication job. Validation jobs are
 read-only; only the post-merge integration gates receive `HF_TOKEN`. A failed,
-cancelled, or misconfigured gate skips every image build and push. The five
+cancelled, or misconfigured gate skips every image build and push. The ten
 image matrix entries remain independent after the shared gate succeeds, so one
 Dockerfile failure does not cancel the other service builds.
 
@@ -125,7 +143,7 @@ Before publishing or promoting an image:
 
 1. Run lightweight and applicable integration tests.
 2. Run gitleaks against the complete branch history.
-3. Build all four Dockerfiles from the repository root.
+3. Build the affected final targets from the repository root with Docker Bake.
 4. Confirm generated protobuf bindings match `proto/stream.proto`.
 5. Use immutable image tags; do not publish mutable production references from
    unreviewed commits.

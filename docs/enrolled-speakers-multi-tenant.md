@@ -17,6 +17,21 @@ This document describes the target architecture and implementation plan for supp
 
 It is intended to be updated progressively as phases are implemented.
 
+## Uploaded sample format
+
+The Faster-Whisper and WhisperX manifest backends accept uncompressed integer
+PCM WAV (8, 16, 24 or 32 bit, including PCM WAVE_FORMAT_EXTENSIBLE), with one
+or two channels and a sample rate from 8 to 192 kHz. Each sample is limited to
+60 seconds and 32 MiB before decoding. Stereo is mixed to mono and the existing
+resampler handles other sample rates without unbounded expansion.
+Compressed WAV, floating-point WAV, other formats and incomplete frames are
+rejected. Convert such samples to PCM WAV before upload. These uploaded bytes
+are decoded with Python and NumPy, without invoking libsndfile or FFmpeg.
+
+The optional `legacy_dir` backend still accepts operator-provided local audio
+through native decoders. Keep that directory separate from user uploads. This
+format restriction does not apply to the inactive Nemotron provider.
+
 ---
 
 ## Problem statement
@@ -90,7 +105,7 @@ Optional listing index (could be problematic due to concurrency issues):
 2) **Tenant enrollment cache (tenant-level):** loaded on demand per tenant
 - `tenant_id -> {label -> embedding}`
 - cached with TTL + max-size (LRU)
-- reads S3 manifests + WAV samples
+- reads S3 manifests + uncompressed PCM WAV samples
 
 3) **Session state (session-level, realtime only):** kept in-memory per active session
 - rolling buffer, offsets, dedupe keys
