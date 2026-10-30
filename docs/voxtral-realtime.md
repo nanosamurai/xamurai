@@ -10,6 +10,8 @@ Mistral API. The image is built with `docker buildx bake --load voxtral-rtservic
 This implementation supplies production lifecycle and resource controls; a
 successful image build or CPU test does not qualify a GPU concurrency setting.
 Complete the capacity and quality checks below before production rollout.
+See [local validation and image security results](voxtral-validation.md) for
+the two-session GPU smoke, measured timings, and outstanding release gates.
 
 ## Runtime decision and boundaries
 
@@ -95,7 +97,8 @@ All settings are operator-owned and validated before loading model weights.
 | `VOXTRAL_METRICS_PORT` | `8001` | Prometheus HTTP port |
 | `VOXTRAL_EPOCH_SECONDS` | `60` | 10–600; resets native state after this much submitted audio |
 | `VOXTRAL_MAX_MODEL_LEN` | `2048` | Must cover `ceil(epoch_seconds / 0.08) + 512`; maximum 131072 |
-| `VOXTRAL_KV_CACHE_MIB` | `2048` | Explicit engine KV allocation per GPU; independent of session count and model-weight memory |
+| `VOXTRAL_KV_CACHE_MIB` | `6144` | Explicit engine KV allocation per GPU; independent of session count and model-weight memory |
+| `VOXTRAL_GPU_MEMORY_UTILIZATION` | `0.9` | vLLM startup free-memory check, fraction of total GPU memory; KV remains explicitly allocated, so this is not a hard total VRAM cap |
 | `VOXTRAL_MAX_BATCHED_TOKENS` | `2048` | Scheduler throughput/latency budget; must be at least the session count |
 | `VOXTRAL_TENSOR_PARALLEL_SIZE` | `1` | GPUs per shared engine; values above one need separate hardware qualification |
 | `VOXTRAL_AUDIO_QUEUE_FRAMES` | `32` | 1–256 native input frames; 160 ms per frame |
@@ -119,16 +122,20 @@ be budgeted. No whole recording or epoch PCM array is retained by the adapter.
 
 The bundled profile is `voxtral-mini-4b-realtime-2602-vllm-r1`, HF revision
 `2769294da9567371363522aac9bbcfdd19447add`. Startup downloads only `params.json`,
-`tekken.json`, and `consolidated.safetensors` and verifies all three SHA-256
-digests before loading inference. Digests live in
+`tekken.json`, `consolidated.safetensors`, and the three small HF configuration
+files (`config.json`, `generation_config.json`, `processor_config.json`). It
+verifies all six SHA-256 digests before loading inference. The HF metadata is
+needed by vLLM's configuration probes even with Mistral-format loading. Digests live in
 [`models.py`](../voxtral_rtservice/src/voxtral_rtservice/models.py).
 The image pins the vLLM 0.32.0 manifest to
 `sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34`.
 Remote model Python code is disabled. The model is Apache-2.0 and ungated;
 no token is required for the default profile.
 
-Voxtral pins its own gRPC/protobuf and aligned OpenTelemetry dependencies in
+Voxtral pins its own gRPC/protobuf, Mistral audio extras, and aligned OpenTelemetry dependencies in
 `voxtral_rtservice/requirements.txt`; Qwen and other service images are unchanged.
+The image removes the unused newer `opentelemetry-exporter-otlp-common`
+distribution inherited alongside the vendor's compatible 1.40 telemetry stack.
 The build checks dependencies and permits exactly one vendor-documented
 exception: torch 2.13.0+cu130 declares NCCL 2.29.7, while the upstream vLLM image
 deliberately installs NCCL 2.30.7 for DeepEPv2. The checker verifies all three
@@ -137,7 +144,7 @@ must be reviewed when upgrading the base image; it is not a blanket `pip check`
 bypass. See the [pinned upstream Dockerfile](https://github.com/vllm-project/vllm/blob/v0.32.0/docker/Dockerfile).
 
 An operator manifest has exactly `profile_id`, `model_id`, `revision`,
-`languages` (list of public language codes), and `files` (the three filenames
+`languages` (list of public language codes), and `files` (the six filenames
 mapped to SHA-256 hex digests). Use a new profile ID for changed artifacts.
 The manifest permits compatible future Voxtral realtime checkpoints without
 changing public APIs. It does not imply that offline Voxtral models or arbitrary
@@ -221,9 +228,12 @@ python utilities/voxtral_realtime_probe.py /path/to/fixture-16k-mono.wav \
 
 The probe checks concurrent admission, overload rejection when filling the
 advertised capacity, epoch coverage, final text presence, and slot reuse. It
+also cancels three active inference requests by default; `--cancel-cycles`
+controls this count and the first fixture must start with speech. It
 prints timing/count metrics, not transcript text. `--unpaced` additionally tests
-input backpressure. It does not measure WER, prove tenant isolation on real
-weights, or replace a multi-hour soak. Use separate recordings and reference
+input backpressure. Supply several WAV paths and one distinct `--expect WORD`
+per fixture to check recognition and cross-session word contamination. It does
+not measure WER, prove general tenant isolation, or replace a multi-hour soak. Use separate recordings and reference
 transcripts for quality and cross-session contamination checks.
 
 Before rollout, record image/model hashes, GPU/driver, configuration, corpus

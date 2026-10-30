@@ -248,7 +248,8 @@ def test_configuration_and_verified_profile(monkeypatch, tmp_path):
     monkeypatch.setenv("RT_SERVING_MAX_SESSIONS", "8")
     assert Config.from_env().maximum_sessions == 8
     for changes in ({"maximum_sessions": 0}, {"idle_timeout": float("nan")},
-                    {"epoch_seconds": 600}, {"audio_queue_frames": 0}):
+                    {"epoch_seconds": 600}, {"audio_queue_frames": 0},
+                    {"gpu_memory_utilization": float("inf")}):
         with pytest.raises(ValueError):
             replace(Config(2), **changes)
     for changes in ({"revision": "main"}, {"files": {"../weights": "0" * 64}}):

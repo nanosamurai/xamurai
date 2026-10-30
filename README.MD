@@ -221,6 +221,8 @@ pytest -q -m "not integration" \
   tests/test_rtservice_session_isolation_unit.py \
   tests/test_speech_provider_integration.py \
   tests/test_qwen_rtservice_integration.py \
+  tests/test_voxtral_realtime.py \
+  tests/test_voxtral_backend.py \
   tests/test_nemotron_rtservice_integration.py \
   tests/test_stream_controls_unit.py
 ```

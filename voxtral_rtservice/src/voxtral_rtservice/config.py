@@ -16,7 +16,8 @@ class Config:
     maximum_sessions: int
     epoch_seconds: int = 60
     max_model_len: int = 2048
-    kv_cache_mib: int = 2048
+    kv_cache_mib: int = 6144
+    gpu_memory_utilization: float = 0.9
     max_batched_tokens: int = 2048
     tensor_parallel_size: int = 1
     audio_queue_frames: int = 32
@@ -51,6 +52,8 @@ class Config:
             raise ValueError("max_model_len cannot cover the configured epoch")
         if self.max_batched_tokens < self.maximum_sessions:
             raise ValueError("max_batched_tokens must cover maximum_sessions")
+        if not math.isfinite(self.gpu_memory_utilization) or not 0.1 <= self.gpu_memory_utilization <= 1:
+            raise ValueError("gpu_memory_utilization must be in [0.1, 1]")
         for address in (self.bind_address, self.metrics_bind_address):
             if not address or any(c.isspace() for c in address):
                 raise ValueError("listener addresses must be nonempty without whitespace")
@@ -64,7 +67,8 @@ class Config:
             maximum_sessions=int(os.environ["RT_SERVING_MAX_SESSIONS"]),
             epoch_seconds=int(os.getenv("VOXTRAL_EPOCH_SECONDS", "60")),
             max_model_len=int(os.getenv("VOXTRAL_MAX_MODEL_LEN", "2048")),
-            kv_cache_mib=int(os.getenv("VOXTRAL_KV_CACHE_MIB", "2048")),
+            kv_cache_mib=int(os.getenv("VOXTRAL_KV_CACHE_MIB", "6144")),
+            gpu_memory_utilization=float(os.getenv("VOXTRAL_GPU_MEMORY_UTILIZATION", "0.9")),
             max_batched_tokens=int(os.getenv("VOXTRAL_MAX_BATCHED_TOKENS", "2048")),
             tensor_parallel_size=int(os.getenv("VOXTRAL_TENSOR_PARALLEL_SIZE", "1")),
             audio_queue_frames=int(os.getenv("VOXTRAL_AUDIO_QUEUE_FRAMES", "32")),

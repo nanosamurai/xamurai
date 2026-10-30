@@ -30,6 +30,7 @@ def engine_options(config, model_path):
         max_num_seqs=config.maximum_sessions,
         max_num_batched_tokens=config.max_batched_tokens,
         kv_cache_memory_bytes=config.kv_cache_mib * 1024**2,
+        gpu_memory_utilization=config.gpu_memory_utilization,
         tensor_parallel_size=config.tensor_parallel_size,
         limit_mm_per_prompt={"audio": 1}, mm_processor_cache_gb=1,
         enable_prefix_caching=False, enable_log_requests=False,
