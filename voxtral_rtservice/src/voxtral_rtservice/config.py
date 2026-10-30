@@ -27,6 +27,8 @@ class Config:
     max_epoch_text_bytes: int = 65_536
     bind_address: str = "127.0.0.1"
     port: int = 50052
+    metrics_bind_address: str = "127.0.0.1"
+    metrics_port: int = 8001
 
     def __post_init__(self):
         for name, low, high in (
@@ -35,6 +37,7 @@ class Config:
             ("max_batched_tokens", 128, 131072), ("tensor_parallel_size", 1, 64),
             ("audio_queue_frames", 1, 256), ("max_epoch_text_bytes", 1024, 1_048_576),
             ("port", 0, 65535),
+            ("metrics_port", 0, 65535),
         ):
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
@@ -48,8 +51,9 @@ class Config:
             raise ValueError("max_model_len cannot cover the configured epoch")
         if self.max_batched_tokens < self.maximum_sessions:
             raise ValueError("max_batched_tokens must cover maximum_sessions")
-        if not self.bind_address or any(c.isspace() for c in self.bind_address):
-            raise ValueError("bind_address must be nonempty without whitespace")
+        for address in (self.bind_address, self.metrics_bind_address):
+            if not address or any(c.isspace() for c in address):
+                raise ValueError("listener addresses must be nonempty without whitespace")
 
     @classmethod
     def from_env(cls):
@@ -71,4 +75,6 @@ class Config:
             max_epoch_text_bytes=int(os.getenv("VOXTRAL_MAX_EPOCH_TEXT_BYTES", "65536")),
             bind_address=os.getenv("VOXTRAL_RTSERVICE_BIND_ADDR", "127.0.0.1"),
             port=int(os.getenv("VOXTRAL_RTSERVICE_PORT", "50052")),
+            metrics_bind_address=os.getenv("VOXTRAL_METRICS_BIND_ADDR", "127.0.0.1"),
+            metrics_port=int(os.getenv("VOXTRAL_METRICS_PORT", "8001")),
         )

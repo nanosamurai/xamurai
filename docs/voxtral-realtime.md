@@ -91,6 +91,8 @@ All settings are operator-owned and validated before loading model weights.
 | `RT_SERVING_INSTANCE_ID` | hostname | Admission response identity; use a unique identity per replica |
 | `VOXTRAL_RTSERVICE_BIND_ADDR` | `127.0.0.1` | Listener; explicitly choose `0.0.0.0` inside a private container/pod network |
 | `VOXTRAL_RTSERVICE_PORT` | `50052` | gRPC port |
+| `VOXTRAL_METRICS_BIND_ADDR` | `127.0.0.1` | Prometheus listener; explicitly allow a private pod network for scraping |
+| `VOXTRAL_METRICS_PORT` | `8001` | Prometheus HTTP port |
 | `VOXTRAL_EPOCH_SECONDS` | `60` | 10–600; resets native state after this much submitted audio |
 | `VOXTRAL_MAX_MODEL_LEN` | `2048` | Must cover `ceil(epoch_seconds / 0.08) + 512`; maximum 131072 |
 | `VOXTRAL_KV_CACHE_MIB` | `2048` | Explicit engine KV allocation per GPU; independent of session count and model-weight memory |
@@ -124,6 +126,15 @@ The image pins the vLLM 0.32.0 manifest to
 `sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34`.
 Remote model Python code is disabled. The model is Apache-2.0 and ungated;
 no token is required for the default profile.
+
+Voxtral pins its own gRPC/protobuf and aligned OpenTelemetry dependencies in
+`voxtral_rtservice/requirements.txt`; Qwen and other service images are unchanged.
+The build checks dependencies and permits exactly one vendor-documented
+exception: torch 2.13.0+cu130 declares NCCL 2.29.7, while the upstream vLLM image
+deliberately installs NCCL 2.30.7 for DeepEPv2. The checker verifies all three
+runtime versions and rejects every other dependency conflict. This exception
+must be reviewed when upgrading the base image; it is not a blanket `pip check`
+bypass. See the [pinned upstream Dockerfile](https://github.com/vllm-project/vllm/blob/v0.32.0/docker/Dockerfile).
 
 An operator manifest has exactly `profile_id`, `model_id`, `revision`,
 `languages` (list of public language codes), and `files` (the three filenames
@@ -179,6 +190,14 @@ choice, never a coded concurrency ceiling. Avoid GPU oversubscription by other
 pods/processes. BF16 weights alone are roughly 8.9 GB; the vendor's 16 GB fit
 claim is not a multi-session sizing result. Start qualification on a dedicated
 24 GB GPU with explicit headroom.
+
+Prometheus exposes `xamurai_voxtral_active_sessions`, `session_capacity`,
+`admissions_total{outcome}`, `closed_sessions_total{outcome}`, and histograms
+`first_partial_seconds` and `flush_seconds` (all with the `xamurai_voxtral_`
+prefix), alongside vLLM's own registered metrics. There are no session, tenant,
+or transcript labels. Scale on admitted/capacity ratio, rejection rates,
+latency, and GPU/RSS headroom; CPU alone is not a suitable admission signal.
+Restrict the metrics listener to the monitoring network as well as gRPC to BFF.
 
 ## Validation and rollout gates
 

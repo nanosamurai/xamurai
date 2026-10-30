@@ -111,6 +111,7 @@ class VllmBackend:
                                       output_kind=RequestOutputKind.DELTA, skip_clone=True)
         else:
             sampling = self._sampling
+        prompts_completed = False
 
         async def put_audio(audio):
             # Padding is split too: queue capacity bounds bytes, not just objects.
@@ -126,6 +127,7 @@ class VllmBackend:
             await buffer.append_audio(None)
 
         async def prompts():
+            nonlocal prompts_completed
             async with aclosing(buffer.get_input_stream()) as input_stream:
                 async for prompt in input_stream:
                     if self._render is not None:
@@ -141,6 +143,7 @@ class VllmBackend:
             if not feeder.done() or not buffer._audio_queue.empty():
                 raise BackendFailure("ENGINE_AUDIO_TRUNCATED")
             feeder.result()
+            prompts_completed = True
 
         feeder = asyncio.create_task(feed_audio())
         prompt_stream = prompts()
@@ -157,7 +160,9 @@ class VllmBackend:
                     if feeder.done():
                         feeder.result()
                     try:
-                        output = await pending
+                        # The cleanup deadline, not a child task's cancellation
+                        # behavior, owns how long teardown may take.
+                        output = await asyncio.shield(pending)
                     except StopAsyncIteration:
                         break
                 for completion in output.outputs:
@@ -165,20 +170,37 @@ class VllmBackend:
                         await buffer.append_tokens(completion.token_ids[-1:])
                     if completion.text:
                         yield completion.text
-            await feeder
+            if not prompts_completed:
+                raise BackendFailure("ENGINE_AUDIO_TRUNCATED")
+            feeder.result()
         finally:
             # Abort the actual engine request, including when paused waiting for
             # audio. Cancelling Python tasks alone leaks vLLM scheduler slots.
-            for task in (pending, feeder):
-                if task is not None and not task.done():
-                    task.cancel()
-            await asyncio.gather(*(task for task in (pending, feeder) if task is not None),
-                                 return_exceptions=True)
             try:
-                async with asyncio.timeout(self.config.cleanup_timeout):
+                tasks = {task for task in (pending, feeder) if task is not None}
+                deadline = asyncio.get_running_loop().time() + self.config.cleanup_timeout
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                done, alive = await asyncio.wait(tasks, timeout=self.config.cleanup_timeout)
+                for task in done:
+                    if not task.cancelled():
+                        task.exception()  # retrieve errors without overriding the original failure
+                if alive:
+                    raise TimeoutError("engine helper did not stop")
+                async with asyncio.timeout_at(deadline):
                     await self.engine.abort(request_id)
                     await outputs.aclose()
-                    await prompt_stream.aclose()
+                    # vLLM cancels its own input task on abort. Allow that task
+                    # to unwind before closing the generator it was driving.
+                    while True:
+                        try:
+                            await prompt_stream.aclose()
+                            break
+                        except RuntimeError as exc:
+                            if "asynchronous generator is already running" not in str(exc):
+                                raise
+                            await asyncio.sleep(0)
             except BaseException:
                 self.fatal.set()
                 logger.error("Voxtral engine cleanup failed; retiring replica")

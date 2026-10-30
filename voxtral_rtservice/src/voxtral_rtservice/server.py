@@ -14,17 +14,20 @@ from .audio import AudioStream, InputIdle, InvalidAudio
 from .backend import BackendFailure, VllmBackend
 from .config import Config, SAMPLE_RATE
 from .models import DEFAULT_PROFILE, load_profile, resolve_model
+from .metrics import Metrics
 
 logger = logging.getLogger(__name__)
 
 
 class VoxtralRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
-    def __init__(self, backend, config, profile=DEFAULT_PROFILE):
+    def __init__(self, backend, config, profile=DEFAULT_PROFILE, metrics=None):
         self.backend = backend
         self.config = config
         self.profile = profile
         self.slots = SessionSlots(config.maximum_sessions)
         self.instance_id = serving_instance_id()
+        self.metrics = metrics or Metrics()
+        self.metrics.capacity.set(config.maximum_sessions)
 
     async def GetCapabilities(self, request, context):
         try:
@@ -48,10 +51,14 @@ class VoxtralRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
         if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "SESSION_ID_REQUIRED")
         if not self.backend.healthy:
+            self.metrics.admissions.labels("unhealthy").inc()
             await context.abort(grpc.StatusCode.UNAVAILABLE, "ENGINE_UNHEALTHY")
         if not self.slots.acquire():
+            self.metrics.admissions.labels("full").inc()
             logger.info("Voxtral admission rejected active=%d limit=%d", self.slots.active, self.slots.maximum)
             await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "REPLICA_FULL")
+        self.metrics.admissions.labels("accepted").inc()
+        self.metrics.active.set(self.slots.active)
         outcome = "cancelled"
         try:
             await self._write(context, stream_pb2.AsrEvent(
@@ -62,8 +69,11 @@ class VoxtralRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             while (epoch := await stream.next_epoch()) is not None:
                 text = ""
                 text_bytes = 0
+                epoch_started = asyncio.get_running_loop().time()
                 async with aclosing(self.backend.transcribe(epoch.frames())) as updates:
                     async for delta in updates:
+                        if not text:
+                            self.metrics.first_partial.observe(asyncio.get_running_loop().time() - epoch_started)
                         text_bytes += len(delta.encode("utf-8"))
                         if text_bytes > self.config.max_epoch_text_bytes:
                             raise BackendFailure("EPOCH_TEXT_LIMIT")
@@ -71,6 +81,7 @@ class VoxtralRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                         await self._write(context, self._event(session_id, epoch, text, final=False))
                 if not epoch.exhausted:
                     raise BackendFailure("ENGINE_AUDIO_TRUNCATED")
+                self.metrics.flush.observe(asyncio.get_running_loop().time() - epoch.ended_at)
                 await self._write(context, self._event(session_id, epoch, text, final=True))
             outcome = "completed"
         except InvalidAudio as exc:
@@ -86,6 +97,8 @@ class VoxtralRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             await context.abort(grpc.StatusCode.INTERNAL, "VOXTRAL_INFERENCE_FAILED")
         finally:
             self.slots.release()
+            self.metrics.active.set(self.slots.active)
+            self.metrics.closed.labels(outcome).inc()
             logger.info("Voxtral stream closed outcome=%s active=%d limit=%d",
                         outcome, self.slots.active, self.slots.maximum)
 
@@ -103,13 +116,13 @@ class VoxtralRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             await context.write(event)
 
 
-def create_server(backend, config, profile=DEFAULT_PROFILE):
+def create_server(backend, config, profile=DEFAULT_PROFILE, metrics=None):
     server = grpc.aio.server(options=(
         ("grpc.max_receive_message_length", 65_536),
         ("grpc.max_send_message_length", config.max_epoch_text_bytes + 4096),
         ("grpc.max_metadata_size", 8192),
     ))
-    servicer = VoxtralRealtimeServicer(backend, config, profile)
+    servicer = VoxtralRealtimeServicer(backend, config, profile, metrics)
     stream_pb2_grpc.add_RealtimeASRServicer_to_server(servicer, server)
     server.bound_port = server.add_insecure_port(f"{config.bind_address}:{config.port}")
     if not server.bound_port:
@@ -121,14 +134,19 @@ async def serve(config, profile):
     # Download/hash checking runs before readiness; never during a live RPC.
     model_path = await asyncio.to_thread(resolve_model, profile)
     backend = VllmBackend.load(config, model_path)
-    server, _ = create_server(backend, config, profile)
-    stopped = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stopped.set)
+    server = None
     watchers = []
+    metrics_server = None
     try:
+        from prometheus_client import REGISTRY, start_http_server
+        metrics = Metrics(REGISTRY)
+        server, _ = create_server(backend, config, profile, metrics)
+        stopped = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stopped.set)
         await backend.check_health()
+        metrics_server, _ = start_http_server(config.metrics_port, addr=config.metrics_bind_address)
         await server.start()
         logger.info("Voxtral ready profile=%s capacity=%d epoch_seconds=%d",
                     profile.profile_id, config.maximum_sessions, config.epoch_seconds)
@@ -138,7 +156,11 @@ async def serve(config, profile):
         for task in watchers:
             task.cancel()
         await asyncio.gather(*watchers, return_exceptions=True)
-        await server.stop(grace=5)
+        if server is not None:
+            await server.stop(grace=5)
+        if metrics_server is not None:
+            await asyncio.to_thread(metrics_server.shutdown)
+            metrics_server.server_close()
         backend.close()
     if backend.fatal.is_set():
         raise RuntimeError("Voxtral engine retired after failed cleanup or health check")

@@ -69,6 +69,7 @@ class AudioEpoch:
         self.start_samples = stream.total_samples
         self.samples = 0
         self.exhausted = False
+        self.ended_at = None
 
     async def frames(self):
         remaining = self.stream.config.epoch_seconds * SAMPLE_RATE * 2
@@ -85,3 +86,4 @@ class AudioEpoch:
             remaining -= take
             yield frame
         self.exhausted = True
+        self.ended_at = asyncio.get_running_loop().time()

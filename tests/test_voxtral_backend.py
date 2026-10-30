@@ -132,3 +132,62 @@ def test_completion_and_progress_timeout_both_abort_and_cleanup_failure_retires(
                 pass
         assert not runtime.healthy and runtime.fatal.is_set()
     asyncio.run(run())
+
+
+def test_engine_ending_before_consuming_input_fails_without_waiting_forever():
+    class Premature(Engine):
+        async def generate(self, **kwargs):
+            return
+            yield
+
+    async def run():
+        engine = Premature()
+        runtime = backend(engine, audio_queue_frames=1)
+
+        async def source():
+            for _ in range(100):
+                yield b"\x00" * FRAME_BYTES
+
+        async with asyncio.timeout(1):
+            with pytest.raises(RuntimeError, match="ENGINE_AUDIO_TRUNCATED"):
+                async for _ in runtime.transcribe(source()):
+                    pass
+        assert len(engine.aborted) == 1
+    asyncio.run(run())
+
+
+def test_cleanup_deadline_covers_a_decoder_slow_to_cancel():
+    class SlowCancellation(Engine):
+        def __init__(self):
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def generate(self, **kwargs):
+            self.entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await self.release.wait()
+                raise
+            yield
+
+    async def run():
+        engine = SlowCancellation()
+        runtime = backend(engine, cleanup_timeout=0.05)
+
+        async def source():
+            yield b"\x00" * FRAME_BYTES
+
+        task = asyncio.create_task(anext(runtime.transcribe(source())))
+        await engine.entered.wait()
+        task.cancel()
+        with pytest.raises(TimeoutError, match="helper did not stop"):
+            await asyncio.wait_for(task, timeout=1)
+        assert not runtime.healthy
+        # Simulate the supervisor terminating the failed engine, releasing the
+        # non-cooperative operation; no background task may survive this test.
+        engine.release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    asyncio.run(run())
