@@ -17,6 +17,10 @@ do not live in this service repository.
 - `qwen_rtservice` exposes the same `RealtimeASR` API using Qwen3-ASR's native
   vLLM streaming implementation, then forced-aligns and pyannote-diarizes each
   bounded final epoch when the detected language is supported.
+- `voxtral_rtservice` exposes the same API using Voxtral Mini 4B Realtime 2602
+  and a shared asynchronous vLLM engine, with bounded native audio queues and
+  configurable concurrent sessions. See [Voxtral realtime](docs/voxtral-realtime.md)
+  for deployment, scaling, qualification requirements, and epoch-boundary limits.
 - `qwen_worker` provides batched vLLM finalization and refinement with pyannote
   speaker turns and forced-aligned words, sharing model loading and alignment
   validation with realtime. See [Qwen workers](docs/qwen-workers.md).
@@ -94,11 +98,18 @@ flowchart LR
         end
     end
 
+    subgraph voxtralImage["Docker image: xamurai-voxtral-rtservice"]
+        VoxtralAPI["RealtimeASR\nGetCapabilities + Stream"]
+        VoxtralEngine["Voxtral Mini 4B Realtime 2602\nshared async vLLM engine"]
+        VoxtralAPI --> VoxtralEngine
+    end
+
     WS --> Fanout
     WS --> KafkaOnce
     Fanout -->|"track=faster-whisper"| FasterAPI
     Fanout -->|"track=qwen"| QwenAPI
     Fanout -->|"track=nemotron"| NemotronAPI
+    Fanout -->|"track=voxtral"| VoxtralAPI
     FasterAPI --> SpeechProvider --> Faster --> FasterJoin
     FasterAPI -->|"FINAL audio"| FasterDiar --> FasterJoin
     QwenAPI --> QwenBackend --> QwenAligner --> QwenJoin
@@ -114,6 +125,7 @@ fallbacks, and resource bounds.
 
 | Service | Stage and interface | ASR and alignment models | Speaker and speech models | Output behavior |
 | --- | --- | --- | --- | --- |
+| `voxtral_rtservice` | Realtime gRPC | Pinned `mistralai/Voxtral-Mini-4B-Realtime-2602` BF16 through async vLLM 0.32.0 | None | Native partials and coarse epoch finals; configurable concurrent streams; no alignment or speaker-label claim |
 | `rtservice` | Realtime gRPC | Fixed `Systran/faster-whisper-medium` profile through Faster-Whisper/CTranslate2 | `pyannote/speaker-diarization-3.1`; optional `pyannote/embedding` enrollment mapping and Silero VAD | Replaceable partials; contextual, timestamp-owned, speaker-labelled finals |
 | `qwen_rtservice` | Realtime gRPC | Fixed `Qwen/Qwen3-ASR-0.6B` plus `Qwen/Qwen3-ForcedAligner-0.6B` | Fixed `pyannote/speaker-diarization-3.1` pipeline | Native-streaming partials; aligned and diarized epoch finals for supported alignment languages, with a coarse speakerless fallback |
 | `nemotron_rtservice` | Realtime gRPC | Fixed `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF through NeMo-Speech.cpp | Optional Sortformer v2 Q8; WeSpeaker ONNX for S3 enrollment | Native partials; optionally timed, speaker-labelled finals; no public word-timestamp claim |
@@ -150,6 +162,7 @@ session and tenant identifiers needed for correlation and isolation.
 - `proto/` and `proto_gen/`: protobuf contract and generated Python bindings
 - `rtservice/`: realtime gRPC service
 - `qwen_rtservice/`: isolated Qwen3-ASR/vLLM realtime service
+- `voxtral_rtservice/`: isolated Voxtral/vLLM realtime service
 - `qwen_worker/`: batched Qwen pipeline and refinement/finalizer entrypoints
 - `nemotron_rtservice/`: isolated Nemotron/NeMo-Speech.cpp realtime service
 - `whisperx_worker/`: shared WhisperX pipeline, refinement and finalizer entrypoints
@@ -240,6 +253,7 @@ their consumers:
 ```bash
 docker buildx bake --load whisperx-worker finalizer-worker nemotron-rtservice parakeet-finalizer
 docker buildx bake --load rtservice recorder-worker qwen-rtservice qwen-finalizer qwen-refinement
+docker buildx bake --load voxtral-rtservice
 ```
 
 Images use the `local` tag by default; set `TAG` to select another tag.
@@ -257,6 +271,7 @@ The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 - `ghcr.io/nanosamurai/xamurai-recorder-worker`
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
 - `ghcr.io/nanosamurai/xamurai-qwen-rtservice`
+- `ghcr.io/nanosamurai/xamurai-voxtral-rtservice`
 - `ghcr.io/nanosamurai/xamurai-qwen-finalizer`
 - `ghcr.io/nanosamurai/xamurai-qwen-refinement`
 - `ghcr.io/nanosamurai/xamurai-nemotron-rtservice`
@@ -292,6 +307,11 @@ Qwen realtime service settings include:
   `QWEN_MAX_MODEL_LEN`
 - `QWEN_KV_CACHE_MIB` (an explicit vLLM KV-cache allocation rather than a
   fraction of all available VRAM)
+
+Voxtral realtime requires an explicit `RT_SERVING_MAX_SESSIONS` capacity. Its
+model manifest, epoch length, engine context, KV allocation, scheduler batch
+budget, tensor parallelism, queues, and timeouts are operator-configurable;
+see [Voxtral configuration and qualification](docs/voxtral-realtime.md).
 
 Nemotron realtime service settings include:
 
