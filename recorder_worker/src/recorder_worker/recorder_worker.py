@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 import wave
 from dataclasses import dataclass
@@ -93,15 +94,16 @@ logger = logging.getLogger("recorder_worker")
 # Kafka helpers
 # --------------------------------------------------------------------------- #
 
-def make_consumer() -> Consumer:
-    logger.info("Creating Kafka consumer for recorder_worker")
+def make_consumer(group_id: str = GROUP_ID, **overrides) -> Consumer:
+    logger.info("Creating Kafka consumer for recorder_worker (group=%s)", group_id)
     cfg = {
         "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "group.id": GROUP_ID,
+        "group.id": group_id,
         "enable.auto.commit": False,
         "auto.offset.reset": "earliest",
         "max.partition.fetch.bytes": 5_000_000,
         "fetch.wait.max.ms": 50,
+        **overrides,
     }
     if KAFKA_SECURITY_PROTOCOL and KAFKA_SECURITY_PROTOCOL != "PLAINTEXT":
         cfg["security.protocol"] = KAFKA_SECURITY_PROTOCOL
@@ -162,6 +164,32 @@ class LocalFileWriter:
         return f"file://{abs_path}"
 
 
+def make_s3_client():
+    """Return a boto3 S3 client for the configured recordings storage.
+
+    Credentials:
+    - If S3_ACCESS_KEY / S3_SECRET_KEY are set, use them.
+    - Otherwise, fall back to boto3's default credential chain (IRSA / Pod Identity / env / instance role).
+    """
+    import boto3
+    from botocore.config import Config
+
+    session_kwargs = {}
+    if S3_REGION:
+        session_kwargs["region_name"] = S3_REGION
+
+    if S3_ACCESS_KEY and S3_SECRET_KEY:
+        session_kwargs["aws_access_key_id"] = S3_ACCESS_KEY
+        session_kwargs["aws_secret_access_key"] = S3_SECRET_KEY
+
+    addressing_style = "path" if S3_FORCE_PATH_STYLE else "virtual"
+    client_kwargs = {"config": Config(s3={"addressing_style": addressing_style})}
+    if S3_ENDPOINT:
+        client_kwargs["endpoint_url"] = S3_ENDPOINT
+
+    return boto3.client("s3", **session_kwargs, **client_kwargs)
+
+
 class S3FileWriter:
     """Write to a local temp WAV, then upload to S3 on close.
 
@@ -191,39 +219,17 @@ class S3FileWriter:
             self._wave.writeframes(pcm16)
 
     def close_and_get_url(self) -> str:
-        import boto3
-        from botocore.config import Config
-
         try:
             self._wave.close()
         except Exception:
             logger.exception("Error closing temp WAV %s", self._tmp_path)
 
-        # Credentials:
-        # - If S3_ACCESS_KEY / S3_SECRET_KEY are set, use them.
-        # - Otherwise, fall back to boto3's default credential chain (IRSA / Pod Identity / env / instance role).
-        session_kwargs = {}
-        if S3_REGION:
-            session_kwargs["region_name"] = S3_REGION
-
-        if S3_ACCESS_KEY and S3_SECRET_KEY:
-            session_kwargs["aws_access_key_id"] = S3_ACCESS_KEY
-            session_kwargs["aws_secret_access_key"] = S3_SECRET_KEY
-
-        addressing_style = "path" if S3_FORCE_PATH_STYLE else "virtual"
-        cfg = Config(s3={"addressing_style": addressing_style})
-
-        client_kwargs = {"config": cfg}
-        if S3_ENDPOINT:
-            client_kwargs["endpoint_url"] = S3_ENDPOINT
-
-        s3 = boto3.client("s3", **session_kwargs, **client_kwargs)
+        s3 = make_s3_client()
         logger.info(
-            "Uploading recording to s3://%s/%s (endpoint=%s, path_style=%s)",
+            "Uploading recording to s3://%s/%s (endpoint=%s)",
             self._bucket,
             self._key,
             S3_ENDPOINT or "aws",
-            addressing_style,
         )
         s3.upload_file(self._tmp_path, self._bucket, self._key)
 
@@ -396,6 +402,13 @@ def main():
     producer = make_producer()
     consumer.subscribe([TOPIC_AUDIO])
 
+    # Uploaded files are converted on their own consumer thread so a long
+    # FFmpeg run never delays live session audio.
+    from recorder_worker import uploads
+
+    stop_uploads = threading.Event()
+    uploads_thread = uploads.start(producer, stop_uploads)
+
     # session_id -> SessionRecording
     sessions: Dict[str, SessionRecording] = {}
 
@@ -544,6 +557,10 @@ def main():
         for sid, rec in list(sessions.items()):
             finalize_session(sid, rec, producer)
         sessions.clear()
+
+        stop_uploads.set()
+        if uploads_thread is not None:
+            uploads_thread.join(timeout=10.0)
 
         try:
             consumer.close()
