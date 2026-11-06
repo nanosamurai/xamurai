@@ -34,6 +34,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.ci.txt
 
+      - name: Install FFmpeg (upload conversion tests)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Unit tests (exclude integration)
         run: |
           pytest -q -m "not integration" \
@@ -56,7 +61,8 @@ jobs:
             tests/test_finalization_runtime.py \
             tests/test_finalization_concurrency.py \
             tests/test_finalization_publication.py \
-            tests/test_stream_controls_unit.py
+            tests/test_stream_controls_unit.py \
+            tests/test_recorder_uploads_unit.py
 
   recorder-integration:
     name: Recorder Kafka and S3 integration
@@ -72,6 +78,8 @@ jobs:
           python-version: "3.13"
       - name: Install integration dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
           python -m pip install -r requirements.integration.txt
           python -m pip check
       - name: Check recording completion and storage
