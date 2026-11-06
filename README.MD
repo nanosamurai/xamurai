@@ -142,6 +142,10 @@ endpoint with SamuraiBFF.
 5. Each selected finalizer transcribes the completed recording and publishes
    `SessionTranscript` to `transcripts.final`.
 
+An uploaded file skips steps 1-3: `recorder_worker` converts it with FFmpeg
+from `recordings.uploaded` into the same recording and continues at step 4. See
+[`docs/uploaded-files.md`](docs/uploaded-files.md).
+
 Kafka messages propagate W3C `traceparent` headers. Services also attach the
 session and tenant identifiers needed for correlation and isolation.
 
@@ -337,6 +341,8 @@ Worker settings include:
 - `WHISPERX_SLICE_SECONDS`, `WHISPERX_IDLE_SECONDS`, and diarization guardrails
 - `RECORDING_STORAGE_BACKEND` (`local` or `s3`)
 - `RECORDING_DIR` or the corresponding S3 bucket, region, endpoint, and prefix
+- uploaded-file limits for `recorder_worker` (`RECORDER_UPLOAD_*`, see
+  [`docs/uploaded-files.md`](docs/uploaded-files.md))
 - topic and consumer-group overrides for each worker
 
 Per-stream output selection and compute controls are documented in
@@ -363,6 +369,7 @@ Report vulnerabilities privately as described in
 ## Additional documentation
 
 - [`docs/stream-output-selection.md`](docs/stream-output-selection.md)
+- [`docs/uploaded-files.md`](docs/uploaded-files.md)
 - [`docs/whisperx-worker-diarization.md`](docs/whisperx-worker-diarization.md)
 - [`docs/rtservice-performance.md`](docs/rtservice-performance.md)
 - [`docs/modular-asr-providers.md`](docs/modular-asr-providers.md)
