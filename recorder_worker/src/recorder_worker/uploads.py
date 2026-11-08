@@ -19,10 +19,15 @@ Security: the source is untrusted.
   or URLs), is killed after a timeout and is stopped at the duration limit.
 - The source object is deleted after processing, whether decoding succeeded or
   not. Only a failure of storage or Kafka is retried.
+
+A permanent rejection is published as a small JSON event on
+``recordings.upload_failed`` (key: session ID) so the BFF can mark the session
+failed. The event holds IDs and a reason code only, never file content.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -32,6 +37,7 @@ import tempfile
 import threading
 import uuid
 import wave
+from datetime import datetime, timezone
 from typing import Optional
 
 from confluent_kafka import TopicPartition
@@ -49,12 +55,14 @@ def _env_bool(name: str, default: str) -> bool:
 
 
 TOPIC_RECORDING_UPLOADED = os.getenv("KAFKA_TOPIC_RECORDING_UPLOADED", "recordings.uploaded")
+TOPIC_RECORDING_UPLOAD_FAILED = os.getenv("KAFKA_TOPIC_RECORDING_UPLOAD_FAILED", "recordings.upload_failed")
 UPLOADS_ENABLED = _env_bool("RECORDER_UPLOADS_ENABLED", "true")
 FFMPEG_BIN = os.getenv("RECORDER_FFMPEG_BIN", "ffmpeg")
 MAX_SOURCE_BYTES = int(os.getenv("RECORDER_UPLOAD_MAX_BYTES", str(512 * 1024 * 1024)))
 MAX_DURATION_S = float(os.getenv("RECORDER_UPLOAD_MAX_DURATION_S", "14400"))
 TRANSCODE_TIMEOUT_S = float(os.getenv("RECORDER_UPLOAD_TIMEOUT_S", "1800"))
 RETRY_BACKOFF_S = 5.0
+ACK_TIMEOUT_S = 30.0
 
 # FFmpeg demuxer names that match the containers the BFF accepts.
 ALLOWED_DEMUXERS = "wav,mp3,flac,ogg,mov,matroska,aac,amr,aiff,asf,caf,avi"
@@ -70,6 +78,18 @@ class UploadRejected(Exception):
         self.reason = reason
 
 
+_TENANT_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _known_session(event: stream_pb2.RecordingFinished) -> bool:
+    """True when the event names a valid session UUID and tenant ID."""
+    try:
+        uuid.UUID(event.session_id)
+    except (ValueError, TypeError):
+        return False
+    return bool(event.tenant_id and _TENANT_ID_RE.fullmatch(event.tenant_id))
+
+
 def source_location(event: stream_pb2.RecordingFinished, bucket: str) -> str:
     """Return the S3 key of the uploaded source, or raise UploadRejected.
 
@@ -80,7 +100,7 @@ def source_location(event: stream_pb2.RecordingFinished, bucket: str) -> str:
         uuid.UUID(event.session_id)
     except ValueError:
         raise UploadRejected("invalid-session-id") from None
-    if not event.tenant_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", event.tenant_id):
+    if not event.tenant_id or not _TENANT_ID_RE.fullmatch(event.tenant_id):
         raise UploadRejected("invalid-tenant-id")
     m = re.fullmatch(r"s3://([^/]+)/(.+)", event.recording_url or "")
     if not m or m.group(1) != bucket:
@@ -197,12 +217,55 @@ def _store_and_publish(event, msg, wav_path: str, producer) -> None:
         raise RuntimeError("recordings.finished was not acknowledged")
 
 
+def publish_upload_failed(event: stream_pb2.RecordingFinished, reason: str, producer) -> None:
+    """Publish ``recordings.upload_failed`` for a rejected upload and wait for the broker ack.
+
+    The JSON value is ``{"schema_version": 1, "session_id", "tenant_id",
+    "reason", "created_at"}`` and the key is the session ID. Raises
+    RuntimeError when the broker does not acknowledge the event, so the caller
+    retries the upload message instead of dropping the failure.
+    """
+    payload = {
+        "schema_version": 1,
+        "session_id": event.session_id,
+        "tenant_id": event.tenant_id,
+        "reason": reason,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    }
+    errors = []
+
+    def _on_delivery(err, _msg):
+        if err is not None:
+            errors.append(err)
+
+    producer.produce(
+        topic=TOPIC_RECORDING_UPLOAD_FAILED,
+        key=event.session_id.encode("utf-8"),
+        value=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        headers=[("content-type", b"application/json")],
+        on_delivery=_on_delivery,
+    )
+    if producer.flush(ACK_TIMEOUT_S) > 0 or errors:
+        raise RuntimeError(f"{TOPIC_RECORDING_UPLOAD_FAILED} was not acknowledged")
+    logger.info("Published upload failure: session_id=%s tenant_id=%s reason=%s",
+                event.session_id, event.tenant_id, reason)
+
+
+def _reject(event: stream_pb2.RecordingFinished, reason: str, producer) -> str:
+    """Report a permanent rejection when the event names a session. Returns ``reason``."""
+    if _known_session(event):
+        publish_upload_failed(event, reason, producer)
+    return reason
+
+
 def process_upload(msg, *, producer, s3, bucket: Optional[str] = None) -> str:
     """Process one ``recordings.uploaded`` message.
 
     Returns ``"published"`` or the reason the upload was rejected. Rejections
-    are permanent and the caller commits the message. Other exceptions (storage
-    or Kafka unavailable) propagate so the caller retries the message.
+    are permanent: when the event names a valid session and tenant, the worker
+    publishes ``recordings.upload_failed`` and the caller commits the message.
+    Other exceptions (storage or Kafka unavailable, also for the failure event)
+    propagate so the caller retries the message; the source is then kept.
     """
     bucket = bucket or rw.S3_BUCKET
     event = stream_pb2.RecordingFinished()
@@ -211,10 +274,10 @@ def process_upload(msg, *, producer, s3, bucket: Optional[str] = None) -> str:
         key = source_location(event, bucket)
     except UploadRejected as e:
         logger.error("Rejected upload event: reason=%s", e.reason)
-        return e.reason
+        return _reject(event, e.reason, producer)
     except Exception:
         logger.error("Rejected upload event: reason=invalid-event")
-        return "invalid-event"
+        return _reject(event, "invalid-event", producer)
 
     log_ctx = {"session_id": event.session_id, "tenant_id": event.tenant_id}
     logger.info("Processing uploaded source: %s", log_ctx)
@@ -233,8 +296,9 @@ def process_upload(msg, *, producer, s3, bucket: Optional[str] = None) -> str:
         logger.info("Uploaded source converted: %s duration_s=%.2f", log_ctx, samples / rw.DEFAULT_SR)
         return "published"
     except UploadRejected as e:
-        finished = True
         logger.error("Uploaded source rejected: %s reason=%s", log_ctx, e.reason)
+        publish_upload_failed(event, e.reason, producer)
+        finished = True
         return e.reason
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

@@ -1,5 +1,6 @@
 """Unit tests for converting uploaded media into session recordings."""
 import io
+import json
 import math
 import os
 import shutil
@@ -77,17 +78,34 @@ class FakeS3:
 
 
 class FakeProducer:
-    def __init__(self):
+    """Records produced messages; ``delivery_error`` or ``pending`` simulate a missing ack."""
+
+    def __init__(self, delivery_error=None, pending=0):
         self.messages = []
+        self.delivery_error = delivery_error
+        self.pending = pending
+        self._callbacks = []
 
     def produce(self, **kwargs):
+        callback = kwargs.pop("on_delivery", None)
         self.messages.append(kwargs)
+        if callback:
+            self._callbacks.append(callback)
 
     def poll(self, _timeout):
         return 0
 
     def flush(self, _timeout):
-        return 0
+        for callback in self._callbacks:
+            callback(self.delivery_error, None)
+        self._callbacks = []
+        return self.pending
+
+
+def _failures(producer):
+    """Return the decoded recordings.upload_failed events that ``producer`` sent."""
+    return [(m["key"], json.loads(m["value"])) for m in producer.messages
+            if m["topic"] == uploads.TOPIC_RECORDING_UPLOAD_FAILED]
 
 
 @pytest.mark.parametrize("mutate,reason", [
@@ -202,7 +220,12 @@ def test_process_upload_rejects_undecodable_source_and_deletes_it(tmp_path, monk
     producer = FakeProducer()
 
     assert uploads.process_upload(FakeMsg(event), producer=producer, s3=s3, bucket=BUCKET) == "decode-failed"
-    assert producer.messages == []
+    [(msg_key, failure)] = _failures(producer)
+    assert len(producer.messages) == 1, "No recordings.finished for a rejected upload"
+    assert msg_key == event.session_id.encode()
+    assert failure.pop("created_at").endswith("Z")
+    assert failure == {"schema_version": 1, "session_id": event.session_id, "tenant_id": "tenant-a",
+                       "reason": "decode-failed"}
     assert s3.deleted == [(BUCKET, key)]
     assert list(tmp_path.glob("*.wav")) == []
 
@@ -222,8 +245,49 @@ def test_process_upload_rejects_missing_too_large_and_foreign_sources(monkeypatc
     s3 = FakeS3({})
     assert uploads.process_upload(FakeMsg(foreign), producer=producer, s3=s3, bucket=BUCKET) == "foreign-source"
     assert s3.deleted == [], "A foreign object is never touched"
-    assert uploads.process_upload(FakeMsg(b"\xff\xff"), producer=producer, s3=s3, bucket=BUCKET) == "invalid-event"
+    assert [(f["session_id"], f["reason"]) for _, f in _failures(producer)] == [
+        (event.session_id, "missing-source"), (event.session_id, "too-large"), (foreign.session_id, "foreign-source")]
+    assert len(producer.messages) == 3
+
+
+def test_process_upload_reports_no_failure_without_a_known_session():
+    producer = FakeProducer()
+    assert uploads.process_upload(FakeMsg(b"\xff\xff"), producer=producer, s3=FakeS3({}),
+                                  bucket=BUCKET) == "invalid-event"
+    bad_session = _event(session_id="../x")
+    assert uploads.process_upload(FakeMsg(bad_session), producer=producer, s3=FakeS3({}),
+                                  bucket=BUCKET) == "invalid-session-id"
+    bad_tenant = _event(tenant="a/b")
+    assert uploads.process_upload(FakeMsg(bad_tenant), producer=producer, s3=FakeS3({}),
+                                  bucket=BUCKET) == "invalid-tenant-id"
     assert producer.messages == []
+
+
+def test_process_upload_rejects_disabled_final_output():
+    event = _event()
+    key = uploads.source_location(event, BUCKET)
+    s3 = FakeS3({(BUCKET, key): b"x"})
+    producer = FakeProducer()
+    msg = FakeMsg(event, headers=[("x-outputs", b"realtime")])
+    assert uploads.process_upload(msg, producer=producer, s3=s3, bucket=BUCKET) == "final-output-disabled"
+    assert [f["reason"] for _, f in _failures(producer)] == ["final-output-disabled"]
+    assert s3.deleted == [(BUCKET, key)]
+
+
+@pytest.mark.parametrize("producer", [FakeProducer(pending=1), FakeProducer(delivery_error="broker down")],
+                         ids=["not-flushed", "delivery-error"])
+def test_unacknowledged_failure_event_keeps_the_source_for_retry(producer):
+    event = _event()
+    key = uploads.source_location(event, BUCKET)
+    s3 = FakeS3({(BUCKET, key): b"x"})
+    msg = FakeMsg(event, headers=[("x-outputs", b"realtime")])
+    with pytest.raises(RuntimeError, match="not acknowledged"):
+        uploads.process_upload(msg, producer=producer, s3=s3, bucket=BUCKET)
+    assert s3.deleted == [], "The source stays for the retry"
+
+    foreign = _event(bucket="other")
+    with pytest.raises(RuntimeError, match="not acknowledged"):
+        uploads.process_upload(FakeMsg(foreign), producer=producer, s3=s3, bucket=BUCKET)
 
 
 def test_process_upload_propagates_storage_outages_for_retry():
