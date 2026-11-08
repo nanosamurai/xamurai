@@ -112,3 +112,143 @@ def test_recorder_completion(kafka_bootstrap, tmp_path, end_marker, storage, req
             worker.terminate()
             worker.wait(timeout=10)
             consumer.close()
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(120)
+def test_recorder_converts_uploaded_source(kafka_bootstrap, tmp_path, localstack_s3):
+    """An uploaded file becomes a normal 16 kHz mono recording and its source is deleted."""
+    import shutil
+
+    import boto3
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    token = uuid.uuid4().hex
+    session_id = str(uuid.uuid4())
+    uploads_topic, finished_topic = f"uploaded.recorder.{token}", f"finished.recorder.{token}"
+    _ensure_topics(kafka_bootstrap, [f"audio.recorder.{token}", uploads_topic, finished_topic])
+    connection = localstack_s3
+    s3 = boto3.client("s3", endpoint_url=connection["endpoint_url"], region_name=connection["region"],
+                      aws_access_key_id=connection["access_key"],
+                      aws_secret_access_key=connection["secret_key"])
+    source_key = f"{token}/tenant/uploads/{session_id}/source"
+    stereo = io.BytesIO()
+    with wave.open(stereo, "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(44100)
+        wav.writeframes(b"\x01\x00\x02\x00" * 44100)
+    s3.put_object(Bucket=connection["bucket"], Key=source_key, Body=stereo.getvalue())
+    env = dict(os.environ, KAFKA_BOOTSTRAP=kafka_bootstrap, KAFKA_TOPIC_AUDIO=f"audio.recorder.{token}",
+               KAFKA_TOPIC_RECORDING_FINISHED=finished_topic, KAFKA_TOPIC_RECORDING_UPLOADED=uploads_topic,
+               KAFKA_GROUP_ID_RECORDER=token, RECORDING_STORAGE_BACKEND="s3",
+               S3_ENDPOINT=connection["endpoint_url"], S3_BUCKET=connection["bucket"],
+               S3_REGION=connection["region"], S3_ACCESS_KEY=connection["access_key"],
+               S3_SECRET_KEY=connection["secret_key"], S3_FORCE_PATH_STYLE="true", S3_PREFIX=token,
+               PYTHONPATH=os.pathsep.join(sys.path), OTEL_SDK_DISABLED="true")
+    consumer = Consumer({"bootstrap.servers": kafka_bootstrap, "group.id": token,
+                         "auto.offset.reset": "earliest", "enable.auto.commit": False})
+    consumer.subscribe([finished_topic])
+    producer = Producer({"bootstrap.servers": kafka_bootstrap, "enable.idempotence": True})
+    event = pb.RecordingFinished(session_id=session_id, tenant_id="tenant", lang="en",
+                                 recording_url=f"s3://{connection['bucket']}/{source_key}")
+    headers = [("x-outputs", b"final"), ("x-final-tracks", b"whisperx"), ("x-store-recording", b"true")]
+    producer.produce(uploads_topic, key=session_id, value=event.SerializeToString(), headers=headers)
+    assert producer.flush(10) == 0
+    with (tmp_path / "worker.log").open("w") as log:
+        worker = subprocess.Popen([sys.executable, "-m", "recorder_worker.recorder_worker"],
+                                  env=env, stdout=log, stderr=log)
+        try:
+            deadline = time.monotonic() + 60
+            message = None
+            while time.monotonic() < deadline and message is None:
+                assert worker.poll() is None, (tmp_path / "worker.log").read_text()
+                message = consumer.poll(.2)
+            assert message is not None, (tmp_path / "worker.log").read_text()
+            assert not message.error(), message.error()
+            finished = pb.RecordingFinished.FromString(message.value())
+            assert (finished.session_id, finished.tenant_id, finished.sample_rate) == (session_id, "tenant", 16000)
+            assert abs(finished.duration_s - 1.0) < 0.05
+            assert dict(message.headers())["x-final-tracks"] == b"whisperx"
+            location = urlparse(finished.recording_url)
+            assert location.path.startswith(f"/{token}/tenant/") and location.path.endswith("/audio.wav")
+            body = s3.get_object(Bucket=location.netloc, Key=location.path.lstrip("/"))["Body"].read()
+            with wave.open(io.BytesIO(body), "rb") as wav:
+                assert (wav.getnchannels(), wav.getframerate()) == (1, 16000)
+            assert s3.list_objects_v2(Bucket=connection["bucket"],
+                                      Prefix=f"{token}/tenant/uploads/")["KeyCount"] == 0
+        finally:
+            worker.terminate()
+            worker.wait(timeout=10)
+            consumer.close()
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(120)
+def test_recorder_reports_an_undecodable_upload(kafka_bootstrap, tmp_path, localstack_s3):
+    """A file FFmpeg cannot decode yields recordings.upload_failed and its source is deleted."""
+    import json
+    import shutil
+
+    import boto3
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    token = uuid.uuid4().hex
+    session_id = str(uuid.uuid4())
+    uploads_topic, finished_topic = f"uploaded.recorder.{token}", f"finished.recorder.{token}"
+    failed_topic = f"upload-failed.recorder.{token}"
+    _ensure_topics(kafka_bootstrap, [f"audio.recorder.{token}", uploads_topic, finished_topic, failed_topic])
+    connection = localstack_s3
+    s3 = boto3.client("s3", endpoint_url=connection["endpoint_url"], region_name=connection["region"],
+                      aws_access_key_id=connection["access_key"],
+                      aws_secret_access_key=connection["secret_key"])
+    source_key = f"{token}/tenant/uploads/{session_id}/source"
+    s3.put_object(Bucket=connection["bucket"], Key=source_key, Body=b"OggS" + os.urandom(4096))
+    env = dict(os.environ, KAFKA_BOOTSTRAP=kafka_bootstrap, KAFKA_TOPIC_AUDIO=f"audio.recorder.{token}",
+               KAFKA_TOPIC_RECORDING_FINISHED=finished_topic, KAFKA_TOPIC_RECORDING_UPLOADED=uploads_topic,
+               KAFKA_TOPIC_RECORDING_UPLOAD_FAILED=failed_topic,
+               KAFKA_GROUP_ID_RECORDER=token, RECORDING_STORAGE_BACKEND="s3",
+               S3_ENDPOINT=connection["endpoint_url"], S3_BUCKET=connection["bucket"],
+               S3_REGION=connection["region"], S3_ACCESS_KEY=connection["access_key"],
+               S3_SECRET_KEY=connection["secret_key"], S3_FORCE_PATH_STYLE="true", S3_PREFIX=token,
+               PYTHONPATH=os.pathsep.join(sys.path), OTEL_SDK_DISABLED="true")
+    consumer = Consumer({"bootstrap.servers": kafka_bootstrap, "group.id": token,
+                         "auto.offset.reset": "earliest", "enable.auto.commit": False})
+    consumer.subscribe([failed_topic, finished_topic])
+    producer = Producer({"bootstrap.servers": kafka_bootstrap, "enable.idempotence": True})
+    event = pb.RecordingFinished(session_id=session_id, tenant_id="tenant", lang="en",
+                                 recording_url=f"s3://{connection['bucket']}/{source_key}")
+    headers = [("x-outputs", b"final"), ("x-final-tracks", b"whisperx"), ("x-store-recording", b"true")]
+    producer.produce(uploads_topic, key=session_id, value=event.SerializeToString(), headers=headers)
+    assert producer.flush(10) == 0
+    with (tmp_path / "worker.log").open("w") as log:
+        worker = subprocess.Popen([sys.executable, "-m", "recorder_worker.recorder_worker"],
+                                  env=env, stdout=log, stderr=log)
+        try:
+            deadline = time.monotonic() + 60
+            message = None
+            while time.monotonic() < deadline and message is None:
+                assert worker.poll() is None, (tmp_path / "worker.log").read_text()
+                message = consumer.poll(.2)
+            assert message is not None, (tmp_path / "worker.log").read_text()
+            assert not message.error(), message.error()
+            assert message.topic() == failed_topic, "No recording is published for an undecodable file"
+            assert message.key() == session_id.encode()
+            failure = json.loads(message.value())
+            assert failure.pop("created_at")
+            assert failure == {"schema_version": 1, "session_id": session_id, "tenant_id": "tenant",
+                               "reason": "decode-failed"}
+            # The worker deletes the source after the failure event is acknowledged.
+            deadline = time.monotonic() + 10
+            remaining = 1
+            while time.monotonic() < deadline and remaining:
+                remaining = s3.list_objects_v2(Bucket=connection["bucket"],
+                                               Prefix=f"{token}/tenant/uploads/")["KeyCount"]
+                time.sleep(.2)
+            assert remaining == 0
+        finally:
+            worker.terminate()
+            worker.wait(timeout=10)
+            consumer.close()

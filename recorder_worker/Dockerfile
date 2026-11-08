@@ -13,10 +13,15 @@ ENV PYTHONPATH=/app:/app/shared/src:/app/rtservice/src:/app/whisperx_worker/src:
 
 WORKDIR /app
 
+# FFmpeg decodes untrusted uploaded files. Pin the Debian package so an update
+# is a reviewed change; bump it when Debian publishes a security fix.
+ARG FFMPEG_VERSION=7:7.1.5-0+deb13u1
+
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        ffmpeg=${FFMPEG_VERSION} \
     && rm -rf /var/lib/apt/lists/*
 
 COPY constraints.active-speech.txt /opt/constraints.active-speech.txt
@@ -60,4 +65,6 @@ VOLUME ["/data/recordings"]
 # - RECORDING_DIR (default /data/recordings)
 # - S3_ENDPOINT (optional), S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY, S3_FORCE_PATH_STYLE
 # - S3_PREFIX (optional)
+# - KAFKA_TOPIC_RECORDING_UPLOADED, RECORDER_UPLOADS_ENABLED
+# - RECORDER_UPLOAD_MAX_BYTES, RECORDER_UPLOAD_MAX_DURATION_S, RECORDER_UPLOAD_TIMEOUT_S
 CMD ["python", "-m", "recorder_worker.recorder_worker"]
