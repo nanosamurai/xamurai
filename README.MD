@@ -143,7 +143,8 @@ endpoint with SamuraiBFF.
    `SessionTranscript` to `transcripts.final`.
 
 An uploaded file skips steps 1-3: `recorder_worker` converts it with FFmpeg
-from `recordings.uploaded` into the same recording and continues at step 4. See
+from `recordings.uploaded` into the same recording and continues at step 4. A
+file it cannot convert is reported on `recordings.upload_failed`. See
 [`docs/uploaded-files.md`](docs/uploaded-files.md).
 
 Kafka messages propagate W3C `traceparent` headers. Services also attach the

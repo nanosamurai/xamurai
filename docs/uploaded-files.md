@@ -27,6 +27,7 @@ the session follows the same path as a live session.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `KAFKA_TOPIC_RECORDING_UPLOADED` | `recordings.uploaded` | Input topic |
+| `KAFKA_TOPIC_RECORDING_UPLOAD_FAILED` | `recordings.upload_failed` | Output topic for rejected uploads |
 | `RECORDER_UPLOADS_ENABLED` | `true` | Starts the upload consumer; also needs `S3_BUCKET` |
 | `RECORDER_UPLOAD_MAX_BYTES` | `536870912` | Largest source object the worker downloads |
 | `RECORDER_UPLOAD_MAX_DURATION_S` | `14400` | Longest decoded audio |
@@ -38,19 +39,36 @@ The source is always read from `S3_BUCKET`, also when
 
 ## Failures
 
-These problems are permanent. The worker logs the reason with the session and
-tenant IDs, deletes the source and commits the message. No recording or
-transcript is produced:
+These problems are permanent. No recording or transcript is produced. The
+reason code is in brackets:
 
 - the event does not point at `<tenant_id>/uploads/<session_id>/source` in
-  `S3_BUCKET` (the worker does not read or delete the object);
-- the source is missing or larger than `RECORDER_UPLOAD_MAX_BYTES`;
-- FFmpeg fails, finds no audio, runs past the timeout, or the audio is longer
-  than `RECORDER_UPLOAD_MAX_DURATION_S`;
-- the message disables the final output.
+  `S3_BUCKET` (`foreign-source`; the worker does not read or delete the
+  object), or has an invalid session ID, tenant ID or encoding
+  (`invalid-session-id`, `invalid-tenant-id`, `invalid-event`);
+- the source is missing (`missing-source`) or larger than
+  `RECORDER_UPLOAD_MAX_BYTES` (`too-large`);
+- FFmpeg fails (`decode-failed`), finds no audio (`no-audio`), runs past the
+  timeout (`timeout`), or the audio is longer than
+  `RECORDER_UPLOAD_MAX_DURATION_S` (`too-long`);
+- the message disables the final output (`final-output-disabled`).
 
-A storage or Kafka outage is not permanent. The worker keeps the source and
-retries the same message after five seconds.
+The worker logs the reason with the session and tenant IDs. When the event
+names a valid session ID and tenant ID, it publishes a JSON event to
+`recordings.upload_failed` (key: session ID) and waits for the broker ack:
+
+```json
+{"schema_version": 1, "session_id": "<uuid>", "tenant_id": "<tenant_id>",
+ "reason": "decode-failed", "created_at": "2026-11-08T10:00:00.000Z"}
+```
+
+SamuraiBFF consumes it and sets the session status to `failed`. The event and
+the logs contain IDs and the reason code only, never file content. After the
+ack, the worker deletes the source and commits the message.
+
+A storage or Kafka outage is not permanent, also when the failure event is not
+acknowledged. The worker keeps the source and retries the same message after
+five seconds.
 
 ## Security
 
