@@ -65,8 +65,7 @@ Local validation on 2026-09-17: 122 lightweight regression checks and both
 real native Parakeet integration tests passed. Rebuilt Parakeet/WhisperX images
 passed Nanosamurai's real refinement and finalizer Compose probes, including
 replay, silence, live/history routing and playback. Worker Python is 91 lines
-smaller after the shared-runtime extraction. Deployment evidence belongs to
-`nanodeploy/docs/asr-platform/parakeet-refinement-spike.md`.
+smaller after the shared-runtime extraction.
 The existing shared-runtime Compose smoke also passed owner loss, interleaved
 reconstruction, replicas, bounded queues, independent failure/restart, database
 retry and tenant rejection with the updated inference callback.

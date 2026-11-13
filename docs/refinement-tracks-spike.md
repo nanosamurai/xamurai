@@ -22,7 +22,7 @@ verified, and every published local port binds to 127.0.0.1.
 
 The repeatable overlay/probe and complete evidence live in Nanosamurai's
 `docker-compose.refinement-tracks-smoke.yml`, `smoke-tests/refinement-tracks/`
-and `docs/refinement-tracks-spike.md`, mirrored in Nanodeploy. Production workers
+and `docs/smoke-tests.md`. Production workers
 have no synthetic mode, no new Kafka topics and no new window/result storage.
 
 The worker's conservative checkpoint retains each active session's first input

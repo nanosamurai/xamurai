@@ -25,7 +25,7 @@ to localhost and build contexts exclude credentials and scratch files.
 
 The repeatable overlay, assertions and runbook live in Nanosamurai at
 `docker-compose.final-tracks-smoke.yml`, `smoke-tests/final-tracks/` and
-`docs/final-tracks-spike.md`, mirrored in Nanodeploy. The rollout and full smoke
+`docs/smoke-tests.md`. The rollout and full smoke
 now target the original Compose project `nanosamurai` and its Postgres 18 database,
 with migrations 017/018 applied there. Its 117 original transcripts and 51
 recording records were preserved; obsolete metadata was backed up before cleanup.
