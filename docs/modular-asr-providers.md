@@ -1,12 +1,13 @@
 # Modular realtime ASR services
 
-Faster-Whisper, Qwen, and Nemotron are peer services behind the same public
+Faster-Whisper, Qwen, Nemotron, and Voxtral are peer services behind the same public
 `RealtimeASR` gRPC API. SamuraiBFF owns the configured track list and fans one
 accepted audio stream out to those peers. There is no
 `rtservice -> SpeechProvider gRPC -> Qwen` hop.
 The repository [README](../README.md#model-pipelines) summarizes every Xamurai
 service's model pipeline; this guide defines the realtime contract and the three
-current fixed provider profiles in detail.
+original fixed provider profiles in detail. The [Voxtral realtime guide](voxtral-realtime.md)
+adds its version-pinned vLLM profile, bounded queues, and deployment-owned capacity.
 
 ```mermaid
 flowchart LR
@@ -45,11 +46,18 @@ flowchart LR
         end
     end
 
+    subgraph voxtralImage["Docker image: xamurai-voxtral-rtservice"]
+        VoxtralAPI["RealtimeASR\nGetCapabilities + Stream"]
+        VoxtralEngine["Voxtral Mini 4B Realtime 2602\nshared async vLLM engine"]
+        VoxtralAPI --> VoxtralEngine
+    end
+
     WS --> Fanout
     WS --> KafkaOnce
     Fanout -->|"track=faster-whisper"| FasterAPI
     Fanout -->|"track=qwen"| QwenAPI
     Fanout -->|"track=nemotron"| NemotronAPI
+    Fanout -->|"track=voxtral"| VoxtralAPI
     FasterAPI --> SpeechProvider --> Faster --> FasterJoin
     FasterAPI -->|"FINAL audio"| FasterDiar --> FasterJoin
     QwenAPI --> QwenBackend --> QwenAligner --> QwenJoin
@@ -82,7 +90,8 @@ Cancellation is immediate teardown and does not synthesize a final result.
 
 Every `Stream` RPC carries `x-session-id` metadata. Before consuming any
 `AudioChunk`, the serving process atomically reserves one of its
-`RT_SERVING_MAX_SESSIONS` slots (default `1`). A successful reservation is the
+`RT_SERVING_MAX_SESSIONS` slots (default `1` for the original peers; Voxtral
+requires an explicit deployment capacity). A successful reservation is the
 first response:
 
 ```text
@@ -128,6 +137,7 @@ sharing stream cache rows.
 
 | BFF track | Provider profile | Runtime and mode | Timing claims |
 | --- | --- | --- | --- |
+| `voxtral` | `voxtral-mini-4b-realtime-2602-vllm-r1` | Pinned Voxtral Mini 4B Realtime 2602 BF16; vLLM 0.32.0; bounded native streaming epochs and configurable shared-engine concurrency | Coarse epoch coverage; no segment/word alignment, detected-language, or speaker-label claim |
 | `faster-whisper` | `faster-whisper-medium-ctranslate2-r2` | `Systran/faster-whisper-medium`; Faster-Whisper 1.2 / CTranslate2 4.x (installed versions reported in provenance); `pyannote/speaker-diarization-3.1`; contextual windowed realtime with optional Silero VAD and enrollment mapping | Text-only greedy drafts; internal absolute FINAL word timestamps with deterministic seam ownership; public coalesced speaker segments |
 | `qwen` | `qwen3-asr-0.6b-vllm-aligned-diarized-r3` | `Qwen/Qwen3-ASR-0.6B`; `Qwen/Qwen3-ForcedAligner-0.6B`; `pyannote/speaker-diarization-3.1`; `qwen-asr==0.0.6`; `vllm==0.14.0`; bounded native-streaming epochs; one concurrent session by default | Aligned, speaker-labelled final segments for the aligner's advertised languages; coarse speakerless fallback otherwise; no word-timestamp claim |
 | `nemotron` | `nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r2` | `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF; `nemo-speech-cpp==0.1.0`; cache-aware RNNT streaming; native Silero VAD; one concurrent session per replica by default | Native partials and finals with processed-audio duration; no segment, word, or speaker-label claim |

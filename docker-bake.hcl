@@ -30,6 +30,11 @@ target "qwen-rtservice" {
   tags = ["xamurai-qwen-rtservice:${TAG}"]
 }
 
+target "voxtral-rtservice" {
+  dockerfile = "voxtral_rtservice/Dockerfile"
+  tags = ["xamurai-voxtral-rtservice:${TAG}"]
+}
+
 target "qwen-finalizer" {
   dockerfile = "qwen_worker/Dockerfile.finalizer"
   contexts = { qwen-rtservice = "target:qwen-rtservice" }

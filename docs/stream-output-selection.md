@@ -104,7 +104,8 @@ Notes:
 Each service publishes `RealtimeCapabilities.session_settings_json`: a JSON map
 of setting keys to `{display_name, type, default, min, max}`. Types are `boolean`,
 `integer`, or `decimal` (UI step 0.01); booleans omit min/max. Defaults reflect the
-running service's configuration. Qwen currently publishes `{}`.
+running service's configuration. Qwen and Voxtral currently publish `{}`;
+Voxtral model/runtime and capacity settings are deployment-owned.
 
 The BFF sends one `x-rt-settings` JSON object per selected track. Faster Whisper
 accepts `window_sec`, `overlap_sec`, `emit_every_sec`, and `partial_enable`.

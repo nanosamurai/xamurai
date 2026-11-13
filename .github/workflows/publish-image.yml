@@ -70,6 +70,8 @@ jobs:
             ghcr_repo: xamurai-finalizer-worker
           - image: qwen-rtservice
             ghcr_repo: xamurai-qwen-rtservice
+          - image: voxtral-rtservice
+            ghcr_repo: xamurai-voxtral-rtservice
           - image: qwen-finalizer
             ghcr_repo: xamurai-qwen-finalizer
           - image: qwen-refinement
