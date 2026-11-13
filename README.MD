@@ -235,7 +235,7 @@ in `tests/data/README.md`.
 End-to-end stack smoke tests live with their owning environments:
 
 - public Community Edition smoke tests: `nanosamurai/nanosamurai`
-- private deployment smoke tests: the deployment repository
+- deployment-specific smoke tests: kept with each deployment
 
 ## Build service images
 

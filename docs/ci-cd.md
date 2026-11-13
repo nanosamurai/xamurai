@@ -19,6 +19,12 @@ retired `final_track_vector.json` fixture: the AWS-account-ID rule otherwise
 misidentifies their twelve-digit tails in historical commits `03a52322` and
 `0e5f97cd`. New findings, including new occurrences in that path, remain checked.
 
+The `private-deployment-repository` rule blocks every link into the original
+personal GitHub account instead of naming individual private repositories. Exact
+`.gitleaksignore` fingerprints cover the reviewed historical README and
+observability-doc links that predate it; history is not rewritten, and any new
+link fails the scan.
+
 Pull requests targeting `master` or the unmerged `validate-nemotron-realtime`
 base run the lightweight CI and Gitleaks workflows. This lets the optional
 Sortformer/enrollment PR be reviewed and checked independently of its ASR base.

@@ -25,3 +25,13 @@ ef424f47537ac75baefc6909f55e95d3ecd9901e:rtservice/environment.yml:developer-hom
 # Scope these exceptions to the two reviewed historical additions only.
 03a52322f417853121ecfff69bcf5f263dad86f6:tests/data/final_track_vector.json:aws-account-id:1
 0e5f97cd59a6fe49b928ace3f9166c206207cf17:tests/data/final_track_vector.json:aws-account-id:1
+# Historical README and observability links to private repositories, reported
+# once the private-repository rule matched every link to that GitHub account.
+2337a46ba6cf9e2928f0a1a4cc278ac8a3f99085:README.MD:private-deployment-repository:7
+2337a46ba6cf9e2928f0a1a4cc278ac8a3f99085:README.MD:private-deployment-repository:14
+2bb848042c247875b2a9a5843c7f3341d93310fa:docs/local-k8s-observability.md:private-deployment-repository:54
+4550d83e7878a22e1814996ff86e397d21f03ff5:README.MD:private-deployment-repository:17
+4550d83e7878a22e1814996ff86e397d21f03ff5:README.MD:private-deployment-repository:19
+4550d83e7878a22e1814996ff86e397d21f03ff5:README.MD:private-deployment-repository:22
+912a8d591554df3404cbd58dbc01d2368923d0e8:README.MD:private-deployment-repository:17
+912a8d591554df3404cbd58dbc01d2368923d0e8:README.MD:private-deployment-repository:19
