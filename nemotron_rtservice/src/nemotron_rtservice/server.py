@@ -12,6 +12,7 @@ import numpy as np
 
 from nemotron_rtservice.native import (
     DEFAULT_ENDPOINTING_SILENCE_MS,
+    DEFAULT_MAX_UTTERANCE_SECONDS,
     MODEL_DIGEST,
     MODEL_REVISION,
     NativeNemotronBackend,
@@ -25,9 +26,9 @@ from nemo_speech_native import NEMO_SPEECH_REVISION, SORTFORMER_MODEL_REVISION
 
 logger = logging.getLogger(__name__)
 
-PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r2"
-DIARIZED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-q8-r3"
-ENROLLED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-enrolled-q8-r3"
+PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-nemo-speech-cpp-q8-r3"
+DIARIZED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-q8-r4"
+ENROLLED_PROFILE_ID = "nemotron-3.5-asr-streaming-0.6b-sortformer-enrolled-q8-r4"
 SAMPLE_RATE = 16_000
 MAX_CHUNK_BYTES = 1_048_576
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -77,6 +78,10 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
         self._instance_id = serving_instance_id()
         self._diarization = bool(getattr(backend, "diarization", False))
         self._enrollment = enrollment
+        self._audio_limit_bytes = (
+            getattr(backend, "max_utterance_seconds", DEFAULT_MAX_UTTERANCE_SECONDS) * SAMPLE_RATE * 2
+            + MAX_CHUNK_BYTES
+        )
         self._session_settings = {
             "endpointing_silence_ms": {
                 "display_name": "Endpointing silence (ms)", "type": "integer", "min": 1, "max": 30000,
@@ -103,7 +108,7 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
             runtime=self._backend.runtime,
             model_revision=MODEL_REVISION,
             model_digest=MODEL_DIGEST,
-            implementation_revision=(f"nemo-speech-cpp:{NEMO_SPEECH_REVISION};silero:6.2.0"
+            implementation_revision=(f"nemo-speech-cpp:{NEMO_SPEECH_REVISION};silero:6.2.0;duration-endpointing:1"
                                      + (f";sortformer:{SORTFORMER_MODEL_REVISION}" if self._diarization else "")
                                      + (f";wespeaker:{EMBEDDING_MODEL_REVISION}" if self._enrollment is not None else "")),
             speaker_labels=self._diarization,
@@ -207,9 +212,9 @@ class NemotronRealtimeServicer(stream_pb2_grpc.RealtimeASRServicer):
                 total_samples += len(chunk.pcm16_le) // 2
                 if self._enrollment is not None:
                     audio.extend(chunk.pcm16_le)
-                    # One 30 s native utterance plus the largest accepted
+                    # One maximum native utterance plus the largest accepted
                     # ingress chunk; no session-lifetime audio accumulation.
-                    del audio[:max(0, len(audio) - 64 * SAMPLE_RATE * 2)]
+                    del audio[:max(0, len(audio) - self._audio_limit_bytes)]
                 for update in native_stream.push(chunk.pcm16_le, chunk.sample_rate):
                     yield from events(update)
 

@@ -78,6 +78,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 RUN echo "83d702b11378ced4b1bbfcb53394bd00994f7382ff0b9a11b87605dd0898369d  /opt/vad-model/silero-v6.2.0.gguf" | sha256sum --check --strict
 
+FROM native-builder AS native-patched
+COPY nemo_speech_native/patches/duration-endpointing.patch /tmp/duration-endpointing.patch
+RUN git apply /tmp/duration-endpointing.patch \
+    && cmake --build /work/build --parallel 2 \
+    && cmake --install /work/build --prefix /opt/nemo-speech
+
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867 AS native-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -121,7 +127,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 ENV PATH=/opt/venv/bin:${PATH}
 
-COPY --from=native-builder /opt/nemo-speech /opt/nemo-speech
+COPY --from=native-patched /opt/nemo-speech /opt/nemo-speech
 COPY --from=vad-converter /opt/vad-model /opt/nemo-speech/models
 COPY proto_gen /app/proto_gen
 COPY shared/src /app/shared/src

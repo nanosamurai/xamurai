@@ -338,6 +338,39 @@ def test_tenant_cannot_change_after_admission(running_server):
     assert backend.opens[0][2].closed == 1
 
 
+def test_enrollment_keeps_early_speech_in_a_configured_long_utterance(monkeypatch):
+    monkeypatch.setenv('NEMOTRON_RTSERVICE_BIND_ADDR', '127.0.0.1')
+    monkeypatch.setattr(_FakeStream, 'finish', lambda self: (
+        TranscriptUpdate('Early. Late.', True, 170, 'en-US', (
+            SpeakerWord('Early.', 1, 3, 1), SpeakerWord('Late.', 168, 170, 2))),))
+    backend = _FakeBackend()
+    backend.diarization = True
+    backend.max_utterance_seconds = 180
+
+    class Mapper:
+        calls = 0
+        def identify(self, tenant, audio, *, is_active):
+            assert tenant == 'tenant-a' and is_active()
+            assert len(audio) == 2 * 16000
+            self.calls += 1
+            return 'Enrolled name'
+
+    mapper = Mapper()
+    server = create_server(backend, port=0, maximum_sessions=1, enrollment=mapper)
+    server.start()
+    channel = grpc.insecure_channel(f'127.0.0.1:{server.bound_port}')
+    try:
+        chunks = [_chunk(sequence=i, payload=b'\x01\x00' * 160000, lang='en') for i in range(17)]
+        for chunk in chunks:
+            chunk.tenant_id = 'tenant-a'
+        events = list(_call(stream_pb2_grpc.RealtimeASRStub(channel), iter(chunks)))
+        assert [event.speaker for event in events if event.type == stream_pb2.FINAL] == ['Enrolled name'] * 2
+        assert mapper.calls == 2
+    finally:
+        channel.close()
+        server.stop(grace=None).wait()
+
+
 def test_automatic_language_detection_accepts_successive_chunks(running_server):
     _, stub = running_server
     events = list(_call(stub, iter((_chunk(sequence=1, lang=''), _chunk(sequence=2, lang='')))))

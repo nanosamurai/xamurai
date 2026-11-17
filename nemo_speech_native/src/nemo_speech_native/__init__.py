@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 
-NEMO_SPEECH_VERSION = "0.1.0"
+NEMO_SPEECH_VERSION = "0.1.0+xamurai.1"
 NEMO_SPEECH_REVISION = "4f9676226f667d14608487df744f375db87127f8"
 SORTFORMER_MODEL_ID = "nvidia/diar_streaming_sortformer_4spk-v2"
 SORTFORMER_MODEL_FILENAME = "diar_streaming_sortformer_4spk-v2.q8_0.gguf"
@@ -57,6 +57,9 @@ class EndpointingConfig(ctypes.Structure):
         ("enable", ctypes.c_bool),
         ("vad_based", ctypes.c_bool),
         ("stop_history_eou_ms", ctypes.c_int32),
+        ("soft_after_ms", ctypes.c_int32),
+        ("soft_silence_ms", ctypes.c_int32),
+        ("max_utterance_ms", ctypes.c_int32),
     ]
 
 
