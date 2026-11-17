@@ -10,8 +10,6 @@ Mistral API. The image is built with `docker buildx bake --load voxtral-rtservic
 This implementation supplies production lifecycle and resource controls; a
 successful image build or CPU test does not qualify a GPU concurrency setting.
 Complete the capacity and quality checks below before production rollout.
-See [local validation and image security results](voxtral-validation.md) for
-the two-session GPU smoke, measured timings, and outstanding release gates.
 
 ## Runtime decision and boundaries
 
@@ -235,6 +233,9 @@ input backpressure. Supply several WAV paths and one distinct `--expect WORD`
 per fixture to check recognition and cross-session word contamination. It does
 not measure WER, prove general tenant isolation, or replace a multi-hour soak. Use separate recordings and reference
 transcripts for quality and cross-session contamination checks.
+
+Scan the release image before rollout. Review kernel-header findings against the
+deployment host and reconcile upstream SBOM entries with installed package versions.
 
 Before rollout, record image/model hashes, GPU/driver, configuration, corpus
 provenance, and results. Qualification must include concurrent speech and silence,
