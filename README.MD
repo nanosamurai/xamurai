@@ -11,33 +11,45 @@ do not live in this service repository.
 
 ## Services
 
-- `rtservice` exposes the bidirectional `RealtimeASR` gRPC API and emits
-  Faster-Whisper replaceable partials and pyannote-diarized committed finals,
-  with optional enrolled-speaker mapping.
-- `qwen_rtservice` exposes the same `RealtimeASR` API using Qwen3-ASR's native
-  vLLM streaming implementation, then forced-aligns and pyannote-diarizes each
-  bounded final epoch when the detected language is supported.
-- `qwen_worker` provides batched vLLM finalization and refinement with pyannote
-  speaker turns and forced-aligned words, sharing model loading and alignment
-  validation with realtime. See [Qwen workers](docs/qwen-workers.md).
-- `nemotron_rtservice` exposes the same API using Nemotron 3.5 ASR's
-  cache-aware streaming graph through the stable NeMo-Speech.cpp C ABI, with
-  optional native Sortformer diarization and tenant-specific S3 speaker matching.
-- `whisperx_worker` contains one WhisperX pipeline with separate or combined workers:
-  `whisperx_worker.refinement` reads audio windows from `audio.raw` and emits
-  `transcripts.refined`; `whisperx_worker.finalizer` reads completed recordings
-  and emits `transcripts.final`. The optional `whisperx-shared` track runs both
-  stages in one process, sharing model memory and ASR batches. All use pyannote
-  and optional enrolled names. See [WhisperX tracks and setup](docs/whisperx-shared.md).
-- `parakeet_worker` contains the Parakeet TDT 0.6B v3 pipeline and
-  refinement/finalizer entrypoints, with embedded Sortformer and native word timing.
-  It supports up to four anonymous speakers per window or recording. See
-  [Parakeet refinement](docs/parakeet-refinement.md) for the semi-batch worker.
-- `nemo_speech_native` contains the shared NeMo-Speech.cpp bindings, runtime
-  checks, verified model downloads and native Docker base for Nemotron and Parakeet.
+### Realtime transcription
+
+These services implement the same bidirectional `RealtimeASR` gRPC API.
+
+- `rtservice` (Faster-Whisper) emits replaceable partials and speaker-labelled
+  finals using pyannote, with optional enrolled-speaker matching.
+- `nemotron_rtservice` streams Nemotron 3.5 ASR through NeMo-Speech.cpp, with
+  optional native Sortformer diarization and tenant-specific speaker matching.
+- `voxtral_rtservice` streams Voxtral Mini 4B Realtime 2602 through one shared
+  asynchronous vLLM engine. It supports configurable concurrent sessions and
+  emits text without speaker labels. See [Voxtral realtime](docs/voxtral-realtime.md)
+  for capacity sizing and epoch-boundary limits.
+- `qwen_rtservice` streams Qwen3-ASR through vLLM, then aligns and diarizes
+  completed epochs for supported languages. Its realtime profile is qualified
+  for one concurrent session per replica.
+
+### Refinement and finalization
+
+- **Shared WhisperX** (`whisperx_worker.combined`, track `whisperx-shared`)
+  runs both stages in one process. They share model memory and can batch
+  compatible audio chunks together. See [WhisperX tracks and setup](docs/whisperx-shared.md).
+- **Separate WhisperX workers** (track `whisperx`) run the same pipeline when
+  the stages need independent capacity or failure isolation.
+  `whisperx_worker.finalizer` transcribes completed recordings and emits
+  `transcripts.final`; `whisperx_worker.refinement` processes windows from
+  `audio.raw` and emits `transcripts.refined`.
+- `parakeet_worker` provides separate Parakeet TDT v3 workers for both stages,
+  with native word timing and embedded Sortformer diarization for up to four
+  anonymous speakers per window or recording. See [Parakeet refinement](docs/parakeet-refinement.md).
+- `qwen_worker` provides batched Qwen3-ASR refinement and finalization with
+  pyannote speaker turns and forced-aligned words. See [Qwen workers](docs/qwen-workers.md).
+
+### Recording and shared components
+
 - `recorder_worker` stores session audio and emits `recordings.finished`.
   [Ordered audio completion](docs/ordered-audio-end.md) finalizes normal Stop
   immediately; the 30-second idle timeout remains an interruption fallback.
+- `nemo_speech_native` contains the shared NeMo-Speech.cpp bindings, runtime
+  checks, verified model downloads and native Docker base for Nemotron and Parakeet.
 - `xamurai_serving.finalization` contains the shared recording download,
   track selection, publication and replay loop. Each finalizer supplies its pipeline.
 - `xamurai_serving.refinement` and `refinement_runtime` share window buffering,
@@ -94,11 +106,18 @@ flowchart LR
         end
     end
 
+    subgraph voxtralImage["Docker image: xamurai-voxtral-rtservice"]
+        VoxtralAPI["RealtimeASR\nGetCapabilities + Stream"]
+        VoxtralEngine["Voxtral Mini 4B Realtime 2602\nshared async vLLM engine"]
+        VoxtralAPI --> VoxtralEngine
+    end
+
     WS --> Fanout
     WS --> KafkaOnce
     Fanout -->|"track=faster-whisper"| FasterAPI
     Fanout -->|"track=qwen"| QwenAPI
     Fanout -->|"track=nemotron"| NemotronAPI
+    Fanout -->|"track=voxtral"| VoxtralAPI
     FasterAPI --> SpeechProvider --> Faster --> FasterJoin
     FasterAPI -->|"FINAL audio"| FasterDiar --> FasterJoin
     QwenAPI --> QwenBackend --> QwenAligner --> QwenJoin
@@ -115,11 +134,12 @@ fallbacks, and resource bounds.
 | Service | Stage and interface | ASR and alignment models | Speaker and speech models | Output behavior |
 | --- | --- | --- | --- | --- |
 | `rtservice` | Realtime gRPC | Fixed `Systran/faster-whisper-medium` profile through Faster-Whisper/CTranslate2 | `pyannote/speaker-diarization-3.1`; optional `pyannote/embedding` enrollment mapping and Silero VAD | Replaceable partials; contextual, timestamp-owned, speaker-labelled finals |
-| `qwen_rtservice` | Realtime gRPC | Fixed `Qwen/Qwen3-ASR-0.6B` plus `Qwen/Qwen3-ForcedAligner-0.6B` | Fixed `pyannote/speaker-diarization-3.1` pipeline | Native-streaming partials; aligned and diarized epoch finals for supported alignment languages, with a coarse speakerless fallback |
 | `nemotron_rtservice` | Realtime gRPC | Fixed `nvidia/nemotron-3.5-asr-streaming-0.6b` Q8 GGUF through NeMo-Speech.cpp | Optional Sortformer v2 Q8; WeSpeaker ONNX for S3 enrollment | Native partials; optionally timed, speaker-labelled finals; no public word-timestamp claim |
-| `whisperx_worker.refinement` | Kafka refinement | WhisperX `medium` by default (`WHISPERX_MODEL` is operator-configurable) plus its language-specific alignment model | `pyannote/speaker-diarization-3.1` by default; optional `pyannote/embedding` enrollment mapping | Speaker-aware refined windows while the session is in progress |
-| `whisperx_worker.finalizer` | Kafka completed-recording pipeline | Reuses the WhisperX ASR and language-alignment pipeline | Reuses the pyannote diarization and optional enrollment pipeline | Canonical full-session transcript with word timing where alignment succeeds |
+| `voxtral_rtservice` | Realtime gRPC | Pinned `mistralai/Voxtral-Mini-4B-Realtime-2602` BF16 through async vLLM 0.32.0 | None | Native partials and coarse epoch finals; configurable concurrent streams; no alignment or speaker-label claim |
+| `qwen_rtservice` | Realtime gRPC | Fixed `Qwen/Qwen3-ASR-0.6B` plus `Qwen/Qwen3-ForcedAligner-0.6B` | Fixed `pyannote/speaker-diarization-3.1` pipeline | Native-streaming partials; aligned and diarized epoch finals for supported alignment languages, with a coarse speakerless fallback |
 | `whisperx_worker.combined` | Kafka refinement and finalization (`whisperx-shared`) | One shared Whisper ASR model; preloaded language aligners can run concurrently | Shared pyannote diarization and optional enrollment pipeline | Same outputs as the separate WhisperX workers, with shared memory, batching and capacity |
+| `whisperx_worker.finalizer` | Kafka completed-recording pipeline | Reuses the WhisperX ASR and language-alignment pipeline | Reuses the pyannote diarization and optional enrollment pipeline | Canonical full-session transcript with word timing where alignment succeeds |
+| `whisperx_worker.refinement` | Kafka refinement | WhisperX `medium` by default (`WHISPERX_MODEL` is operator-configurable) plus its language-specific alignment model | `pyannote/speaker-diarization-3.1` by default; optional `pyannote/embedding` enrollment mapping | Speaker-aware refined windows while the session is in progress |
 | `parakeet_worker.finalizer` | Kafka completed-recording pipeline | Parakeet TDT 0.6B v3 Q8 through NeMo-Speech.cpp; native word timing | Embedded Sortformer v2 Q8 | Independent final track with up to four anonymous speakers |
 | `qwen_worker.refinement` / `qwen_worker.finalizer` | Kafka audio windows / completed recordings | Pinned Qwen3-ASR-0.6B through vLLM plus Qwen forced alignment, batched speaker-turn crops | Shared pinned pyannote pipeline | Speaker-labelled segments and aligned words for final playback highlighting |
 | `recorder_worker` | Kafka and object storage | None | None | Model-free session WAV assembly and completion notification |
@@ -155,6 +175,7 @@ session and tenant identifiers needed for correlation and isolation.
 - `proto/` and `proto_gen/`: protobuf contract and generated Python bindings
 - `rtservice/`: realtime gRPC service
 - `qwen_rtservice/`: isolated Qwen3-ASR/vLLM realtime service
+- `voxtral_rtservice/`: isolated Voxtral/vLLM realtime service
 - `qwen_worker/`: batched Qwen pipeline and refinement/finalizer entrypoints
 - `nemotron_rtservice/`: isolated Nemotron/NeMo-Speech.cpp realtime service
 - `whisperx_worker/`: shared WhisperX pipeline, refinement and finalizer entrypoints
@@ -213,6 +234,8 @@ pytest -q -m "not integration" \
   tests/test_rtservice_session_isolation_unit.py \
   tests/test_speech_provider_integration.py \
   tests/test_qwen_rtservice_integration.py \
+  tests/test_voxtral_realtime.py \
+  tests/test_voxtral_backend.py \
   tests/test_nemotron_rtservice_integration.py \
   tests/test_stream_controls_unit.py
 ```
@@ -245,6 +268,7 @@ their consumers:
 ```bash
 docker buildx bake --load whisperx-worker finalizer-worker nemotron-rtservice parakeet-finalizer
 docker buildx bake --load rtservice recorder-worker qwen-rtservice qwen-finalizer qwen-refinement
+docker buildx bake --load voxtral-rtservice
 ```
 
 Images use the `local` tag by default; set `TAG` to select another tag.
@@ -262,6 +286,7 @@ The GitHub image workflow publishes immutable `sha-<git-sha>` tags to:
 - `ghcr.io/nanosamurai/xamurai-recorder-worker`
 - `ghcr.io/nanosamurai/xamurai-finalizer-worker`
 - `ghcr.io/nanosamurai/xamurai-qwen-rtservice`
+- `ghcr.io/nanosamurai/xamurai-voxtral-rtservice`
 - `ghcr.io/nanosamurai/xamurai-qwen-finalizer`
 - `ghcr.io/nanosamurai/xamurai-qwen-refinement`
 - `ghcr.io/nanosamurai/xamurai-nemotron-rtservice`
@@ -297,6 +322,11 @@ Qwen realtime service settings include:
   `QWEN_MAX_MODEL_LEN`
 - `QWEN_KV_CACHE_MIB` (an explicit vLLM KV-cache allocation rather than a
   fraction of all available VRAM)
+
+Voxtral realtime requires an explicit `RT_SERVING_MAX_SESSIONS` capacity. Its
+model manifest, epoch length, engine context, KV allocation, scheduler batch
+budget, tensor parallelism, queues, and timeouts are operator-configurable;
+see [Voxtral configuration and qualification](docs/voxtral-realtime.md).
 
 Nemotron realtime service settings include:
 

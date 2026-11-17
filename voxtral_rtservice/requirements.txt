@@ -1,0 +1,12 @@
+# Keep this runtime separate from Qwen and the lightweight shared CI pins.
+grpcio==1.78.0
+protobuf==6.33.6
+prometheus-client==0.23.1
+opentelemetry-sdk==1.40.0
+opentelemetry-exporter-otlp==1.40.0
+mistral-common[audio]==1.12.0
+soundfile==0.13.1
+soxr==1.0.0
+certifi==2026.10.23
+uv==0.13.4
+hf-xet==1.8.0
