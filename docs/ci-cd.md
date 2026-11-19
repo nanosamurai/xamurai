@@ -55,7 +55,11 @@ settings suitable for CI. They do not run for pull requests. Gated model access
 is provided through the minimum required `HF_TOKEN` repository secret only on
 trusted post-merge, manually dispatched, or scheduled runs.
 
-Both ML lanes use Python 3.13 and the active-image security constraints.
+Both ML lanes use Python 3.13 and the active-image constraints, which pin the
+Torch 2.8 family and the security patch levels. The images preinstall the CUDA
+12.8 Torch build and the lanes the CPU build; the shared pin stops pip from
+replacing either with a newer PyPI Torch when a transitive dependency asks for
+one, so lanes and images resolve the same packages.
 They use Ubuntu 24.04 runners so system FFmpeg stays within TorchCodec 0.7's
 supported major versions (4–7). Revisit this runner pin when upgrading TorchCodec.
 System packages come from Ubuntu's official HTTPS archive with APT signature checks.
@@ -65,6 +69,14 @@ Checkpoint integrity, safe-loading and native audio-decoder compatibility tests 
 retains installers for local test setup. Released runtime targets remove pip,
 ensurepip and wheel after dependency checks; install test tools in a separate
 test image rather than changing a deployed worker.
+
+GitHub-hosted runners have no GPU, so the lanes cannot show whether an image
+runs on one. CTranslate2 loads cuBLAS (`libcublas.so.12` today) by name on
+first GPU use, and the rtservice image puts the cuBLAS wheel directory on
+`LD_LIBRARY_PATH` for it. The build fails unless the cuBLAS version that
+CTranslate2 names loads before Torch is imported, Torch ships the same CUDA
+major version and TorchCodec loads against Torch. None of these checks needs a
+GPU.
 
 The repository ruleset for `master` must require these successful checks before
 merge:
