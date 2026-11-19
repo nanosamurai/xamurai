@@ -1,5 +1,16 @@
-# Shared security patch levels for the recorder, Faster-Whisper and WhisperX.
-# Other model families have separate compatibility requirements.
+# Shared pins for the recorder, Faster-Whisper and WhisperX images and their
+# integration lanes. Other model families have separate compatibility requirements.
+
+# Torch family. The images preinstall the CUDA 12.8 build of Torch 2.8:
+# CTranslate2 (Faster-Whisper) loads CUDA 12 cuBLAS from Torch's NVIDIA wheels,
+# and TorchCodec 0.7 and WhisperX 3.8 support only Torch 2.8. Without these pins
+# pip may replace the preinstalled build with a newer PyPI release for another
+# CUDA major version when a transitive dependency asks for a newer Torch.
+# "==2.8.0" also matches the local +cu128 and +cpu builds.
+torch==2.8.0
+torchaudio==2.8.0
+
+# Security patch levels.
 certifi==2026.10.23
 setuptools==84.2.1
 urllib3==2.8.0

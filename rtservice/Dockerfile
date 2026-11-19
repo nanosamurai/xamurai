@@ -32,7 +32,8 @@ RUN python -m venv /opt/venv \
 # Install deps. Torch wheels are CUDA-enabled when available.
 # NOTE: if CUDA wheels for py3.13 are unavailable, this layer will fail.
 # 1) Install torch from the PyTorch CUDA index
-# Keep torch pinned to reduce resolver conflicts across services.
+# Keep torch pinned to reduce resolver conflicts across services. The Torch pins
+# in constraints.active-speech.txt stop step 2 from replacing this CUDA build.
 RUN pip install --no-deps \
       "torch==2.8.0+cu128" \
       "torchaudio==2.8.0+cu128" \
@@ -60,6 +61,46 @@ RUN pip install -c /opt/constraints.active-speech.txt \
       opentelemetry-sdk \
       opentelemetry-exporter-otlp-proto-grpc \
     && pip check
+
+# CTranslate2 (Faster-Whisper) loads CUDA 12 cuBLAS by soname and does not look
+# inside Python packages. The provider imports Torch first, which preloads the
+# library, but point the loader at the cuBLAS wheel installed for Torch so GPU
+# inference does not depend on that import order. The directory stays
+# root-owned, so the runtime user cannot plant libraries there.
+ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.13/site-packages/nvidia/cublas/lib
+
+# Fail the build if the image cannot run Faster-Whisper on a GPU. CTranslate2
+# loads cuBLAS only on first GPU use, so read the cuBLAS soname from its library
+# and load it before importing Torch; this exercises the loader path above and
+# follows CTranslate2 if a release moves to another CUDA major version. Torch
+# must ship that same CUDA major. TorchCodec fails to import when its native
+# library does not match the installed Torch. None of these checks needs a GPU.
+RUN python -I -B - <<'EOF'
+import ctypes
+import pathlib
+import re
+
+import ctranslate2
+
+ct2_libs = pathlib.Path(ctranslate2.__file__).parent.with_name("ctranslate2.libs")
+sonames = {
+    name.decode()
+    for lib in ct2_libs.glob("libctranslate2*.so*")
+    for name in re.findall(rb"libcublas\.so\.\d+", lib.read_bytes())
+}
+if len(sonames) != 1:
+    raise SystemExit(f"expected one cuBLAS soname in CTranslate2, found {sorted(sonames)}")
+(soname,) = sonames
+ctypes.CDLL(soname)
+
+import torch
+
+cuda_major = soname.rsplit(".", 1)[1]
+if (torch.version.cuda or "").split(".")[0] != cuda_major:
+    raise SystemExit(f"CTranslate2 needs CUDA {cuda_major}, found Torch {torch.__version__}")
+
+import torchcodec.decoders
+EOF
 
 FROM dependencies AS runtime
 
