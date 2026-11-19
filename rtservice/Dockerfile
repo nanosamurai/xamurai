@@ -32,7 +32,8 @@ RUN python -m venv /opt/venv \
 # Install deps. Torch wheels are CUDA-enabled when available.
 # NOTE: if CUDA wheels for py3.13 are unavailable, this layer will fail.
 # 1) Install torch from the PyTorch CUDA index
-# Keep torch pinned to reduce resolver conflicts across services.
+# Keep torch pinned to reduce resolver conflicts across services. The Torch pins
+# in constraints.active-speech.txt stop step 2 from replacing this CUDA build.
 RUN pip install --no-deps \
       "torch==2.8.0+cu128" \
       "torchaudio==2.8.0+cu128" \
